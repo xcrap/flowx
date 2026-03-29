@@ -38,12 +38,14 @@ struct ContentAreaView: View {
         if agent.workspace.splitOpen, agent.workspace.splitContent == .browser {
             HSplitView {
                 ConversationView(agent: agent)
+                    .id(agent.id)
                     .frame(minWidth: 480)
                 splitContentView(agent: agent)
                     .frame(minWidth: 250)
             }
         } else {
             ConversationView(agent: agent)
+                .id(agent.id)
         }
     }
 

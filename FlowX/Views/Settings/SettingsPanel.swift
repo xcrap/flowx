@@ -208,6 +208,7 @@ struct SettingsPanel: View {
             } label: {
                 settingsValueLabel(value, enabled: enabled)
             }
+            .menuIndicator(.hidden)
             .menuStyle(.borderlessButton)
             .disabled(!enabled)
         }

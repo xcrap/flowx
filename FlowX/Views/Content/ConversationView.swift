@@ -9,6 +9,7 @@ struct ConversationView: View {
 
     @State private var editingQueuedPromptIndex: Int?
     @State private var editingQueuedPromptText = ""
+    @State private var initialScrollRestorePending = true
 
     private let maxContentWidth: CGFloat = 920
 
@@ -51,15 +52,20 @@ struct ConversationView: View {
                 .padding(.bottom, FXSpacing.md)
                 .background(
                     ConversationScrollBridge(
+                        restoreKey: agent.id,
                         desiredOffset: agent.workspace.conversationScrollOffset,
                         stickToBottom: agent.workspace.conversationPinnedToBottom,
                         contentVersion: contentVersion
                     ) { offset, maxOffset in
                         updateScrollState(offset: offset, maxOffset: maxOffset)
+                    } onInitialRestoreCompleted: {
+                        initialScrollRestorePending = false
                     }
                 )
             }
             .scrollContentBackground(.hidden)
+            .opacity(initialScrollRestorePending ? 0 : 1)
+            .allowsHitTesting(!initialScrollRestorePending)
 
             if agent.conversationState.pendingToolApprovalCount > 0 {
                 approvalTray
@@ -650,10 +656,12 @@ struct ConversationView: View {
 }
 
 private struct ConversationScrollBridge: NSViewRepresentable {
+    var restoreKey: UUID
     var desiredOffset: CGFloat
     var stickToBottom: Bool
     var contentVersion: Int
     var onScrollChange: (CGFloat, CGFloat) -> Void
+    var onInitialRestoreCompleted: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onScrollChange: onScrollChange)
@@ -663,7 +671,13 @@ private struct ConversationScrollBridge: NSViewRepresentable {
         let view = NSView(frame: .zero)
         DispatchQueue.main.async {
             context.coordinator.attachIfNeeded(to: view)
-            context.coordinator.applyScrollPosition(desiredOffset: desiredOffset, stickToBottom: stickToBottom)
+            context.coordinator.prepareForRestore(restoreKey)
+            context.coordinator.scheduleInitialRestore(
+                for: restoreKey,
+                desiredOffset: desiredOffset,
+                stickToBottom: stickToBottom,
+                onInitialRestoreCompleted: onInitialRestoreCompleted
+            )
         }
         return view
     }
@@ -671,7 +685,17 @@ private struct ConversationScrollBridge: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.onScrollChange = onScrollChange
         context.coordinator.attachIfNeeded(to: nsView)
-        context.coordinator.applyScrollPosition(desiredOffset: desiredOffset, stickToBottom: stickToBottom)
+        context.coordinator.prepareForRestore(restoreKey)
+        if context.coordinator.hasCompletedInitialRestore {
+            context.coordinator.applyScrollPosition(desiredOffset: desiredOffset, stickToBottom: stickToBottom)
+        } else {
+            context.coordinator.scheduleInitialRestore(
+                for: restoreKey,
+                desiredOffset: desiredOffset,
+                stickToBottom: stickToBottom,
+                onInitialRestoreCompleted: onInitialRestoreCompleted
+            )
+        }
         _ = contentVersion
     }
 
@@ -687,9 +711,19 @@ private struct ConversationScrollBridge: NSViewRepresentable {
         private weak var clipView: NSClipView?
         private var observingScrollBounds = false
         private var isApplyingProgrammaticScroll = false
+        private var activeRestoreKey: UUID?
+        private var pendingInitialRestore = false
+        fileprivate var hasCompletedInitialRestore = false
 
         init(onScrollChange: @escaping (CGFloat, CGFloat) -> Void) {
             self.onScrollChange = onScrollChange
+        }
+
+        func prepareForRestore(_ restoreKey: UUID) {
+            guard activeRestoreKey != restoreKey else { return }
+            activeRestoreKey = restoreKey
+            pendingInitialRestore = false
+            hasCompletedInitialRestore = false
         }
 
         func attachIfNeeded(to view: NSView) {
@@ -707,8 +741,6 @@ private struct ConversationScrollBridge: NSViewRepresentable {
                 object: scrollView.contentView
             )
             observingScrollBounds = true
-
-            reportScrollPosition()
         }
 
         func detach() {
@@ -718,6 +750,37 @@ private struct ConversationScrollBridge: NSViewRepresentable {
             observingScrollBounds = false
             scrollView = nil
             clipView = nil
+        }
+
+        func scheduleInitialRestore(
+            for restoreKey: UUID,
+            desiredOffset: CGFloat,
+            stickToBottom: Bool,
+            onInitialRestoreCompleted: @escaping () -> Void
+        ) {
+            guard activeRestoreKey == restoreKey, !pendingInitialRestore, !hasCompletedInitialRestore else { return }
+            pendingInitialRestore = true
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.activeRestoreKey == restoreKey else { return }
+                guard self.scrollView != nil, self.clipView != nil else {
+                    self.pendingInitialRestore = false
+                    return
+                }
+                self.applyScrollPosition(desiredOffset: desiredOffset, stickToBottom: stickToBottom)
+
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.activeRestoreKey == restoreKey else { return }
+                    guard self.scrollView != nil, self.clipView != nil else {
+                        self.pendingInitialRestore = false
+                        return
+                    }
+                    self.applyScrollPosition(desiredOffset: desiredOffset, stickToBottom: stickToBottom)
+                    self.pendingInitialRestore = false
+                    self.hasCompletedInitialRestore = true
+                    onInitialRestoreCompleted()
+                }
+            }
         }
 
         func applyScrollPosition(desiredOffset: CGFloat, stickToBottom: Bool) {
