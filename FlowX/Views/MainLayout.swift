@@ -20,7 +20,7 @@ struct MainLayout: View {
     @State private var rightPanelHandleHovered = false
 
     private let rightPanelHandleWidth: CGFloat = 5
-    private let titleBarHeight: CGFloat = 38
+    private let titleBarHeight: CGFloat = 44
     private let settingsPanelWidth: CGFloat = 420
 
     var body: some View {
@@ -273,7 +273,7 @@ struct MainLayout: View {
             }
             .padding(.trailing, FXSpacing.md)
         }
-        .frame(height: 38)
+        .frame(height: 44)
         .background(FXColors.bgElevated)
         .overlay(alignment: .bottom) { FXDivider() }
     }
