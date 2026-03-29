@@ -5,8 +5,6 @@ Native macOS app for orchestrating AI conversations, browser previews, git inspe
 ## Current Direction
 
 - This repo is the node-free evolution of `/Users/xcrap/projects/flow`
-- Reuse the provider, conversation, terminal, and git foundations from Flow
-- Ship them inside the stronger FlowX mockup and shell
 - `plan.md` is the source of truth for remaining work
 
 ## Architecture
