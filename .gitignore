@@ -4,3 +4,4 @@ dist/
 DerivedData/
 .swiftpm/
 .DS_Store
+.claude
