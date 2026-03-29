@@ -30,6 +30,7 @@ struct FlowXApp: App {
                     )
                 )
         }
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1400, height: 900)
         .commands {
             FlowXCommands(appState: appState)
@@ -72,6 +73,13 @@ struct WindowAccessor: NSViewRepresentable {
 
         // Window draggable from our custom title bar area
         window.isMovableByWindowBackground = false
+
+        // Keep traffic lights visible but tinted to match the UI
+        for buttonType: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            if let button = window.standardWindowButton(buttonType) {
+                button.alphaValue = 0.7
+            }
+        }
 
         // Nuke every NSVisualEffectView
         killVibrancy(in: window.contentView?.superview)

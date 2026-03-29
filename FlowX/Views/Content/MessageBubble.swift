@@ -45,13 +45,13 @@ struct MessageBubble: View {
                     contentView(for: item)
                 }
             }
-            .padding(.horizontal, FXSpacing.xl)
-            .padding(.vertical, FXSpacing.lg)
-            .background(isUser ? FXColors.accent.opacity(0.12) : FXColors.bgSurface)
-            .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
+            .padding(.horizontal, isUser ? FXSpacing.xl : 0)
+            .padding(.vertical, isUser ? FXSpacing.lg : FXSpacing.xs)
+            .background(isUser ? FXColors.accent.opacity(0.12) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: isUser ? FXRadii.xl : 0))
             .overlay(
-                RoundedRectangle(cornerRadius: FXRadii.xl)
-                    .strokeBorder(isUser ? FXColors.accent.opacity(0.2) : FXColors.border, lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: isUser ? FXRadii.xl : 0)
+                    .strokeBorder(isUser ? FXColors.accent.opacity(0.2) : Color.clear, lineWidth: 0.5)
             )
 
             if !isUser { Spacer(minLength: 80) }

@@ -19,7 +19,7 @@ struct MainLayout: View {
     @State private var liveRightPanelWidth: CGFloat?
     @State private var rightPanelHandleHovered = false
 
-    private let rightPanelHandleWidth: CGFloat = 12
+    private let rightPanelHandleWidth: CGFloat = 5
     private let titleBarHeight: CGFloat = 48
     private let settingsPanelWidth: CGFloat = 420
 
@@ -74,6 +74,7 @@ struct MainLayout: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(width: displayedRightPanelWidth(in: totalWidth))
+        .background(FXColors.panelBg)
     }
 
     private func rightPanelContainer(totalWidth: CGFloat) -> some View {

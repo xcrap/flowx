@@ -12,11 +12,11 @@ public struct FXDivider: View {
         case .horizontal:
             Rectangle()
                 .fill(FXColors.border)
-                .frame(height: 0.5)
+                .frame(height: 1)
         case .vertical:
             Rectangle()
                 .fill(FXColors.border)
-                .frame(width: 0.5)
+                .frame(width: 1)
         }
     }
 }

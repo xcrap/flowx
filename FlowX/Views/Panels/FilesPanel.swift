@@ -35,7 +35,7 @@ struct FilesPanel: View {
                         .padding(.horizontal, FXSpacing.sm)
                         .padding(.vertical, FXSpacing.sm)
                     }
-                    .background(FXColors.bg)
+                    .background(FXColors.panelBg)
                 }
             }
             .onAppear {
@@ -116,7 +116,7 @@ struct FilesPanel: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(FXColors.bg)
+        .background(FXColors.panelBg)
     }
 
     private func buildTree(from paths: [String], prefix: String = "") -> [FileTreeNode] {

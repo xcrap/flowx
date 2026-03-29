@@ -101,7 +101,7 @@ struct DiffView: View {
     @State private var liveChangedFilesRailWidth: CGFloat?
     @State private var changedFilesResizeHandleHovered = false
 
-    private let changedFilesResizeHandleWidth: CGFloat = 10
+    private let changedFilesResizeHandleWidth: CGFloat = 5
     private let diffSectionAccessoryWidth: CGFloat = 28
 
     var body: some View {
@@ -111,7 +111,7 @@ struct DiffView: View {
                 FXDivider()
                 content(project)
             }
-            .background(FXColors.bg)
+            .background(FXColors.panelBg)
             .task(id: diffTaskKey(for: project)) {
                 await loadProjectDiff(for: project)
             }
@@ -199,7 +199,7 @@ struct DiffView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(FXColors.bg)
+        .background(FXColors.panelBg)
     }
 
     private func comparisonModePicker(_ project: ProjectState) -> some View {
@@ -276,7 +276,7 @@ struct DiffView: View {
                 diffCanvas(project: project, sections: sections, scrollTargetPath: scrollTargetPath)
                     .frame(width: layout.diffWidth, alignment: .leading)
                     .frame(maxHeight: .infinity, alignment: .topLeading)
-                    .background(FXColors.bg)
+                    .background(FXColors.panelBg)
                     .clipped()
 
                 if showsFilesRail, layout.railWidth > 0 {
@@ -285,7 +285,7 @@ struct DiffView: View {
                     changedFilesSidebar(project: project, sections: fileSections)
                         .frame(width: layout.railWidth, alignment: .leading)
                         .frame(maxHeight: .infinity, alignment: .topLeading)
-                        .background(FXColors.bg)
+                        .background(FXColors.panelBg)
                         .clipped()
                 }
             }
@@ -415,7 +415,7 @@ struct DiffView: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.lg)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                .strokeBorder(FXColors.border, lineWidth: 0.5)
         )
     }
 
@@ -463,7 +463,7 @@ struct DiffView: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.lg)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                .strokeBorder(FXColors.border, lineWidth: 0.5)
         )
     }
 
@@ -560,7 +560,7 @@ struct DiffView: View {
                 .padding(.horizontal, FXSpacing.sm)
                 .padding(.vertical, FXSpacing.md)
             }
-            .background(FXColors.bg)
+            .background(FXColors.panelBg)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -739,7 +739,7 @@ struct DiffView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(FXColors.bg)
+        .background(FXColors.panelBg)
     }
 
     private func lineNumberCell(_ value: Int?, width: CGFloat, emphasis: LineNumberEmphasis) -> some View {

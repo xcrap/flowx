@@ -224,7 +224,7 @@ struct BrowserPanel: View {
 
             ZStack(alignment: .topTrailing) {
                 BrowserWebView(model: browser)
-                    .background(FXColors.bg)
+                    .background(FXColors.panelBg)
 
                 if browser.isLoading {
                     ProgressView()
@@ -233,7 +233,7 @@ struct BrowserPanel: View {
                 }
             }
         }
-        .background(FXColors.bg)
+        .background(FXColors.panelBg)
         .task(id: agent.id) {
             browser.setCommittedURLChangeHandler { [weak agent] committedURL in
                 guard let agent, agent.workspace.browserURLString != committedURL else { return }

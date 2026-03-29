@@ -87,10 +87,10 @@ public enum FXTextSizePreset: String, CaseIterable, Codable {
 private struct ToneScale {
     let s: [Color] // 11 shades: [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950]
 
-    // Slate — desaturated cool gray, subtle blue undertone (not strongly blue)
+    // Slate — desaturated cool gray, barely perceptible cool undertone
     static let slate = ToneScale(s: [
-        h(0xF8F9FA), h(0xF1F3F5), h(0xE2E5E9), h(0xCDD1D8), h(0x939AA5),
-        h(0x6B7280), h(0x4B5563), h(0x374151), h(0x1F2937), h(0x111827), h(0x030712),
+        h(0xF9F9FA), h(0xF3F3F4), h(0xE4E5E7), h(0xD1D3D6), h(0x989BA1),
+        h(0x6F7279), h(0x50545B), h(0x3C4047), h(0x24272C), h(0x16181D), h(0x0A0B0E),
     ])
     static let zinc = ToneScale(s: [
         h(0xFAFAFA), h(0xF4F4F5), h(0xE4E4E7), h(0xD4D4D8), h(0x9F9FA9),
@@ -160,11 +160,11 @@ private struct FXPalette {
         let t = ToneScale.forTone(tone)
 
         if dark {
-            // Dark: 950=bg, 900=elevated, 800=surface, 400=fgSecondary, 50=fg
+            // Dark: 900=bg, 800=elevated, 700=surface, 400=fgSecondary, 50=fg
             return FXPalette(
-                bg:           t.s[10], // 950
-                bgElevated:   t.s[9],  // 900
-                bgSurface:    t.s[8],  // 800
+                bg:           t.s[9],  // 900
+                bgElevated:   t.s[8],  // 800
+                bgSurface:    t.s[7],  // 700
                 bgHover:      Color.white.opacity(0.04),
                 bgSelected:   Color.white.opacity(0.08),
                 bgPressed:    Color.white.opacity(0.06),
@@ -172,12 +172,12 @@ private struct FXPalette {
                 fgSecondary:  t.s[4],  // 400
                 fgTertiary:   t.s[5],  // 500
                 fgQuaternary: Color.white.opacity(0.24),
-                border:       t.s[7].opacity(0.6),  // 700
-                borderMedium: t.s[7],  // 700
+                border:       t.s[6].opacity(0.6),  // 600
+                borderMedium: t.s[6],  // 600
                 borderSubtle: Color.white.opacity(0.06),
                 overlay:      Color.black.opacity(0.5),
                 overlayLight: Color.black.opacity(0.3),
-                terminalBg:   t.s[10].opacity(0.85), // 950 slightly transparent
+                terminalBg:   t.s[9].opacity(0.85), // 900 slightly transparent
                 // Semantic — brighter on dark backgrounds
                 success:      h(0x34D399),
                 warning:      h(0xFBBF24),
@@ -189,7 +189,7 @@ private struct FXPalette {
                 diffAddedFg:   h(0x34D399),
                 diffRemovedFg: h(0xF87171),
                 diffContextBg: Color.clear,
-                windowBackground: NSColor(t.s[10])
+                windowBackground: NSColor(t.s[8])
             )
         } else {
             // Light: 50=bg, 100=elevated, 200=surface, 500=fgSecondary, 900=fg
@@ -329,7 +329,7 @@ public enum FXColors {
 
 public extension FXColors {
     static var sidebarBg: Color { bgElevated }
-    static var contentBg: Color { bg }
+    static var contentBg: Color { bgElevated }
     static var panelBg: Color { bgElevated }
     static var inputBg: Color { bgSurface }
     static var terminalBg: Color { FXTheme.currentPalette.terminalBg }

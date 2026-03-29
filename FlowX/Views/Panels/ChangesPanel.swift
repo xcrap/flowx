@@ -79,7 +79,7 @@ struct ChangesPanel: View {
                 .padding(.horizontal, FXSpacing.sm)
                 .padding(.vertical, FXSpacing.sm)
             }
-            .background(FXColors.bg)
+            .background(FXColors.panelBg)
         }
     }
 
@@ -180,7 +180,7 @@ struct ChangesPanel: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(FXColors.bg)
+        .background(FXColors.panelBg)
     }
 
     private func summaryText(for project: ProjectState) -> String? {
