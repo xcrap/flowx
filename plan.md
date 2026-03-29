@@ -33,10 +33,11 @@ The app is no longer just a visual mockup. The FlowX shell now builds against re
 - Per-project agent restore, stale-session restart recovery, and image-payload cleanup in persisted conversation history
 - Capped retained conversation history plus broader accessibility coverage across shell controls and inspector search
 
-**Core shell status:** feature-complete for the planned rebuild scope. Remaining work from here is iterative product polish driven by real usage, not missing foundational capabilities.
+**Core shell status:** complete for the planned rebuild scope.
 
-**Active next slice:**
-- Keep tightening interaction polish and bug fixes from hands-on use of the shell
+**Plan closeout:**
+- All seven implementation phases below are complete in the current app.
+- Further work from here is post-plan product iteration: bug fixes, taste-level polish, and new features driven by real usage.
 
 ---
 
@@ -170,7 +171,7 @@ The app is no longer just a visual mockup. The FlowX shell now builds against re
 
 **Goal:** A running app with the complete visual design, mock data, and all micro-animations — but no real provider integration. This IS the mockup.
 
-**Status:** 🟡 Implemented and usable — visual shell is in place, now being converted from mock behaviors to real app behaviors.
+**Status:** 🟢 Complete.
 
 ### 1a. Design System (FXDesign package)
 
@@ -272,7 +273,7 @@ Each agent's content area has this vertical layout:
 
 **Goal:** All reusable business logic from `flow` running in FlowX packages.
 
-**Status:** 🟢 Largely complete.
+**Status:** 🟢 Complete.
 
 ### 2a. FXCore Models
 - Fork `Project.swift` — remove `canvasOffset`, `canvasZoom`; add `agentOrder: [UUID]`
@@ -296,7 +297,7 @@ Each agent's content area has this vertical layout:
 
 **Goal:** Real state management replacing mock data, persistence working.
 
-**Status:** 🟢 Baseline complete, with ongoing UX refinement.
+**Status:** 🟢 Complete.
 
 ### 3a. AppState (new design)
 ```swift
@@ -366,7 +367,7 @@ Each agent gets its own `WorkspaceState` so split/terminal preferences are indep
 
 **Goal:** Actually talk to Claude Code and Codex.
 
-**Status:** 🟢 Provider runtime, queued prompt UX, persisted session resume, supervised approval handling, retry recovery, and token/context status are in.
+**Status:** 🟢 Complete.
 
 - Wire `ProviderRegistry` registration in app startup
 - Wire `RuntimeDiscovery` for binary detection + health monitoring
@@ -382,7 +383,7 @@ Each agent gets its own `WorkspaceState` so split/terminal preferences are indep
 
 **Goal:** Real git status, diff viewing, and WebKit browser.
 
-**Status:** 🟢 Git polling, searchable files, staged/unstaged/base inspection, inline/split diff rendering, inline commit/push workflow, and WebKit browser are in.
+**Status:** 🟢 Complete.
 
 ### 5a. Git
 - Port `GitStatusService` with 5s polling
@@ -395,6 +396,7 @@ Each agent gets its own `WorkspaceState` so split/terminal preferences are indep
 - Custom SwiftUI diff renderer OR WKWebView with highlight.js
 - Show file diffs when selecting a file in CHANGES panel
 - Side-by-side and inline diff modes
+- Project-level split diff view with per-file sections and file jump targets
 
 ### 5c. WebKit Browser
 - `WKWebView` wrapped in `NSViewRepresentable`
@@ -408,7 +410,7 @@ Each agent gets its own `WorkspaceState` so split/terminal preferences are indep
 
 **Goal:** Each agent gets a real terminal session in the bottom panel.
 
-**Status:** 🟢 Baseline complete.
+**Status:** 🟢 Complete.
 
 - Port `TerminalSession` + SwiftTerm `LocalProcessTerminalView` via `NSViewRepresentable`
 - Wire `TerminalPanel.swift` to real `TerminalSession` (replaces mock)
@@ -423,6 +425,8 @@ Each agent gets its own `WorkspaceState` so split/terminal preferences are indep
 ## Phase 7 — Polish & Performance
 
 **Goal:** Ship-quality experience.
+
+**Status:** 🟢 Complete.
 
 - Keyboard shortcuts: ⌘B (sidebar), ⌘1-9 (agents), ⌘\ (right panel), ⌘` (terminal), ⌘, (settings), ⌘⇧P (command palette)
 - Command palette (searchable actions for repositories, agents, panels, browser, and settings)
