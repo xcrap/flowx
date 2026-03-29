@@ -47,8 +47,7 @@ struct FlowXCommands: Commands {
             if let project = appState.activeProject, !project.agents.isEmpty {
                 ForEach(Array(project.agents.prefix(9).enumerated()), id: \.element.id) { index, agent in
                     Button("Select \(agent.title)") {
-                        appState.activeProjectID = project.id
-                        appState.activeAgentID = agent.id
+                        appState.activateAgent(agent.id, in: project.id)
                     }
                     .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
                 }

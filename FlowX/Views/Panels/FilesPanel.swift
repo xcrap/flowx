@@ -63,6 +63,8 @@ struct FilesPanel: View {
                 .textFieldStyle(.plain)
                 .font(FXTypography.caption)
                 .foregroundStyle(FXColors.fgSecondary)
+                .accessibilityLabel("Search project files")
+                .accessibilityHint("Filter the file tree by file or folder name.")
 
             if !searchText.isEmpty {
                 Button(action: { searchText = "" }) {
@@ -71,6 +73,8 @@ struct FilesPanel: View {
                         .foregroundStyle(FXColors.fgQuaternary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Clear file search")
+                .accessibilityHint("Show the full file tree again.")
             }
         }
         .padding(.horizontal, FXSpacing.md)
@@ -249,6 +253,9 @@ private struct FilesTreeRow: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("\(node.name) folder")
+                .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+                .accessibilityHint("Show or hide nested files.")
 
                 if isExpanded {
                     ForEach(node.children) { child in
@@ -293,6 +300,9 @@ private struct FilesTreeRow: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(node.name)
+                .accessibilityValue(isSelected ? "Selected" : "Not selected")
+                .accessibilityHint("Open this file in the inspector.")
             }
         }
     }

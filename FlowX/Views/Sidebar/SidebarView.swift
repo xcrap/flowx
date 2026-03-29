@@ -25,11 +25,11 @@ struct SidebarView: View {
 
             FXDivider()
 
-            Button(action: { appState.openAddRepositoryPanel() }) {
+            Button(action: { appState.openAddProjectPanel() }) {
                 HStack(spacing: FXSpacing.sm) {
                     Image(systemName: "folder.badge.plus")
                         .font(.system(size: 12, weight: .medium))
-                    Text("Add Repository")
+                    Text("Add Project")
                         .font(FXTypography.bodyMedium)
                     Spacer()
                 }
@@ -41,8 +41,8 @@ struct SidebarView: View {
         }
         .background(FXColors.sidebarBg)
         .contextMenu {
-            Button(action: { appState.openAddRepositoryPanel() }) {
-                Label("Add Repository", systemImage: "folder.badge.plus")
+            Button(action: { appState.openAddProjectPanel() }) {
+                Label("Add Project", systemImage: "folder.badge.plus")
             }
         }
     }
@@ -54,7 +54,7 @@ struct SidebarView: View {
                 .foregroundStyle(FXColors.fgTertiary)
 
             VStack(alignment: .leading, spacing: FXSpacing.xs) {
-                Text("No repositories yet")
+                Text("No projects yet")
                     .font(FXTypography.title3)
                     .foregroundStyle(FXColors.fgSecondary)
 

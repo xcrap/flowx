@@ -15,6 +15,7 @@ private struct ParsedDiffLine: Identifiable {
     let text: String
     let oldLine: Int?
     let newLine: Int?
+    let anchorPath: String?
 }
 
 private enum SplitDiffSideKind {
@@ -39,10 +40,31 @@ private struct SplitDiffRow: Identifiable {
     let newText: String
     let oldSide: SplitDiffSideKind
     let newSide: SplitDiffSideKind
+    let anchorPath: String?
+}
+
+private struct DiffTaskKey: Equatable {
+    let projectID: UUID
+    let mode: InspectorComparisonMode
+    let fileSignature: String
+}
+
+private struct DiffSection: Identifiable {
+    let id: String
+    let path: String?
+    let title: String
+    let subtitle: String?
+    let additions: Int
+    let deletions: Int
+    let parsedLines: [ParsedDiffLine]
+    let splitRows: [SplitDiffRow]
 }
 
 struct DiffView: View {
     @Environment(AppState.self) private var appState
+
+    @State private var projectDiffText = ""
+    @State private var isLoadingDiff = false
 
     var body: some View {
         if let project = appState.activeProject {
@@ -52,43 +74,45 @@ struct DiffView: View {
                 content(project)
             }
             .background(FXColors.bg)
+            .task(id: diffTaskKey(for: project)) {
+                await loadProjectDiff(for: project)
+            }
         } else {
             messageView(
-                title: "Nothing selected",
-                body: "Choose a changed file or repository file to inspect it."
+                title: "No project selected",
+                body: "Open a git-backed project to inspect its current diff."
             )
         }
     }
 
     private func header(_ project: ProjectState) -> some View {
-        HStack(spacing: FXSpacing.md) {
-            Image(systemName: leadingIcon(for: project.selectedInspectorContentKind))
+        let visibleFiles = visibleDiffFiles(for: project)
+
+        return HStack(spacing: FXSpacing.md) {
+            Image(systemName: "arrow.left.arrow.right.square")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(FXColors.fgTertiary)
 
             VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
-                Text(displayTitle(for: project.selectedInspectorPath))
+                Text(diffTitle(for: visibleFiles.count, mode: project.inspectorComparisonMode))
                     .font(FXTypography.captionMedium)
                     .foregroundStyle(FXColors.fgSecondary)
                     .lineLimit(1)
 
-                if let subtitle = displaySubtitle(for: project.selectedInspectorPath) {
-                    Text(subtitle)
-                        .font(FXTypography.caption)
-                        .foregroundStyle(FXColors.fgTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
+                Text(project.project.name)
+                    .font(FXTypography.caption)
+                    .foregroundStyle(FXColors.fgTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
 
             Spacer(minLength: 0)
 
-            if project.selectedInspectorContentKind == .diff {
-                diffDisplayModePicker(project)
-            }
+            comparisonModePicker(project)
+            diffDisplayModePicker(project)
 
             FXBadge(project.inspectorComparisonMode.rawValue, tone: .accent)
-            FXBadge(kindTitle(for: project.selectedInspectorContentKind), tone: badgeTone(for: project.selectedInspectorContentKind))
+            FXBadge(visibleFiles.count == 1 ? "1 file" : "\(visibleFiles.count) files", tone: .info)
         }
         .padding(.horizontal, FXSpacing.md)
         .padding(.vertical, FXSpacing.sm)
@@ -97,22 +121,70 @@ struct DiffView: View {
 
     @ViewBuilder
     private func content(_ project: ProjectState) -> some View {
-        switch project.selectedInspectorContentKind {
-        case .diff:
-            if project.inspectorDiffDisplayMode == .split {
-                splitDiffView(text: project.selectedInspectorText)
-            } else {
-                diffView(text: project.selectedInspectorText)
-            }
-        case .file:
-            fileView(text: project.selectedInspectorText)
-        case .message:
+        let visibleFiles = visibleDiffFiles(for: project)
+
+        if !project.gitInfo.isGitRepo {
             messageView(
-                title: displayTitle(for: project.selectedInspectorPath),
-                body: project.selectedInspectorText.isEmpty
-                    ? "Choose a changed file or repository file to inspect it."
-                    : project.selectedInspectorText
+                title: "No git repository",
+                body: "Open a git-backed folder to inspect its current diff."
             )
+        } else if visibleFiles.isEmpty {
+            messageView(
+                title: emptyStateTitle(for: project.inspectorComparisonMode),
+                body: emptyStateBody(for: project.inspectorComparisonMode)
+            )
+        } else if isLoadingDiff && projectDiffText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            loadingView
+        } else if projectDiffText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            messageView(
+                title: "Diff unavailable",
+                body: "FlowX could not build a git diff for the current project state."
+            )
+        } else if project.inspectorDiffDisplayMode == .split {
+            splitDiffView(text: projectDiffText, scrollTargetPath: project.selectedInspectorPath)
+        } else {
+            diffView(text: projectDiffText, scrollTargetPath: project.selectedInspectorPath)
+        }
+    }
+
+    private var loadingView: some View {
+        VStack(spacing: FXSpacing.md) {
+            ProgressView()
+                .controlSize(.small)
+
+            VStack(spacing: FXSpacing.xs) {
+                Text("Loading git diff")
+                    .font(FXTypography.bodyMedium)
+                    .foregroundStyle(FXColors.fgSecondary)
+
+                Text("Collecting the current project changes.")
+                    .font(FXTypography.caption)
+                    .foregroundStyle(FXColors.fgTertiary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(FXColors.bg)
+    }
+
+    private func comparisonModePicker(_ project: ProjectState) -> some View {
+        HStack(spacing: FXSpacing.xxs) {
+            ForEach(InspectorComparisonMode.allCases, id: \.self) { mode in
+                Button(action: {
+                    withAnimation(FXAnimation.quick) {
+                        appState.setInspectorComparisonMode(mode, for: project)
+                    }
+                }) {
+                    Text(mode.rawValue)
+                        .font(FXTypography.captionMedium)
+                        .foregroundStyle(project.inspectorComparisonMode == mode ? FXColors.fg : FXColors.fgTertiary)
+                        .padding(.horizontal, FXSpacing.sm)
+                        .padding(.vertical, FXSpacing.xxxs)
+                        .background(project.inspectorComparisonMode == mode ? FXColors.bgSelected : .clear)
+                        .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
+                }
+                .buttonStyle(.plain)
+                .disabled(!project.gitInfo.isGitRepo)
+            }
         }
     }
 
@@ -137,104 +209,177 @@ struct DiffView: View {
         }
     }
 
-    private func fileView(text: String) -> some View {
-        let lines = text.components(separatedBy: .newlines)
-        let visibleLines = lines.isEmpty ? [""] : lines
-        let numberWidth = lineNumberWidth(maxLine: visibleLines.count)
-
-        return ScrollView([.vertical, .horizontal]) {
-            LazyVStack(spacing: 0) {
-                ForEach(Array(visibleLines.enumerated()), id: \.offset) { index, line in
-                    HStack(spacing: 0) {
-                        lineNumberCell(index + 1, width: numberWidth, emphasis: .neutral)
-
-                        Text(verbatim: line.isEmpty ? " " : line)
-                            .font(FXTypography.mono)
-                            .foregroundStyle(FXColors.fgSecondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, FXSpacing.md)
-                            .padding(.vertical, 1)
-                    }
-                    .background(index.isMultiple(of: 2) ? FXColors.bg.opacity(0.001) : .clear)
-                }
-            }
-            .padding(.vertical, FXSpacing.sm)
-            .textSelection(.enabled)
-        }
-    }
-
-    private func diffView(text: String) -> some View {
-        let parsedLines = parseDiff(text)
-        let maxLine = max(parsedLines.compactMap(\.oldLine).max() ?? 0, parsedLines.compactMap(\.newLine).max() ?? 0)
+    private func diffView(text: String, scrollTargetPath: String?) -> some View {
+        let sections = sections(from: text)
+        let allLines = sections.flatMap(\.parsedLines)
+        let maxLine = max(allLines.compactMap(\.oldLine).max() ?? 0, allLines.compactMap(\.newLine).max() ?? 0)
         let numberWidth = lineNumberWidth(maxLine: maxLine)
 
-        return ScrollView([.vertical, .horizontal]) {
-            LazyVStack(spacing: 0) {
-                ForEach(parsedLines) { line in
-                    HStack(spacing: 0) {
-                        lineNumberCell(line.oldLine, width: numberWidth, emphasis: line.kind == .deletion ? .deletion : .neutral)
-                        lineNumberCell(line.newLine, width: numberWidth, emphasis: line.kind == .addition ? .addition : .neutral)
+        return ScrollViewReader { proxy in
+            ScrollView([.vertical, .horizontal]) {
+                LazyVStack(spacing: FXSpacing.lg) {
+                    ForEach(sections) { section in
+                        VStack(spacing: 0) {
+                            sectionHeader(section, selectedPath: scrollTargetPath)
+                                .id(section.id)
 
-                        Text(verbatim: line.text.isEmpty ? " " : line.text)
-                            .font(FXTypography.mono)
-                            .foregroundStyle(textColor(for: line.kind))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, FXSpacing.md)
-                            .padding(.vertical, 1)
+                            ForEach(section.parsedLines) { line in
+                                HStack(spacing: 0) {
+                                    lineNumberCell(line.oldLine, width: numberWidth, emphasis: line.kind == .deletion ? .deletion : .neutral)
+                                    lineNumberCell(line.newLine, width: numberWidth, emphasis: line.kind == .addition ? .addition : .neutral)
+
+                                    Text(verbatim: line.text.isEmpty ? " " : line.text)
+                                        .font(FXTypography.mono)
+                                        .foregroundStyle(textColor(for: line.kind))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.horizontal, FXSpacing.md)
+                                        .padding(.vertical, 1)
+                                }
+                                .background(backgroundColor(for: line.kind))
+                            }
+                        }
+                        .background(FXColors.bgSurface.opacity(0.24))
+                        .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: FXRadii.lg)
+                                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                        )
                     }
-                    .background(backgroundColor(for: line.kind))
                 }
+                .padding(.horizontal, FXSpacing.md)
+                .padding(.vertical, FXSpacing.md)
+                .textSelection(.enabled)
             }
-            .padding(.vertical, FXSpacing.sm)
-            .textSelection(.enabled)
+            .onAppear {
+                scrollToSelectedFile(scrollTargetPath, using: proxy, sections: sections)
+            }
+            .onChange(of: scrollTargetPath) { _, path in
+                scrollToSelectedFile(path, using: proxy, sections: sections)
+            }
+            .onChange(of: text) { _, _ in
+                scrollToSelectedFile(scrollTargetPath, using: proxy, sections: sections)
+            }
         }
     }
 
-    private func splitDiffView(text: String) -> some View {
-        let rows = splitRows(from: parseDiff(text))
-        let maxOldLine = rows.compactMap(\.oldLine).max() ?? 0
-        let maxNewLine = rows.compactMap(\.newLine).max() ?? 0
+    private func splitDiffView(text: String, scrollTargetPath: String?) -> some View {
+        let sections = sections(from: text)
+        let allRows = sections.flatMap(\.splitRows)
+        let maxOldLine = allRows.compactMap(\.oldLine).max() ?? 0
+        let maxNewLine = allRows.compactMap(\.newLine).max() ?? 0
         let numberWidth = max(lineNumberWidth(maxLine: maxOldLine), lineNumberWidth(maxLine: maxNewLine))
 
-        return ScrollView([.vertical, .horizontal]) {
-            LazyVStack(spacing: 0) {
-                ForEach(rows) { row in
-                    switch row.kind {
-                    case .meta:
-                        splitAnnotationRow(
-                            text: row.oldText,
-                            foreground: FXColors.fgTertiary,
-                            background: FXColors.bgSurface.opacity(0.35)
-                        )
-                    case .hunk:
-                        splitAnnotationRow(
-                            text: row.oldText,
-                            foreground: FXColors.info,
-                            background: FXColors.info.opacity(0.08)
-                        )
-                    case .content:
-                        HStack(spacing: 0) {
-                            splitDiffCell(
-                                line: row.oldLine,
-                                text: row.oldText,
-                                width: numberWidth,
-                                side: row.oldSide
-                            )
+        return ScrollViewReader { proxy in
+            ScrollView([.vertical, .horizontal]) {
+                LazyVStack(spacing: FXSpacing.lg) {
+                    ForEach(sections) { section in
+                        VStack(spacing: 0) {
+                            sectionHeader(section, selectedPath: scrollTargetPath)
+                                .id(section.id)
 
-                            FXDivider(.vertical)
+                            ForEach(section.splitRows) { row in
+                                Group {
+                                    switch row.kind {
+                                    case .meta:
+                                        splitAnnotationRow(
+                                            text: row.oldText,
+                                            foreground: FXColors.fgTertiary,
+                                            background: FXColors.bgSurface.opacity(0.35)
+                                        )
+                                    case .hunk:
+                                        splitAnnotationRow(
+                                            text: row.oldText,
+                                            foreground: FXColors.info,
+                                            background: FXColors.info.opacity(0.08)
+                                        )
+                                    case .content:
+                                        HStack(spacing: 0) {
+                                            splitDiffCell(
+                                                line: row.oldLine,
+                                                text: row.oldText,
+                                                width: numberWidth,
+                                                side: row.oldSide
+                                            )
 
-                            splitDiffCell(
-                                line: row.newLine,
-                                text: row.newText,
-                                width: numberWidth,
-                                side: row.newSide
-                            )
+                                            FXDivider(.vertical)
+
+                                            splitDiffCell(
+                                                line: row.newLine,
+                                                text: row.newText,
+                                                width: numberWidth,
+                                                side: row.newSide
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
+                        .background(FXColors.bgSurface.opacity(0.24))
+                        .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: FXRadii.lg)
+                                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                        )
                     }
                 }
+                .padding(.horizontal, FXSpacing.md)
+                .padding(.vertical, FXSpacing.md)
+                .textSelection(.enabled)
             }
-            .padding(.vertical, FXSpacing.sm)
-            .textSelection(.enabled)
+            .onAppear {
+                scrollToSelectedFile(scrollTargetPath, using: proxy, sections: sections)
+            }
+            .onChange(of: scrollTargetPath) { _, path in
+                scrollToSelectedFile(path, using: proxy, sections: sections)
+            }
+            .onChange(of: text) { _, _ in
+                scrollToSelectedFile(scrollTargetPath, using: proxy, sections: sections)
+            }
+        }
+    }
+
+    private func sectionHeader(_ section: DiffSection, selectedPath: String?) -> some View {
+        let isSelected = selectedPath == section.path
+
+        return HStack(spacing: FXSpacing.md) {
+            Image(systemName: "doc.text")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(isSelected ? FXColors.accent : FXColors.fgTertiary)
+
+            VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
+                Text(section.title)
+                    .font(FXTypography.captionMedium)
+                    .foregroundStyle(isSelected ? FXColors.fg : FXColors.fgSecondary)
+                    .lineLimit(1)
+
+                if let subtitle = section.subtitle {
+                    Text(subtitle)
+                        .font(FXTypography.caption)
+                        .foregroundStyle(FXColors.fgTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            if section.additions > 0 {
+                Text("+\(section.additions)")
+                    .font(FXTypography.monoSmall)
+                    .foregroundStyle(FXColors.success)
+            }
+
+            if section.deletions > 0 {
+                Text("-\(section.deletions)")
+                    .font(FXTypography.monoSmall)
+                    .foregroundStyle(FXColors.error)
+            }
+        }
+        .padding(.horizontal, FXSpacing.md)
+        .padding(.vertical, FXSpacing.sm)
+        .background(isSelected ? FXColors.bgSelected : FXColors.bgElevated)
+        .overlay(alignment: .bottom) {
+            FXDivider()
         }
     }
 
@@ -310,7 +455,7 @@ struct DiffView: View {
                 let hunkLines = hunkLineNumbers(from: rawLine)
                 oldLine = hunkLines?.0
                 newLine = hunkLines?.1
-                lines.append(ParsedDiffLine(kind: .hunk, text: rawLine, oldLine: nil, newLine: nil))
+                lines.append(ParsedDiffLine(kind: .hunk, text: rawLine, oldLine: nil, newLine: nil, anchorPath: nil))
                 continue
             }
 
@@ -319,28 +464,38 @@ struct DiffView: View {
                 || rawLine.hasPrefix("--- ")
                 || rawLine.hasPrefix("+++ ")
                 || rawLine.hasPrefix("\\ No newline") {
-                lines.append(ParsedDiffLine(kind: .meta, text: rawLine, oldLine: nil, newLine: nil))
+                lines.append(
+                    ParsedDiffLine(
+                        kind: .meta,
+                        text: rawLine,
+                        oldLine: nil,
+                        newLine: nil,
+                        anchorPath: diffAnchorPath(from: rawLine)
+                    )
+                )
                 continue
             }
 
             if rawLine.hasPrefix("+"), !rawLine.hasPrefix("+++") {
-                lines.append(ParsedDiffLine(kind: .addition, text: rawLine, oldLine: nil, newLine: newLine))
+                lines.append(ParsedDiffLine(kind: .addition, text: rawLine, oldLine: nil, newLine: newLine, anchorPath: nil))
                 newLine = newLine.map { $0 + 1 }
                 continue
             }
 
             if rawLine.hasPrefix("-"), !rawLine.hasPrefix("---") {
-                lines.append(ParsedDiffLine(kind: .deletion, text: rawLine, oldLine: oldLine, newLine: nil))
+                lines.append(ParsedDiffLine(kind: .deletion, text: rawLine, oldLine: oldLine, newLine: nil, anchorPath: nil))
                 oldLine = oldLine.map { $0 + 1 }
                 continue
             }
 
-            lines.append(ParsedDiffLine(kind: .context, text: rawLine, oldLine: oldLine, newLine: newLine))
+            lines.append(ParsedDiffLine(kind: .context, text: rawLine, oldLine: oldLine, newLine: newLine, anchorPath: nil))
             oldLine = oldLine.map { $0 + 1 }
             newLine = newLine.map { $0 + 1 }
         }
 
-        return lines.isEmpty ? [ParsedDiffLine(kind: .meta, text: "No diff available.", oldLine: nil, newLine: nil)] : lines
+        return lines.isEmpty
+            ? [ParsedDiffLine(kind: .meta, text: "No diff available.", oldLine: nil, newLine: nil, anchorPath: nil)]
+            : lines
     }
 
     private func splitRows(from parsedLines: [ParsedDiffLine]) -> [SplitDiffRow] {
@@ -360,7 +515,8 @@ struct DiffView: View {
                         oldText: line.text,
                         newText: "",
                         oldSide: .context,
-                        newSide: .empty
+                        newSide: .empty,
+                        anchorPath: line.anchorPath
                     )
                 )
                 index += 1
@@ -374,7 +530,8 @@ struct DiffView: View {
                         oldText: line.text,
                         newText: "",
                         oldSide: .context,
-                        newSide: .empty
+                        newSide: .empty,
+                        anchorPath: nil
                     )
                 )
                 index += 1
@@ -389,7 +546,8 @@ struct DiffView: View {
                         oldText: content,
                         newText: content,
                         oldSide: .context,
-                        newSide: .context
+                        newSide: .context,
+                        anchorPath: nil
                     )
                 )
                 index += 1
@@ -424,7 +582,8 @@ struct DiffView: View {
                             oldText: deletion.map(splitDisplayText(for:)) ?? "",
                             newText: addition.map(splitDisplayText(for:)) ?? "",
                             oldSide: deletion == nil ? .empty : .deletion,
-                            newSide: addition == nil ? .empty : .addition
+                            newSide: addition == nil ? .empty : .addition,
+                            anchorPath: nil
                         )
                     )
                 }
@@ -438,7 +597,8 @@ struct DiffView: View {
                         oldText: "",
                         newText: splitDisplayText(for: line),
                         oldSide: .empty,
-                        newSide: .addition
+                        newSide: .addition,
+                        anchorPath: nil
                     )
                 )
                 index += 1
@@ -454,10 +614,69 @@ struct DiffView: View {
                     oldText: "No diff available.",
                     newText: "",
                     oldSide: .context,
-                    newSide: .empty
+                    newSide: .empty,
+                    anchorPath: nil
                 )
             ]
             : rows
+    }
+
+    private func sections(from text: String) -> [DiffSection] {
+        let parsedLines = parseDiff(text)
+        guard !parsedLines.isEmpty else { return [] }
+
+        var sections: [DiffSection] = []
+        var currentPath: String?
+        var currentLines: [ParsedDiffLine] = []
+        var index = 0
+
+        func flushSection() {
+            guard !currentLines.isEmpty else { return }
+            sections.append(
+                makeSection(
+                    id: currentPath ?? "diff-section-\(index)",
+                    path: currentPath,
+                    lines: currentLines
+                )
+            )
+            currentLines.removeAll(keepingCapacity: true)
+            index += 1
+        }
+
+        for line in parsedLines {
+            if let anchorPath = line.anchorPath {
+                flushSection()
+                currentPath = anchorPath
+            }
+            currentLines.append(line)
+        }
+
+        flushSection()
+        return sections
+    }
+
+    private func makeSection(id: String, path: String?, lines: [ParsedDiffLine]) -> DiffSection {
+        let additions = lines.filter { $0.kind == .addition }.count
+        let deletions = lines.filter { $0.kind == .deletion }.count
+        let title = path.map { ($0 as NSString).lastPathComponent } ?? "Project diff"
+        let subtitle: String?
+        if let path {
+            let parent = (path as NSString).deletingLastPathComponent
+            subtitle = parent == "." ? nil : parent
+        } else {
+            subtitle = nil
+        }
+
+        return DiffSection(
+            id: id,
+            path: path,
+            title: title,
+            subtitle: subtitle,
+            additions: additions,
+            deletions: deletions,
+            parsedLines: lines,
+            splitRows: splitRows(from: lines)
+        )
     }
 
     private func splitDisplayText(for line: ParsedDiffLine) -> String {
@@ -485,47 +704,99 @@ struct DiffView: View {
         return Int(start)
     }
 
-    private func displayTitle(for path: String?) -> String {
-        guard let path, !path.isEmpty else { return "Inspector" }
-        return (path as NSString).lastPathComponent
+    private func diffAnchorPath(from line: String) -> String? {
+        guard line.hasPrefix("diff --git "),
+              let range = line.range(of: " b/") else {
+            return nil
+        }
+        let path = String(line[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : path
     }
 
-    private func displaySubtitle(for path: String?) -> String? {
-        guard let path, !path.isEmpty else { return "Select a changed file or repository file to inspect it." }
-        let parent = (path as NSString).deletingLastPathComponent
-        return parent == "." ? path : parent
+    private func diffTaskKey(for project: ProjectState) -> DiffTaskKey {
+        DiffTaskKey(
+            projectID: project.id,
+            mode: project.inspectorComparisonMode,
+            fileSignature: visibleDiffFiles(for: project)
+                .map { "\($0.path)|\($0.status)|\($0.additions)|\($0.deletions)" }
+                .joined(separator: "||")
+        )
     }
 
-    private func leadingIcon(for kind: InspectorContentKind) -> String {
-        switch kind {
-        case .diff:
-            "arrow.left.arrow.right.square"
-        case .file:
-            "doc.text"
-        case .message:
-            "doc.text.magnifyingglass"
+    private func visibleDiffFiles(for project: ProjectState) -> [GitStatusService.FileStatus] {
+        switch project.inspectorComparisonMode {
+        case .unstaged:
+            project.gitInfo.files.filter(\.hasUnstagedChanges)
+        case .staged:
+            project.gitInfo.files.filter(\.hasStagedChanges)
+        case .base:
+            project.gitInfo.files
         }
     }
 
-    private func kindTitle(for kind: InspectorContentKind) -> String {
-        switch kind {
-        case .diff:
-            "Diff"
-        case .file:
-            "File"
-        case .message:
-            "Info"
+    private func loadProjectDiff(for project: ProjectState) async {
+        let snapshot = diffTaskKey(for: project)
+        let visibleFiles = visibleDiffFiles(for: project)
+
+        guard project.gitInfo.isGitRepo, !visibleFiles.isEmpty else {
+            projectDiffText = ""
+            isLoadingDiff = false
+            return
+        }
+
+        isLoadingDiff = true
+        let diff = await appState.gitStatusService.projectDiff(
+            projectID: project.id,
+            mode: project.inspectorComparisonMode,
+            files: visibleFiles
+        )
+
+        guard diffTaskKey(for: project) == snapshot else { return }
+        projectDiffText = diff
+        isLoadingDiff = false
+    }
+
+    private func diffTitle(for fileCount: Int, mode: InspectorComparisonMode) -> String {
+        switch mode {
+        case .unstaged:
+            return fileCount == 1 ? "1 unstaged file" : "\(fileCount) unstaged files"
+        case .staged:
+            return fileCount == 1 ? "1 staged file" : "\(fileCount) staged files"
+        case .base:
+            return fileCount == 1 ? "1 changed file" : "\(fileCount) changed files"
         }
     }
 
-    private func badgeTone(for kind: InspectorContentKind) -> FXBadgeTone {
-        switch kind {
-        case .diff:
-            .info
-        case .file:
-            .neutral
-        case .message:
-            .warning
+    private func emptyStateTitle(for mode: InspectorComparisonMode) -> String {
+        switch mode {
+        case .unstaged:
+            "No unstaged changes"
+        case .staged:
+            "Nothing staged"
+        case .base:
+            "Working tree is clean"
+        }
+    }
+
+    private func emptyStateBody(for mode: InspectorComparisonMode) -> String {
+        switch mode {
+        case .unstaged:
+            "Edit tracked files or add new files to see the local diff here."
+        case .staged:
+            "Stage changes first to inspect the staged diff."
+        case .base:
+            "This project has no git differences against its current base."
+        }
+    }
+
+    private func scrollToSelectedFile(_ path: String?, using proxy: ScrollViewProxy, sections: [DiffSection]) {
+        guard let path,
+              let section = sections.first(where: { $0.path == path }) else {
+            return
+        }
+
+        Task { @MainActor in
+            proxy.scrollTo(section.id, anchor: .top)
         }
     }
 

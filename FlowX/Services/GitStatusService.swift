@@ -101,6 +101,42 @@ final class GitStatusService {
         return await runGit(["diff", "--no-ext-diff", "--no-color", "HEAD", "--", path], in: rootPath)
     }
 
+    func projectDiff(projectID: UUID, mode: InspectorComparisonMode, files: [FileStatus]) async -> String {
+        guard let rootPath = rootPaths[projectID] else { return "" }
+
+        var chunks: [String] = []
+        let sortedFiles = files.sorted { $0.path.localizedCaseInsensitiveCompare($1.path) == .orderedAscending }
+        let trackedPaths = sortedFiles.filter { !($0.isUntracked && mode != .staged) }.map(\.path)
+        let untrackedPaths = sortedFiles.filter { $0.isUntracked && mode != .staged }.map(\.path)
+
+        if !trackedPaths.isEmpty {
+            let args: [String]
+            switch mode {
+            case .unstaged:
+                args = ["diff", "--no-ext-diff", "--no-color", "--"] + trackedPaths
+            case .staged:
+                args = ["diff", "--no-ext-diff", "--no-color", "--cached", "--"] + trackedPaths
+            case .base:
+                args = ["diff", "--no-ext-diff", "--no-color", "HEAD", "--"] + trackedPaths
+            }
+
+            let trackedDiff = await runGit(args, in: rootPath).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trackedDiff.isEmpty {
+                chunks.append(trackedDiff)
+            }
+        }
+
+        for path in untrackedPaths {
+            let diff = await untrackedDiff(path: path, in: rootPath)
+            let trimmed = diff.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                chunks.append(trimmed)
+            }
+        }
+
+        return chunks.joined(separator: "\n\n")
+    }
+
     func fileContents(projectID: UUID, path: String) async -> String {
         guard let rootPath = rootPaths[projectID] else { return "" }
         let url = URL(fileURLWithPath: rootPath).appendingPathComponent(path)
@@ -255,6 +291,14 @@ final class GitStatusService {
             result[parts[2]] = (additions, deletions)
         }
         return result
+    }
+
+    private func untrackedDiff(path: String, in directory: String) async -> String {
+        let result = await runGitForResult(
+            ["diff", "--no-ext-diff", "--no-color", "--no-index", "--", "/dev/null", path],
+            in: directory
+        )
+        return result.output
     }
 
     private func runGit(_ args: [String], in directory: String) async -> String {

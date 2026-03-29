@@ -387,12 +387,12 @@ private struct CommandPaletteView: View {
     private var actions: [PaletteAction] {
         var items: [PaletteAction] = [
             PaletteAction(
-                title: "Add Repository",
+                title: "Add Project",
                 subtitle: "Open a folder and add it to the sidebar",
                 systemImage: "folder.badge.plus",
                 keywords: ["repo", "project", "folder", "open"]
             ) {
-                appState.openAddRepositoryPanel()
+                appState.openAddProjectPanel()
             },
             PaletteAction(
                 title: appState.sidebarVisible ? "Hide Sidebar" : "Show Sidebar",
@@ -511,8 +511,7 @@ private struct CommandPaletteView: View {
                         systemImage: "person.crop.circle",
                         keywords: ["switch", "agent", agent.title.lowercased()]
                     ) {
-                        appState.activeProjectID = project.id
-                        appState.activeAgentID = agent.id
+                        appState.activateAgent(agent.id, in: project.id)
                     }
                 )
             }

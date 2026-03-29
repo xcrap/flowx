@@ -55,6 +55,9 @@ struct RuntimeActivityBar: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(isExpanded ? "Hide runtime activity" : "Show runtime activity")
+            .accessibilityValue(headerTitle)
+            .accessibilityHint("Shows recent tool calls and provider events for this conversation.")
 
             // Activity list
             if isExpanded {
@@ -98,6 +101,7 @@ struct RuntimeActivityBar: View {
             }
         }
         .padding(.vertical, FXSpacing.xxxs)
+        .accessibilityElement(children: .combine)
     }
 
     private func iconName(for activity: ConversationRuntimeActivity) -> String {

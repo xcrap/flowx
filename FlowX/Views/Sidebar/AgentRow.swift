@@ -163,9 +163,8 @@ struct AgentRow: View {
 
     private func selectAgent() {
         withAnimation(FXAnimation.snappy) {
-            appState.activeAgentID = agent.id
             if let project = appState.projects.first(where: { p in p.agents.contains(where: { $0.id == agent.id }) }) {
-                appState.activeProjectID = project.id
+                appState.activateAgent(agent.id, in: project.id)
             }
         }
     }

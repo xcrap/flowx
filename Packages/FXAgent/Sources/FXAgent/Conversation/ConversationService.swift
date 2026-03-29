@@ -266,7 +266,7 @@ public final class ConversationService {
                             )
                             conversationState.markTurnStarted(turnID: activeTurnID)
                         }
-                        conversationState.messages.append(
+                        conversationState.appendMessage(
                             ConversationMessage(
                                 role: .assistant,
                                 content: [.toolUse(id: id, name: name, input: input)]
@@ -282,7 +282,7 @@ public final class ConversationService {
                             state: isError ? "failed" : "completed",
                             turnID: conversationState.activeTurnID
                         )
-                        conversationState.messages.append(
+                        conversationState.appendMessage(
                             ConversationMessage(
                                 role: .tool,
                                 content: [.toolResult(id: id, content: content, isError: isError)]

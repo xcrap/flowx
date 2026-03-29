@@ -325,6 +325,7 @@ final class ProjectState: Identifiable {
     var project: Project
     var agents: [AgentInfo]
     var isExpanded: Bool { didSet { onChange?() } }
+    var lastSelectedAgentID: UUID? { didSet { onChange?() } }
 
     var gitInfo = GitStatusService.GitInfo()
     var repositoryFiles: [String] = []
@@ -344,6 +345,7 @@ final class ProjectState: Identifiable {
         self.project = project
         self.agents = agents
         self.isExpanded = isExpanded
+        self.lastSelectedAgentID = agents.first?.id
         if self.project.agentOrder.isEmpty {
             self.project.agentOrder = agents.map(\.id)
         }
@@ -468,7 +470,7 @@ final class AppState {
 
         activeProjectID = activeProjectID ?? projects.first?.id
         if activeAgent == nil {
-            activeAgentID = activeProject?.agents.first?.id
+            activeAgentID = resolvedLastAgentID(for: activeProject)
         }
 
         isBootstrapped = true
@@ -478,12 +480,12 @@ final class AppState {
         }
     }
 
-    func openAddRepositoryPanel() {
+    func openAddProjectPanel() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.prompt = "Add Repository"
+        panel.prompt = "Add Project"
 
         guard panel.runModal() == .OK, let url = panel.urls.first else { return }
         addProject(at: url)
@@ -493,18 +495,16 @@ final class AppState {
         let standardizedPath = url.standardizedFileURL.path
 
         if let existing = projects.first(where: { $0.project.rootPath == standardizedPath }) {
-            activeProjectID = existing.id
-            activeAgentID = existing.agents.first?.id
+            activateProject(existing.id)
             return
         }
 
-        let name = url.lastPathComponent.isEmpty ? "Repository" : url.lastPathComponent
+        let name = url.lastPathComponent.isEmpty ? "Project" : url.lastPathComponent
         let project = Project(name: name, rootPath: standardizedPath)
         let state = ProjectState(project: project, agents: [])
         projects.append(state)
         hydrate(state)
-        activeProjectID = state.id
-        activeAgentID = state.agents.first?.id
+        activateProject(state.id)
         scheduleSave()
     }
 
@@ -515,8 +515,12 @@ final class AppState {
         projects.removeAll { $0.id == projectID }
 
         if activeProjectID == projectID {
-            activeProjectID = projects.first?.id
-            activeAgentID = activeProject?.agents.first?.id
+            if let nextProject = projects.first {
+                activateProject(nextProject.id)
+            } else {
+                activeProjectID = nil
+                activeAgentID = nil
+            }
         }
 
         scheduleSave()
@@ -543,8 +547,7 @@ final class AppState {
         project.agents.append(info)
         project.project.agentOrder = project.agents.map(\.id)
         project.project.updatedAt = Date()
-        activeProjectID = project.id
-        activeAgentID = info.id
+        activateAgent(info.id, in: project.id)
         scheduleSave()
         return info
     }
@@ -566,8 +569,9 @@ final class AppState {
 
         if activeAgentID == agentID {
             let fallbackIndex = min(agentIndex, max(0, project.agents.count - 1))
-            activeProjectID = project.id
-            activeAgentID = project.agents[fallbackIndex].id
+            activateAgent(project.agents[fallbackIndex].id, in: project.id)
+        } else if project.lastSelectedAgentID == agentID {
+            project.lastSelectedAgentID = project.agents.first?.id
         }
 
         ConversationPersistence.save(project: project)
@@ -602,6 +606,25 @@ final class AppState {
         agent.conversationState.inputText = ""
         agent.conversationState.clearAttachments()
         dispatchPrompt(prompt, attachments: attachments, for: agent)
+    }
+
+    func activateProject(_ projectID: UUID) {
+        guard let project = projects.first(where: { $0.id == projectID }) else { return }
+        activeProjectID = projectID
+        activeAgentID = resolvedLastAgentID(for: project)
+    }
+
+    func activateAgent(_ agentID: UUID, in projectID: UUID) {
+        guard let project = projects.first(where: { $0.id == projectID }),
+              project.agents.contains(where: { $0.id == agentID }) else {
+            return
+        }
+
+        activeProjectID = projectID
+        activeAgentID = agentID
+        if project.lastSelectedAgentID != agentID {
+            project.lastSelectedAgentID = agentID
+        }
     }
 
     func cancelPrompt(for agent: AgentInfo) {
@@ -653,6 +676,33 @@ final class AppState {
         guard let prompt = agent.conversationState.latestUserPrompt, !prompt.isEmpty else { return }
         agent.conversationState.dismissError()
         dispatchPrompt(prompt, for: agent)
+    }
+
+    func restartConversationSession(for agent: AgentInfo) {
+        conversationService.cancelStreaming(for: agent.id)
+
+        let latestPrompt = agent.conversationState.latestUserPrompt?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        agent.conversationState.sessionID = nil
+        agent.conversationState.activeTurnID = nil
+        agent.conversationState.lastStopReason = nil
+        agent.conversationState.clearToolApprovalRequests()
+        agent.conversationState.dismissError()
+        agent.conversationState.applyLifecyclePhase(.idle)
+        agent.conversationState.recordRuntimeActivity(
+            kind: .session,
+            tone: .warning,
+            summary: "Session restarted",
+            detail: "Started a fresh provider session.",
+            state: "reset",
+            turnID: nil
+        )
+
+        if let latestPrompt, !latestPrompt.isEmpty {
+            dispatchPrompt(latestPrompt, for: agent)
+        } else {
+            persistConversation(for: agent)
+        }
     }
 
     func dismissConversationError(for agent: AgentInfo) {
@@ -835,12 +885,22 @@ final class AppState {
                 return
             }
 
+            if fileStatus?.isUntracked == true {
+                project.selectedInspectorText = "This file is new locally and does not exist in HEAD."
+                project.selectedInspectorContentKind = .message
+                return
+            }
+
+            let diff = await gitStatusService.diffAgainstHead(projectID: project.id, path: selectedPath)
+            if !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                project.selectedInspectorText = diff
+                project.selectedInspectorContentKind = .diff
+                return
+            }
+
             if let baseContents = await gitStatusService.fileContentsAtHead(projectID: project.id, path: selectedPath) {
                 project.selectedInspectorText = baseContents
                 project.selectedInspectorContentKind = .file
-            } else if project.gitInfo.files.contains(where: { $0.path == selectedPath && $0.isUntracked }) {
-                project.selectedInspectorText = "This file is new locally and does not exist in HEAD."
-                project.selectedInspectorContentKind = .message
             } else {
                 project.selectedInspectorText = "This file does not exist in the current base revision."
                 project.selectedInspectorContentKind = .message
@@ -923,6 +983,15 @@ final class AppState {
         projects.first { project in
             project.agents.contains { $0.id == agentID }
         }
+    }
+
+    private func resolvedLastAgentID(for project: ProjectState?) -> UUID? {
+        guard let project else { return nil }
+        if let lastSelectedAgentID = project.lastSelectedAgentID,
+           project.agents.contains(where: { $0.id == lastSelectedAgentID }) {
+            return lastSelectedAgentID
+        }
+        return project.agents.first?.id
     }
 
     private func dispatchPrompt(

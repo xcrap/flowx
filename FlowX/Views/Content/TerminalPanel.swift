@@ -44,6 +44,8 @@ struct TerminalPanel: View {
             )
             .overlay(alignment: .top) { FXDivider() }
             .background(FXColors.bgElevated)
+            .accessibilityLabel("Resize terminal")
+            .accessibilityHint("Drag up or down to change terminal height.")
     }
 
     // MARK: - Header

@@ -205,6 +205,16 @@ struct ConversationView: View {
         return !nonRecoverable.contains(where: { error.contains($0) })
     }
 
+    private var isStaleSessionError: Bool {
+        guard let error = agent.conversationState.error?.lowercased() else { return false }
+
+        let sessionTerms = ["session", "resume", "thread", "conversation"]
+        let staleTerms = ["not found", "not ready", "invalid", "expired", "no such", "does not exist", "unknown"]
+
+        return sessionTerms.contains(where: { error.contains($0) })
+            && staleTerms.contains(where: { error.contains($0) })
+    }
+
     private var projectName: String {
         URL(fileURLWithPath: agent.projectRootPath).lastPathComponent
     }
@@ -661,7 +671,11 @@ struct ConversationView: View {
             }
 
             HStack(spacing: FXSpacing.sm) {
-                if isRecoverableError, let sessionID = agent.conversationState.sessionID, !sessionID.isEmpty {
+                if isStaleSessionError, agent.conversationState.sessionID != nil {
+                    actionPill(title: "Restart session", icon: "arrow.clockwise.circle", tint: FXColors.error) {
+                        appState.restartConversationSession(for: agent)
+                    }
+                } else if isRecoverableError, let sessionID = agent.conversationState.sessionID, !sessionID.isEmpty {
                     actionPill(title: "Resume session", icon: "arrow.clockwise", tint: FXColors.error) {
                         appState.resumeConversation(for: agent)
                     }

@@ -4,6 +4,7 @@ import FXCore
 @Observable
 @MainActor
 public final class ConversationState {
+    public static let maxRetainedMessages = 250
     private static let maxRuntimeActivities = 200
     private static let maxVisibleQueuedPromptPreviews = 3
 
@@ -49,10 +50,19 @@ public final class ConversationState {
     public func appendUserMessage(_ text: String, attachments: [Attachment] = []) {
         var content: [MessageContent] = []
         for attachment in attachments where attachment.isImage {
-            content.append(.image(data: attachment.data, mimeType: attachment.mimeType))
+            content.append(.image(data: Data(), mimeType: attachment.mimeType))
         }
         content.append(.text(text))
-        messages.append(ConversationMessage(role: .user, content: content))
+        appendMessage(ConversationMessage(role: .user, content: content))
+    }
+
+    public func appendMessage(_ message: ConversationMessage) {
+        messages.append(message)
+        trimRetainedMessages()
+    }
+
+    public func replaceMessages(_ retainedMessages: [ConversationMessage]) {
+        messages = Array(retainedMessages.suffix(Self.maxRetainedMessages))
     }
 
     public func addAttachment(_ attachment: Attachment) {
@@ -166,7 +176,7 @@ public final class ConversationState {
 
     public func finishStreaming(stopReason: String? = nil) {
         if !streamingText.isEmpty {
-            messages.append(ConversationMessage(role: .assistant, content: [.text(streamingText)]))
+            appendMessage(ConversationMessage(role: .assistant, content: [.text(streamingText)]))
         }
         streamingText = ""
 
@@ -400,6 +410,11 @@ public final class ConversationState {
         }
         let endIndex = normalized.index(normalized.startIndex, offsetBy: 80)
         return String(normalized[..<endIndex]) + "…"
+    }
+
+    private func trimRetainedMessages() {
+        guard messages.count > Self.maxRetainedMessages else { return }
+        messages.removeFirst(messages.count - Self.maxRetainedMessages)
     }
 }
 

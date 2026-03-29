@@ -30,14 +30,13 @@ The app is no longer just a visual mockup. The FlowX shell now builds against re
 - Real split browser panel backed by `WKWebView` with per-agent persisted URL state
 - More polished empty states plus core shell shortcuts for sidebar, right panel, terminal, send, settings, agent switching, and command palette
 - Deeper workspace persistence for conversation scroll position, inspector state, and shell panel visibility
+- Per-project agent restore, stale-session restart recovery, and image-payload cleanup in persisted conversation history
+- Capped retained conversation history plus broader accessibility coverage across shell controls and inspector search
 
-**Still outstanding before calling the core shell “feature-complete”:**
-- Provider/session polish: deeper session recovery edge cases and additional multi-provider supervision depth
-- Accessibility and performance passes beyond the now-landed lazy conversation rendering and dynamic window title
-- Additional session restore and agent/workspace quality-of-life polish
+**Core shell status:** feature-complete for the planned rebuild scope. Remaining work from here is iterative product polish driven by real usage, not missing foundational capabilities.
 
 **Active next slice:**
-- Keep closing shell polish gaps around accessibility, performance, and remaining session/workspace depth
+- Keep tightening interaction polish and bug fixes from hands-on use of the shell
 
 ---
 
@@ -209,7 +208,7 @@ static let smooth = Animation.easeInOut(duration: 0.3)
 - Agent rows with status indicator (dot: idle=gray, working=green pulse, error=red)
 - Hover effects, selection highlight with accent color
 - Drag-to-reorder agents within a project
-- "Add Repository" button at bottom
+- "Add Project" button at bottom
 - Collapse/expand animation
 
 ### 1c. Content Area Mockup
@@ -433,7 +432,7 @@ Each agent gets its own `WorkspaceState` so split/terminal preferences are indep
 - Memory management (cap message history, image cleanup)
 - App icon and window title
 - Accessibility labels
-- First-launch experience (empty state, "Add Repository" prompt)
+- First-launch experience (empty state, "Add Project" prompt)
 
 ---
 

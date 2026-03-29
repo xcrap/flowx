@@ -22,7 +22,7 @@ struct PersistedProjectConversations: Codable {
 
 @MainActor
 enum ConversationPersistence {
-    private static let maxPersistedMessages = 250
+    private static let maxPersistedMessages = ConversationState.maxRetainedMessages
 
     private static var baseDir: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -42,7 +42,7 @@ enum ConversationPersistence {
                 return PersistedConversation(
                     agentID: agent.id,
                     sessionID: state.sessionID,
-                    messages: Array(state.messages.suffix(maxPersistedMessages)),
+                    messages: Array(state.messages.suffix(maxPersistedMessages)).map(sanitizedMessage),
                     runtimeActivities: state.runtimeActivities,
                     totalCostUSD: state.totalCostUSD,
                     totalInputTokens: state.totalInputTokens,
@@ -74,7 +74,7 @@ enum ConversationPersistence {
         for conversation in payload.conversations {
             let state = ConversationState(agentID: conversation.agentID)
             state.sessionID = conversation.sessionID
-            state.messages = conversation.messages
+            state.replaceMessages(conversation.messages.map(sanitizedMessage))
             state.runtimeActivities = conversation.runtimeActivities
             state.totalCostUSD = conversation.totalCostUSD
             state.totalInputTokens = conversation.totalInputTokens
@@ -86,5 +86,20 @@ enum ConversationPersistence {
             result[conversation.agentID] = state
         }
         return result
+    }
+
+    private static func sanitizedMessage(_ message: ConversationMessage) -> ConversationMessage {
+        var sanitized = message
+        sanitized.content = message.content.map(sanitizedContent)
+        return sanitized
+    }
+
+    private static func sanitizedContent(_ content: MessageContent) -> MessageContent {
+        switch content {
+        case .image(_, let mimeType):
+            return .image(data: Data(), mimeType: mimeType)
+        default:
+            return content
+        }
     }
 }

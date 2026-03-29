@@ -83,6 +83,7 @@ struct PersistedProjectRecord: Codable {
     var project: Project
     var agents: [Agent]
     var isExpanded: Bool
+    var lastSelectedAgentID: UUID?
     var selectedInspectorPath: String?
     var inspectorComparisonMode: InspectorComparisonMode
     var inspectorDiffDisplayMode: InspectorDiffDisplayMode
@@ -92,6 +93,7 @@ struct PersistedProjectRecord: Codable {
         case project
         case agents
         case isExpanded
+        case lastSelectedAgentID
         case selectedInspectorPath
         case inspectorComparisonMode
         case inspectorDiffDisplayMode
@@ -102,6 +104,7 @@ struct PersistedProjectRecord: Codable {
         project: Project,
         agents: [Agent],
         isExpanded: Bool,
+        lastSelectedAgentID: UUID?,
         selectedInspectorPath: String?,
         inspectorComparisonMode: InspectorComparisonMode,
         inspectorDiffDisplayMode: InspectorDiffDisplayMode,
@@ -110,6 +113,7 @@ struct PersistedProjectRecord: Codable {
         self.project = project
         self.agents = agents
         self.isExpanded = isExpanded
+        self.lastSelectedAgentID = lastSelectedAgentID
         self.selectedInspectorPath = selectedInspectorPath
         self.inspectorComparisonMode = inspectorComparisonMode
         self.inspectorDiffDisplayMode = inspectorDiffDisplayMode
@@ -121,6 +125,7 @@ struct PersistedProjectRecord: Codable {
         project = try container.decode(Project.self, forKey: .project)
         agents = try container.decode([Agent].self, forKey: .agents)
         isExpanded = try container.decode(Bool.self, forKey: .isExpanded)
+        lastSelectedAgentID = try container.decodeIfPresent(UUID.self, forKey: .lastSelectedAgentID)
         selectedInspectorPath = try container.decodeIfPresent(String.self, forKey: .selectedInspectorPath)
         inspectorComparisonMode = try container.decodeIfPresent(InspectorComparisonMode.self, forKey: .inspectorComparisonMode) ?? .unstaged
         inspectorDiffDisplayMode = try container.decodeIfPresent(InspectorDiffDisplayMode.self, forKey: .inspectorDiffDisplayMode) ?? .inline
@@ -188,6 +193,7 @@ enum ProjectPersistence {
                     project: project.project,
                     agents: project.agents.map(\.agent),
                     isExpanded: project.isExpanded,
+                    lastSelectedAgentID: project.lastSelectedAgentID,
                     selectedInspectorPath: project.selectedInspectorPath,
                     inspectorComparisonMode: project.inspectorComparisonMode,
                     inspectorDiffDisplayMode: project.inspectorDiffDisplayMode,
@@ -247,6 +253,7 @@ enum ProjectPersistence {
                 agents: agents,
                 isExpanded: persisted.isExpanded
             )
+            projectState.lastSelectedAgentID = persisted.lastSelectedAgentID
             projectState.selectedInspectorPath = persisted.selectedInspectorPath
             projectState.inspectorComparisonMode = persisted.inspectorComparisonMode
             projectState.inspectorDiffDisplayMode = persisted.inspectorDiffDisplayMode
