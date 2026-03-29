@@ -20,7 +20,7 @@ struct MainLayout: View {
     @State private var rightPanelHandleHovered = false
 
     private let rightPanelHandleWidth: CGFloat = 5
-    private let titleBarHeight: CGFloat = 48
+    private let titleBarHeight: CGFloat = 38
     private let settingsPanelWidth: CGFloat = 420
 
     var body: some View {
@@ -65,6 +65,7 @@ struct MainLayout: View {
                 }
             }
         }
+        .ignoresSafeArea()
     }
 
     private func rightPanel(totalWidth: CGFloat) -> some View {
@@ -172,7 +173,6 @@ struct MainLayout: View {
 
     private var titleBar: some View {
         ZStack {
-            // Drag handle
             DragHandle()
 
             // Center: project / agent / branch — truly centered
@@ -236,13 +236,8 @@ struct MainLayout: View {
                 }
             }
 
-            // Left: FlowX + Right: buttons
+            // Right: buttons
             HStack {
-                Text("FlowX")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(FXColors.fgTertiary)
-                    .padding(.leading, FXSpacing.xxl)
-
                 Spacer()
 
                 if appState.activeAgent != nil {
@@ -278,7 +273,7 @@ struct MainLayout: View {
             }
             .padding(.trailing, FXSpacing.md)
         }
-        .frame(height: 48)
+        .frame(height: 38)
         .background(FXColors.bgElevated)
         .overlay(alignment: .bottom) { FXDivider() }
     }
