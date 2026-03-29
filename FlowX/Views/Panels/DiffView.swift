@@ -102,6 +102,7 @@ struct DiffView: View {
     @State private var changedFilesResizeHandleHovered = false
 
     private let changedFilesResizeHandleWidth: CGFloat = 10
+    private let diffSectionAccessoryWidth: CGFloat = 28
 
     var body: some View {
         if let project = appState.activeProject {
@@ -125,7 +126,7 @@ struct DiffView: View {
     private func header(_ project: ProjectState) -> some View {
         let visibleFiles = visibleDiffFiles(for: project)
         let fileSectionCount = diffSections.filter { $0.path != nil }.count
-        let canToggleChangedFiles = fileSectionCount > 1
+        let canToggleChangedFiles = fileSectionCount > 0
 
         return HStack(spacing: FXSpacing.md) {
             VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
@@ -143,12 +144,12 @@ struct DiffView: View {
 
             Spacer(minLength: 0)
 
+            comparisonModePicker(project)
+            diffDisplayModePicker(project)
+
             if canToggleChangedFiles {
                 changedFilesToggle
             }
-
-            comparisonModePicker(project)
-            diffDisplayModePicker(project)
         }
         .padding(.horizontal, FXSpacing.md)
         .padding(.vertical, FXSpacing.sm)
@@ -506,7 +507,7 @@ struct DiffView: View {
         let isSelected = selectedPath == section.path
         let isCollapsed = isCollapsed(section)
 
-        return HStack(spacing: FXSpacing.md) {
+        return HStack(spacing: FXSpacing.sm) {
             Button(action: {
                 withAnimation(FXAnimation.quick) {
                     toggleSection(section)
@@ -515,7 +516,7 @@ struct DiffView: View {
                 Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(FXColors.fgQuaternary)
-                    .frame(width: 28, height: 28)
+                    .frame(width: diffSectionAccessoryWidth, height: diffSectionAccessoryWidth)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -535,6 +536,9 @@ struct DiffView: View {
             }
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            Color.clear
+                .frame(width: diffSectionAccessoryWidth, height: 1)
         }
         .padding(.horizontal, FXSpacing.md)
         .padding(.vertical, FXSpacing.sm)
@@ -547,22 +551,6 @@ struct DiffView: View {
 
     private func changedFilesSidebar(project: ProjectState, sections: [DiffSection]) -> some View {
         return VStack(spacing: 0) {
-            HStack(alignment: .center, spacing: FXSpacing.sm) {
-                Text("Changed Files")
-                    .font(FXTypography.captionMedium)
-                    .foregroundStyle(FXColors.fgSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                Text("\(sections.count)")
-                    .font(FXTypography.monoSmall)
-                    .foregroundStyle(FXColors.fgTertiary)
-            }
-            .padding(.horizontal, FXSpacing.md)
-            .frame(height: 44)
-            .background(FXColors.bgElevated)
-
-            FXDivider()
-
             ScrollView {
                 LazyVStack(spacing: FXSpacing.xxs) {
                     ForEach(sections) { section in
@@ -570,7 +558,7 @@ struct DiffView: View {
                     }
                 }
                 .padding(.horizontal, FXSpacing.sm)
-                .padding(.vertical, FXSpacing.sm)
+                .padding(.vertical, FXSpacing.md)
             }
             .background(FXColors.bg)
         }
@@ -966,6 +954,11 @@ struct DiffView: View {
         var index = 0
 
         func flushSection() {
+            guard let currentPath else {
+                currentRawLines.removeAll(keepingCapacity: true)
+                return
+            }
+
             let parsedLines = Self.parseDiff(currentRawLines.joined(separator: "\n"))
             guard !parsedLines.isEmpty else {
                 currentRawLines.removeAll(keepingCapacity: true)
@@ -973,7 +966,7 @@ struct DiffView: View {
             }
             sections.append(
                 Self.makeSection(
-                    id: currentPath ?? "diff-section-\(index)",
+                    id: currentPath,
                     path: currentPath,
                     lines: parsedLines
                 )

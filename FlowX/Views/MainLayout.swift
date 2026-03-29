@@ -215,16 +215,6 @@ struct MainLayout: View {
                             .foregroundStyle(FXColors.fgSecondary)
                     }
 
-                    metadataSeparator
-
-                    Image(systemName: statusIcon(for: agent.status))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(statusColor(for: agent.status))
-
-                    Text(agent.status.rawValue.capitalized)
-                        .font(FXTypography.caption)
-                        .foregroundStyle(statusColor(for: agent.status))
-
                     if agent.additions > 0 || agent.deletions > 0 {
                         metadataSeparator
                         Button(action: appState.toggleGitPanel) {
