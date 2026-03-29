@@ -410,6 +410,7 @@ final class AppPreferences {
         static let defaultAccess = "flowx.defaultAccess"
         static let defaultMode = "flowx.defaultMode"
         static let appearanceMode = "flowx.appearanceMode"
+        static let baseTone = "flowx.baseTone"
         static let accentColor = "flowx.accentColor"
         static let textSizePreset = "flowx.textSizePreset"
     }
@@ -446,6 +447,13 @@ final class AppPreferences {
         }
     }
 
+    var baseTone: FXBaseTone {
+        didSet {
+            defaults.set(baseTone.rawValue, forKey: Keys.baseTone)
+            applyTheme()
+        }
+    }
+
     var accentColor: FXAccentColorOption {
         didSet {
             defaults.set(accentColor.rawValue, forKey: Keys.accentColor)
@@ -470,6 +478,7 @@ final class AppPreferences {
         defaultAccess = AgentAccess(rawValue: defaults.string(forKey: Keys.defaultAccess) ?? "") ?? .fullAccess
         defaultMode = AgentMode(rawValue: defaults.string(forKey: Keys.defaultMode) ?? "") ?? .auto
         appearanceMode = FXAppearanceMode(rawValue: defaults.string(forKey: Keys.appearanceMode) ?? "") ?? .dark
+        baseTone = FXBaseTone(rawValue: defaults.string(forKey: Keys.baseTone) ?? "") ?? .zinc
         accentColor = FXAccentColorOption(rawValue: defaults.string(forKey: Keys.accentColor) ?? "") ?? .violet
         textSizePreset = FXTextSizePreset(rawValue: defaults.string(forKey: Keys.textSizePreset) ?? "") ?? .standard
         applyTheme()
@@ -526,6 +535,7 @@ final class AppPreferences {
 
     private func applyTheme() {
         FXTheme.appearanceMode = appearanceMode
+        FXTheme.baseTone = baseTone
         FXTheme.accentColorOption = accentColor
         FXTheme.textSizePreset = textSizePreset
         themeVersion &+= 1
@@ -571,6 +581,7 @@ final class AppState {
     var rightPanelTab: RightPanelTab = .changes { didSet { persistStateIfBootstrapped() } }
     var sidebarVisible = true { didSet { persistStateIfBootstrapped() } }
     var settingsVisible = false
+    var settingsTab: SettingsPanel.SettingsTab = .general
     var commandPaletteVisible = false
     var runtimeHealth: [String: BinaryHealth] = [:]
     var isBootstrapped = false

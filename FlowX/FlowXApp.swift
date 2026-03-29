@@ -16,6 +16,7 @@ struct FlowXApp: App {
     var body: some Scene {
         Window("FlowX", id: "main") {
             MainLayout()
+                .id(preferences.themeVersion)
                 .environment(appState)
                 .environment(preferences)
                 .frame(minWidth: 900, minHeight: 600)

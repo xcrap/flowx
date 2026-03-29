@@ -33,6 +33,42 @@ Native macOS app for orchestrating AI conversations, browser previews, git inspe
 - Avoid default macOS visual treatments when FlowX already defines a custom control style
 - If a component is missing from `FXDesign`, add it there first and then use it from app views instead of styling each screen ad hoc
 
+### Color Architecture
+
+The color system works like CSS custom properties — semantic tokens that resolve based on theme configuration:
+
+- **Views use `FXColors.*`** — never hardcode colors. `FXColors.bg`, `FXColors.fg`, `FXColors.accent`, `FXColors.success`, `FXColors.diffAddedBg`, etc.
+- **`FXColors` → `FXTheme` → `FXPalette.generate(tone, dark)`** — colors resolve at render time from the active tone + appearance mode
+- **Base tones** (slate, zinc, neutral, stone): Tailwind-derived 11-shade scales (50→950). Dark mode reads top-down (950=bg, 900=elevated, 800=surface), light mode reads bottom-up (50=bg, 100=elevated, 200=surface). Same scale, both modes cohesive.
+- **Accent colors** (violet, blue, emerald, orange, rose): independent of the base tone
+- **Semantic colors** (success, warning, error, info): adapt per mode — brighter on dark, deeper on light
+- **Diff colors** (`diffAddedBg`, `diffRemovedBg`, `diffAddedFg`, `diffRemovedFg`): proper semantic tokens with GitHub-style pastels in light mode, Codex-style muted darks in dark mode. Do NOT use `FXColors.success.opacity(0.08)` for diffs — use the diff tokens.
+- **Theme changes trigger full re-render** via `preferences.themeVersion` incrementing and `.id()` on MainLayout
+
+**Rules for future changes:**
+- Never add raw `Color(red:green:blue:)` in views — add a token to `FXColors` if one is missing
+- Never use system `.background` materials or vibrancy — FlowX uses opaque custom backgrounds
+- Never use native macOS menus/popovers with glass — use `FXDropdown` for custom flat menus
+- Diff views must use `FXColors.diffAddedBg` / `FXColors.diffRemovedBg`, not opacity-modified semantic colors
+- When adding a new base tone or accent, follow the existing pattern in `Colors.swift`
+
+### Typography
+
+- SF Pro Rounded for all UI text (titles, body, captions, buttons)
+- Monospaced for code, terminal output, and diff line numbers
+- Text sizes scale via `FXTextSizePreset` (compact 0.93x → large 1.16x)
+- Use `FXTypography.*` constants, never hardcode font sizes in views
+
+### Spacing & Radii
+
+- 8px baseline grid: `FXSpacing.xxxs` (2) through `FXSpacing.huge` (48)
+- Corner radii: `FXRadii.xs` (4) through `FXRadii.xxl` (16)
+
+### Animations
+
+- Use `FXAnimation.*` presets (snappy, gentle, quick, smooth, panel, micro)
+- Never hardcode animation durations in views
+
 ## Build
 
 ```bash
