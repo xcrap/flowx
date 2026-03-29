@@ -1,0 +1,43 @@
+name: FlowX
+options:
+  bundleIdPrefix: com.flowx
+  deploymentTarget:
+    macOS: "26.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+settings:
+  base:
+    SWIFT_VERSION: "6.2"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+packages:
+  FXCore:
+    path: Packages/FXCore
+  FXAgent:
+    path: Packages/FXAgent
+  FXTerminal:
+    path: Packages/FXTerminal
+  FXDesign:
+    path: Packages/FXDesign
+targets:
+  FlowX:
+    type: application
+    platform: macOS
+    sources: [FlowX]
+    dependencies:
+      - package: FXCore
+      - package: FXAgent
+      - package: FXTerminal
+      - package: FXDesign
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.flowx.app
+        PRODUCT_NAME: FlowX
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_GENERATION_MODE: GeneratedFile
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        ENABLE_APP_SANDBOX: false
+        ENABLE_USER_SELECTED_FILES: readwrite
+        NETWORK_CLIENT: true

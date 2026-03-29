@@ -1,0 +1,752 @@
+import AppKit
+import Foundation
+import FXAgent
+import FXCore
+import FXTerminal
+import SwiftUI
+
+struct FileChangeInfo: Identifiable, Equatable {
+    var id: String { path }
+    var path: String
+    var additions: Int
+    var deletions: Int
+    var isStaged: Bool
+    var status: String
+}
+
+enum RightPanelTab: String, CaseIterable {
+    case changes = "CHANGES"
+    case files = "FILES"
+}
+
+enum AgentStatus: String {
+    case idle
+    case running
+    case completed
+    case error
+}
+
+enum SplitContent: String, Codable {
+    case diff
+    case browser
+}
+
+@Observable
+@MainActor
+final class WorkspaceState {
+    var splitOpen: Bool = false { didSet { onChange?() } }
+    var splitContent: SplitContent = .diff { didSet { onChange?() } }
+    var splitRatio: CGFloat = 0.5 { didSet { onChange?() } }
+    var terminalVisible: Bool = false { didSet { onChange?() } }
+    var terminalHeight: CGFloat = 220 { didSet { onChange?() } }
+    var terminalCount: Int = 1 { didSet { onChange?() } }
+    var browserURLString: String = "https://localhost:3000" { didSet { onChange?() } }
+
+    var onChange: (() -> Void)?
+
+    init() {}
+
+    init(_ persisted: PersistedWorkspace) {
+        splitOpen = persisted.splitOpen
+        splitContent = persisted.splitContent
+        splitRatio = CGFloat(persisted.splitRatio)
+        terminalVisible = persisted.terminalVisible
+        terminalHeight = CGFloat(persisted.terminalHeight)
+        terminalCount = persisted.terminalCount
+        browserURLString = persisted.browserURLString
+    }
+}
+
+@Observable
+@MainActor
+final class AgentInfo: Identifiable {
+    let id: UUID
+    var agent: Agent
+    var conversationState: ConversationState
+    let projectRootPath: String
+    var terminalSessions: [TerminalSession]
+    var workspace: WorkspaceState
+
+    var branch: String = ""
+    var additions: Int = 0
+    var deletions: Int = 0
+    var fileChanges: [FileChangeInfo] = []
+
+    var onChange: (() -> Void)?
+    init(
+        agent: Agent,
+        projectRootPath: String,
+        conversationState: ConversationState? = nil,
+        workspace: WorkspaceState? = nil
+    ) {
+        id = agent.id
+        self.agent = agent
+        self.projectRootPath = projectRootPath
+        let resolvedConversation = conversationState ?? ConversationState(agentID: agent.id)
+        resolvedConversation.activeProviderID = agent.configuration.providerID
+        resolvedConversation.activeModelID = agent.configuration.modelID
+        resolvedConversation.configuredContextWindow = agent.configuration.contextWindowSize
+        self.conversationState = resolvedConversation
+        self.workspace = workspace ?? WorkspaceState()
+        terminalSessions = []
+        syncTerminalSessions(to: self.workspace.terminalCount)
+        self.workspace.onChange = { [weak self] in
+            self?.onChange?()
+        }
+    }
+
+    var terminalSession: TerminalSession {
+        terminalSessions[0]
+    }
+
+    var terminalPaneCount: Int {
+        max(1, min(3, workspace.terminalCount))
+    }
+
+    var visibleTerminalSessions: [TerminalSession] {
+        Array(terminalSessions.prefix(terminalPaneCount))
+    }
+
+    var title: String {
+        get { agent.title }
+        set {
+            agent.title = newValue
+            onChange?()
+        }
+    }
+
+    var providerID: String {
+        get { agent.configuration.providerID ?? "claude" }
+        set {
+            agent.configuration.providerID = newValue
+            if agent.configuration.modelID == nil {
+                agent.configuration.modelID = defaultModelID(for: newValue)
+            }
+            onChange?()
+        }
+    }
+
+    var modelID: String {
+        get { agent.configuration.modelID ?? defaultModelID(for: providerID) }
+        set {
+            agent.configuration.modelID = newValue
+            onChange?()
+        }
+    }
+
+    var effort: String {
+        get { agent.configuration.effort ?? "high" }
+        set {
+            agent.configuration.effort = newValue
+            onChange?()
+        }
+    }
+
+    var systemPrompt: String? {
+        get { agent.configuration.systemPrompt }
+        set {
+            agent.configuration.systemPrompt = newValue
+            onChange?()
+        }
+    }
+
+    var agentMode: AgentMode {
+        get { agent.configuration.resolvedMode }
+        set {
+            agent.configuration.agentMode = newValue
+            onChange?()
+        }
+    }
+
+    var agentAccess: AgentAccess {
+        get { agent.configuration.resolvedAccess }
+        set {
+            agent.configuration.agentAccess = newValue
+            onChange?()
+        }
+    }
+
+    var providerName: String {
+        switch providerID {
+        case "claude":
+            "Claude"
+        case "codex":
+            "Codex"
+        default:
+            providerID.capitalized
+        }
+    }
+
+    var status: AgentStatus {
+        if conversationState.error != nil || agent.executionState == .failure {
+            return .error
+        }
+        if conversationState.isStreaming || agent.executionState == .running {
+            return .running
+        }
+        if agent.executionState == .success {
+            return .completed
+        }
+        return .idle
+    }
+
+    var messages: [ConversationMessage] {
+        conversationState.messages
+    }
+
+    var activities: [ConversationRuntimeActivity] {
+        conversationState.runtimeActivities
+    }
+
+    var toolCallCount: Int {
+        conversationState.runtimeActivities.filter { $0.kind == .tool }.count
+    }
+
+    var isStreaming: Bool {
+        conversationState.isStreaming
+    }
+
+    func setTerminalCount(_ count: Int) {
+        let normalized = max(1, min(3, count))
+        syncTerminalSessions(to: normalized)
+    }
+
+    func addTerminalPane() {
+        setTerminalCount(terminalPaneCount + 1)
+    }
+
+    func removeTerminalPane() {
+        setTerminalCount(terminalPaneCount - 1)
+    }
+
+    func setTerminalLaunchDirectory(_ directory: String) {
+        for session in terminalSessions {
+            session.setLaunchDirectory(directory)
+        }
+    }
+
+    func applyGitInfo(_ gitInfo: GitStatusService.GitInfo) {
+        branch = gitInfo.branch
+        additions = gitInfo.additions
+        deletions = gitInfo.deletions
+        fileChanges = gitInfo.files.map {
+            FileChangeInfo(
+                path: $0.path,
+                additions: $0.additions,
+                deletions: $0.deletions,
+                isStaged: $0.isStaged,
+                status: $0.status
+            )
+        }
+    }
+
+    func markConversationStarted() {
+        agent.executionState = .running
+    }
+
+    func syncExecutionStateFromConversation() {
+        if conversationState.error != nil {
+            agent.executionState = .failure
+        } else if conversationState.isStreaming {
+            agent.executionState = .running
+        } else if !conversationState.messages.isEmpty {
+            agent.executionState = .success
+        } else {
+            agent.executionState = .idle
+        }
+    }
+
+    private func defaultModelID(for providerID: String) -> String {
+        switch providerID {
+        case "codex":
+            "gpt-5.4"
+        default:
+            "sonnet"
+        }
+    }
+
+    private func syncTerminalSessions(to requestedCount: Int) {
+        let normalized = max(1, min(3, requestedCount))
+
+        if workspace.terminalCount != normalized {
+            workspace.terminalCount = normalized
+        }
+
+        while terminalSessions.count < normalized {
+            terminalSessions.append(
+                TerminalSession(id: UUID(), currentDirectory: projectRootPath)
+            )
+        }
+
+        while terminalSessions.count > normalized {
+            terminalSessions.removeLast().shutdown()
+        }
+    }
+}
+
+@Observable
+@MainActor
+final class ProjectState: Identifiable {
+    let id: UUID
+    var project: Project
+    var agents: [AgentInfo]
+    var isExpanded: Bool
+
+    var gitInfo = GitStatusService.GitInfo()
+    var repositoryFiles: [String] = []
+    var selectedInspectorPath: String?
+    var selectedInspectorText: String = ""
+    init(project: Project, agents: [AgentInfo], isExpanded: Bool = true) {
+        id = project.id
+        self.project = project
+        self.agents = agents
+        self.isExpanded = isExpanded
+        if self.project.agentOrder.isEmpty {
+            self.project.agentOrder = agents.map(\.id)
+        }
+    }
+
+    func refreshFiles(limit: Int = 500) {
+        let rootURL = project.rootURL
+        let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            repositoryFiles = []
+            return
+        }
+
+        var files: [String] = []
+        while let url = enumerator.nextObject() as? URL {
+            guard let values = try? url.resourceValues(forKeys: Set(keys)) else { continue }
+            let relativePath = String(url.path.dropFirst(rootURL.path.count + 1))
+
+            if shouldSkip(relativePath, isDirectory: values.isDirectory == true) {
+                if values.isDirectory == true {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+
+            if values.isRegularFile == true {
+                files.append(relativePath)
+                if files.count >= limit {
+                    break
+                }
+            }
+        }
+
+        repositoryFiles = files.sorted()
+        if selectedInspectorPath == nil {
+            selectedInspectorPath = repositoryFiles.first
+        }
+    }
+
+    private func shouldSkip(_ relativePath: String, isDirectory: Bool) -> Bool {
+        guard let first = relativePath.split(separator: "/").first else { return false }
+        let blocked = [".git", "node_modules", ".build", "build", "dist", "DerivedData"]
+        if blocked.contains(String(first)) {
+            return true
+        }
+        return false
+    }
+}
+
+@Observable
+@MainActor
+final class AppState {
+    var projects: [ProjectState] = []
+    var activeProjectID: UUID?
+    var activeAgentID: UUID?
+    var rightPanelVisible = false
+    var rightPanelTab: RightPanelTab = .changes
+    var sidebarVisible = true
+    var settingsVisible = false
+    var runtimeHealth: [String: BinaryHealth] = [:]
+    var isBootstrapped = false
+
+    let providerRegistry = ProviderRegistry()
+    let conversationService: ConversationService
+    let gitStatusService = GitStatusService()
+
+    private let runtimeDiscovery = RuntimeDiscovery()
+    private var gitMirrorTasks: [UUID: Task<Void, Never>] = [:]
+    private var scheduledSaveTask: Task<Void, Never>?
+
+    var activeProject: ProjectState? {
+        projects.first { $0.project.id == activeProjectID }
+    }
+
+    var activeAgent: AgentInfo? {
+        guard let project = activeProject, let agentID = activeAgentID else { return nil }
+        return project.agents.first { $0.id == agentID }
+    }
+
+    init() {
+        conversationService = ConversationService(registry: providerRegistry)
+
+        Task { @MainActor in
+            await bootstrap()
+        }
+    }
+
+    func bootstrap() async {
+        await runtimeDiscovery.register(.claude)
+        await runtimeDiscovery.register(.codex)
+
+        providerRegistry.register(ClaudeCodeProvider(discovery: runtimeDiscovery))
+        providerRegistry.register(CodexProvider(discovery: runtimeDiscovery))
+        await refreshRuntimeHealth()
+
+        ProjectPersistence.load(into: self)
+        let normalizedLegacyTitles = normalizeLegacyAgentTitles()
+        for project in projects {
+            hydrate(project)
+        }
+
+        #if DEBUG
+        if projects.isEmpty {
+            seedFromCurrentDirectoryIfUseful()
+        }
+        #endif
+
+        activeProjectID = activeProjectID ?? projects.first?.id
+        if activeAgent == nil {
+            activeAgentID = activeProject?.agents.first?.id
+        }
+
+        isBootstrapped = true
+
+        if normalizedLegacyTitles {
+            ProjectPersistence.save(self)
+        }
+    }
+
+    func openAddRepositoryPanel() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Add Repository"
+
+        guard panel.runModal() == .OK, let url = panel.urls.first else { return }
+        addProject(at: url)
+    }
+
+    func addProject(at url: URL) {
+        let standardizedPath = url.standardizedFileURL.path
+
+        if let existing = projects.first(where: { $0.project.rootPath == standardizedPath }) {
+            activeProjectID = existing.id
+            activeAgentID = existing.agents.first?.id
+            return
+        }
+
+        let name = url.lastPathComponent.isEmpty ? "Repository" : url.lastPathComponent
+        let project = Project(name: name, rootPath: standardizedPath)
+        let state = ProjectState(project: project, agents: [])
+        projects.append(state)
+        hydrate(state)
+        activeProjectID = state.id
+        activeAgentID = state.agents.first?.id
+        scheduleSave()
+    }
+
+    func removeProject(_ projectID: UUID) {
+        gitStatusService.stopPolling(projectID: projectID)
+        gitMirrorTasks[projectID]?.cancel()
+        gitMirrorTasks.removeValue(forKey: projectID)
+        projects.removeAll { $0.id == projectID }
+
+        if activeProjectID == projectID {
+            activeProjectID = projects.first?.id
+            activeAgentID = activeProject?.agents.first?.id
+        }
+
+        scheduleSave()
+    }
+
+    @discardableResult
+    func addAgent(to project: ProjectState, title: String? = nil) -> AgentInfo {
+        let providerID = preferredProviderID()
+        let modelID = providerRegistry.provider(for: providerID)?.availableModels.first?.id ?? defaultModelID(for: providerID)
+
+        let agent = Agent(
+            title: title ?? defaultAgentTitle(for: project.agents.count + 1),
+            configuration: AgentConfiguration(
+                providerID: providerID,
+                modelID: modelID,
+                effort: "high",
+                agentMode: .auto,
+                agentAccess: .fullAccess
+            )
+        )
+
+        let info = AgentInfo(agent: agent, projectRootPath: project.project.rootPath)
+        configureAgent(info)
+        project.agents.append(info)
+        project.project.agentOrder = project.agents.map(\.id)
+        project.project.updatedAt = Date()
+        activeProjectID = project.id
+        activeAgentID = info.id
+        scheduleSave()
+        return info
+    }
+
+    func removeAgent(_ agentID: UUID) {
+        guard let project = project(for: agentID),
+              let agentIndex = project.agents.firstIndex(where: { $0.id == agentID }),
+              project.agents.count > 1 else {
+            return
+        }
+
+        let removedAgent = project.agents.remove(at: agentIndex)
+        for session in removedAgent.terminalSessions {
+            session.shutdown()
+        }
+
+        project.project.agentOrder = project.agents.map(\.id)
+        project.project.updatedAt = Date()
+
+        if activeAgentID == agentID {
+            let fallbackIndex = min(agentIndex, max(0, project.agents.count - 1))
+            activeProjectID = project.id
+            activeAgentID = project.agents[fallbackIndex].id
+        }
+
+        ConversationPersistence.save(project: project)
+        scheduleSave()
+    }
+
+    func attachFiles(to agent: AgentInfo) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Attach"
+
+        guard panel.runModal() == .OK else { return }
+
+        for url in panel.urls {
+            guard let data = try? Data(contentsOf: url) else { continue }
+            let attachment = Attachment(
+                data: data,
+                mimeType: Attachment.mimeType(forExtension: url.pathExtension),
+                filename: url.lastPathComponent
+            )
+            agent.conversationState.addAttachment(attachment)
+        }
+    }
+
+    func sendPrompt(for agent: AgentInfo) {
+        guard let project = project(for: agent.id) else { return }
+
+        let prompt = agent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+
+        let attachments = agent.conversationState.pendingAttachments
+        agent.conversationState.inputText = ""
+        agent.conversationState.clearAttachments()
+        agent.markConversationStarted()
+
+        conversationService.send(
+            prompt: prompt,
+            attachments: attachments,
+            to: agent.conversationState,
+            providerID: agent.providerID,
+            model: agent.modelID,
+            effort: agent.effort,
+            systemPrompt: agent.systemPrompt,
+            agentMode: agent.agentMode,
+            agentAccess: agent.agentAccess,
+            workingDirectory: project.project.rootURL,
+            onComplete: { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in
+                    agent.syncExecutionStateFromConversation()
+                    ConversationPersistence.save(project: project)
+                    gitStatusService.forceRefresh(projectID: project.id)
+                    await refreshInspector(for: project)
+                    scheduleSave()
+                }
+            }
+        )
+
+        scheduleSave()
+    }
+
+    func cancelPrompt(for agent: AgentInfo) {
+        conversationService.cancelStreaming(for: agent.id)
+        agent.syncExecutionStateFromConversation()
+        if let project = project(for: agent.id) {
+            ConversationPersistence.save(project: project)
+        }
+    }
+
+    func resetConversation(for agent: AgentInfo) {
+        agent.conversationState.resetConversation()
+        agent.syncExecutionStateFromConversation()
+        if let project = project(for: agent.id) {
+            ConversationPersistence.save(project: project)
+        }
+    }
+
+    func selectInspectorPath(_ path: String, for project: ProjectState) {
+        project.selectedInspectorPath = path
+        Task { @MainActor in
+            await refreshInspector(for: project)
+        }
+    }
+
+    func refreshRuntimeHealth() async {
+        runtimeHealth = await runtimeDiscovery.allHealth()
+    }
+
+    func pushActiveProject() async {
+        guard let project = activeProject else { return }
+        _ = await gitStatusService.push(projectID: project.id)
+        applyGitInfo(to: project.id)
+    }
+
+    func refreshInspector(for project: ProjectState) async {
+        guard let selectedPath = project.selectedInspectorPath else {
+            project.selectedInspectorText = ""
+            return
+        }
+
+        let diff = await gitStatusService.diff(projectID: project.id, path: selectedPath)
+        if !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            project.selectedInspectorText = diff
+        } else {
+            project.selectedInspectorText = await gitStatusService.fileContents(projectID: project.id, path: selectedPath)
+        }
+    }
+
+    func scheduleSave() {
+        scheduledSaveTask?.cancel()
+        scheduledSaveTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard let self, !Task.isCancelled else { return }
+            ProjectPersistence.save(self)
+        }
+    }
+
+    private func hydrate(_ project: ProjectState) {
+        project.refreshFiles()
+        if project.agents.isEmpty {
+            _ = addAgent(to: project)
+        } else {
+            for agent in project.agents {
+                configureAgent(agent)
+                agent.setTerminalLaunchDirectory(project.project.rootPath)
+                agent.syncExecutionStateFromConversation()
+            }
+        }
+
+        gitStatusService.startPolling(projectID: project.id, rootPath: project.project.rootPath)
+        gitMirrorTasks[project.id]?.cancel()
+        gitMirrorTasks[project.id] = Task { @MainActor [weak self] in
+            while let self, !Task.isCancelled {
+                applyGitInfo(to: project.id)
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func applyGitInfo(to projectID: UUID) {
+        guard let project = projects.first(where: { $0.id == projectID }),
+              let gitInfo = gitStatusService.info[projectID] else {
+            return
+        }
+
+        project.gitInfo = gitInfo
+        for agent in project.agents {
+            agent.applyGitInfo(gitInfo)
+        }
+
+        if project.selectedInspectorPath == nil {
+            project.selectedInspectorPath = gitInfo.files.first?.path ?? project.repositoryFiles.first
+        }
+    }
+
+    private func configureAgent(_ agent: AgentInfo) {
+        agent.onChange = { [weak self] in
+            self?.scheduleSave()
+        }
+    }
+
+    private func project(for agentID: UUID) -> ProjectState? {
+        projects.first { project in
+            project.agents.contains { $0.id == agentID }
+        }
+    }
+
+    private func preferredProviderID() -> String {
+        if runtimeHealth["claude"]?.isUsable == true {
+            return "claude"
+        }
+        if runtimeHealth["codex"]?.isUsable == true {
+            return "codex"
+        }
+        return "claude"
+    }
+
+    private func defaultModelID(for providerID: String) -> String {
+        switch providerID {
+        case "codex":
+            "gpt-5.4"
+        default:
+            "sonnet"
+        }
+    }
+
+    private func defaultAgentTitle(for index: Int) -> String {
+        "Agent \(index)"
+    }
+
+    private func normalizeLegacyAgentTitles() -> Bool {
+        var didChange = false
+
+        for project in projects {
+            for (index, agent) in project.agents.enumerated() {
+                guard agent.conversationState.messages.isEmpty,
+                      agent.conversationState.runtimeActivities.isEmpty,
+                      let normalized = normalizedLegacyTitle(agent.title, fallbackIndex: index + 1),
+                      normalized != agent.title else {
+                    continue
+                }
+
+                agent.agent.title = normalized
+                project.project.updatedAt = Date()
+                didChange = true
+            }
+        }
+
+        return didChange
+    }
+
+    private func normalizedLegacyTitle(_ title: String, fallbackIndex: Int) -> String? {
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        if normalized == "main" {
+            return defaultAgentTitle(for: fallbackIndex)
+        }
+
+        if normalized.hasPrefix("agent-"),
+           let index = Int(normalized.dropFirst("agent-".count)) {
+            return defaultAgentTitle(for: index)
+        }
+
+        return nil
+    }
+
+    #if DEBUG
+    private func seedFromCurrentDirectoryIfUseful() {
+        let path = FileManager.default.currentDirectoryPath
+        guard path != "/", FileManager.default.fileExists(atPath: path) else { return }
+        addProject(at: URL(fileURLWithPath: path))
+    }
+    #endif
+}
