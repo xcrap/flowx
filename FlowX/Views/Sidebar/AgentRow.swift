@@ -35,10 +35,7 @@ struct AgentRow: View {
                 Label("Reset Conversation", systemImage: "arrow.counterclockwise")
             }
             Divider()
-            Button(action: {}) {
-                Label("Archive", systemImage: "archivebox")
-            }
-            Button(role: .destructive, action: { appState.removeAgent(agent.id) }) {
+            Button(role: .destructive, action: deleteAgent) {
                 Label("Delete Agent", systemImage: "trash")
             }
         }
@@ -166,6 +163,12 @@ struct AgentRow: View {
             if let project = appState.projects.first(where: { p in p.agents.contains(where: { $0.id == agent.id }) }) {
                 appState.activateAgent(agent.id, in: project.id)
             }
+        }
+    }
+
+    private func deleteAgent() {
+        withAnimation(FXAnimation.snappy) {
+            appState.removeAgent(agent.id)
         }
     }
 }

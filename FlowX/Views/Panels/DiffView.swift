@@ -128,10 +128,6 @@ struct DiffView: View {
         let canToggleChangedFiles = fileSectionCount > 1
 
         return HStack(spacing: FXSpacing.md) {
-            Image(systemName: "arrow.left.arrow.right.square")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(FXColors.fgTertiary)
-
             VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
                 Text(diffTitle(for: visibleFiles.count, mode: project.inspectorComparisonMode))
                     .font(FXTypography.captionMedium)
@@ -817,15 +813,6 @@ struct DiffView: View {
                 || rawLine.hasPrefix("--- ")
                 || rawLine.hasPrefix("+++ ")
                 || rawLine.hasPrefix("\\ No newline") {
-                lines.append(
-                    ParsedDiffLine(
-                        kind: .meta,
-                        text: rawLine,
-                        oldLine: nil,
-                        newLine: nil,
-                        anchorPath: Self.diffAnchorPath(from: rawLine)
-                    )
-                )
                 continue
             }
 
@@ -846,9 +833,7 @@ struct DiffView: View {
             newLine = newLine.map { $0 + 1 }
         }
 
-        return lines.isEmpty
-            ? [ParsedDiffLine(kind: .meta, text: "No diff available.", oldLine: nil, newLine: nil, anchorPath: nil)]
-            : lines
+        return lines
     }
 
     nonisolated private static func splitRows(from parsedLines: [ParsedDiffLine]) -> [SplitDiffRow] {
@@ -975,33 +960,37 @@ struct DiffView: View {
     }
 
     nonisolated private static func sections(from text: String) -> [DiffSection] {
-        let parsedLines = Self.parseDiff(text)
-        guard !parsedLines.isEmpty else { return [] }
-
         var sections: [DiffSection] = []
         var currentPath: String?
-        var currentLines: [ParsedDiffLine] = []
+        var currentRawLines: [String] = []
         var index = 0
 
         func flushSection() {
-            guard !currentLines.isEmpty else { return }
+            let parsedLines = Self.parseDiff(currentRawLines.joined(separator: "\n"))
+            guard !parsedLines.isEmpty else {
+                currentRawLines.removeAll(keepingCapacity: true)
+                return
+            }
             sections.append(
                 Self.makeSection(
                     id: currentPath ?? "diff-section-\(index)",
                     path: currentPath,
-                    lines: currentLines
+                    lines: parsedLines
                 )
             )
-            currentLines.removeAll(keepingCapacity: true)
+            currentRawLines.removeAll(keepingCapacity: true)
             index += 1
         }
 
-        for line in parsedLines {
-            if let anchorPath = line.anchorPath {
+        for rawLine in text.components(separatedBy: .newlines) {
+            if rawLine.hasPrefix("diff --git "),
+               let anchorPath = Self.diffAnchorPath(from: rawLine) {
                 flushSection()
                 currentPath = anchorPath
+                continue
             }
-            currentLines.append(line)
+
+            currentRawLines.append(rawLine)
         }
 
         flushSection()

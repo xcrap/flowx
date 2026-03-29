@@ -673,7 +673,7 @@ final class AppState {
         let state = ProjectState(project: project, agents: [])
         projects.append(state)
         hydrate(state)
-        activateProject(state.id)
+        _ = addAgent(to: state)
         scheduleSave()
     }
 
@@ -723,10 +723,12 @@ final class AppState {
 
     func removeAgent(_ agentID: UUID) {
         guard let project = project(for: agentID),
-              let agentIndex = project.agents.firstIndex(where: { $0.id == agentID }),
-              project.agents.count > 1 else {
+              let agentIndex = project.agents.firstIndex(where: { $0.id == agentID }) else {
             return
         }
+
+        conversationService.cancelStreaming(for: agentID)
+        conversationService.clearPendingRequests(for: agentID)
 
         let removedAgent = project.agents.remove(at: agentIndex)
         for session in removedAgent.terminalSessions {
@@ -737,13 +739,21 @@ final class AppState {
         project.project.updatedAt = Date()
 
         if activeAgentID == agentID {
-            let fallbackIndex = min(agentIndex, max(0, project.agents.count - 1))
-            activateAgent(project.agents[fallbackIndex].id, in: project.id)
-        } else if project.lastSelectedAgentID == agentID {
+            if project.agents.isEmpty {
+                activeProjectID = project.id
+                activeAgentID = nil
+            } else {
+                let fallbackIndex = min(agentIndex, max(0, project.agents.count - 1))
+                activateAgent(project.agents[fallbackIndex].id, in: project.id)
+            }
+        }
+
+        if project.lastSelectedAgentID == agentID {
             project.lastSelectedAgentID = project.agents.first?.id
         }
 
         ConversationPersistence.save(project: project)
+        synchronizeActiveProjectPanels()
         scheduleSave()
     }
 
@@ -1088,9 +1098,7 @@ final class AppState {
     private func hydrate(_ project: ProjectState) {
         configureProject(project)
         project.refreshFiles()
-        if project.agents.isEmpty {
-            _ = addAgent(to: project)
-        } else {
+        if !project.agents.isEmpty {
             for agent in project.agents {
                 configureAgent(agent)
                 agent.setTerminalLaunchDirectory(project.project.rootPath)

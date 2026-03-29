@@ -78,13 +78,10 @@ struct MainLayout: View {
 
     private func rightPanelContainer(totalWidth: CGFloat) -> some View {
         let expandedWidth = displayedRightPanelWidth(in: totalWidth)
-        let sheetWidth = expandedWidth + 1
+        let sheetWidth = expandedWidth
         let visibleWidth = appState.rightPanelVisible ? sheetWidth : 0
 
-        return HStack(spacing: 0) {
-            FXDivider(.vertical)
-            rightPanel(totalWidth: totalWidth)
-        }
+        return rightPanel(totalWidth: totalWidth)
         .frame(width: sheetWidth, alignment: .trailing)
         .offset(x: appState.rightPanelVisible ? 0 : sheetWidth)
         .frame(width: visibleWidth, alignment: .trailing)
