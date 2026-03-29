@@ -20,10 +20,12 @@ struct MainLayout: View {
     @State private var rightPanelHandleHovered = false
 
     private let rightPanelHandleWidth: CGFloat = 12
+    private let titleBarHeight: CGFloat = 48
+    private let settingsPanelWidth: CGFloat = 420
 
     var body: some View {
         GeometryReader { geometry in
-            ZStack(alignment: .top) {
+            ZStack(alignment: .topTrailing) {
                 VStack(spacing: 0) {
                     // Single-row title bar — traffic lights float on top of this
                     titleBar
@@ -40,20 +42,20 @@ struct MainLayout: View {
                         ContentAreaView()
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                        if appState.settingsVisible {
-                            FXDivider(.vertical)
-                            SettingsPanel()
-                                .frame(width: 380)
-                                .transition(.move(edge: .trailing))
-                        } else if appState.rightPanelVisible {
-                            FXDivider(.vertical)
-                            rightPanel(totalWidth: geometry.size.width)
-                                .transition(.move(edge: .trailing))
+                        if appState.activeProjectCanShowGitPanel || appState.rightPanelVisible {
+                            rightPanelContainer(totalWidth: geometry.size.width)
                         }
                     }
                     .animation(FXAnimation.panel, value: appState.sidebarVisible)
                     .animation(FXAnimation.panel, value: appState.rightPanelVisible)
                     .animation(FXAnimation.panel, value: appState.settingsVisible)
+                }
+
+                if appState.settingsVisible {
+                    settingsOverlay(totalSize: geometry.size)
+                        .padding(.top, titleBarHeight)
+                        .transition(.move(edge: .trailing))
+                        .zIndex(5)
                 }
 
                 if appState.commandPaletteVisible {
@@ -72,6 +74,33 @@ struct MainLayout: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(width: displayedRightPanelWidth(in: totalWidth))
+    }
+
+    private func rightPanelContainer(totalWidth: CGFloat) -> some View {
+        let expandedWidth = displayedRightPanelWidth(in: totalWidth)
+        let sheetWidth = expandedWidth + 1
+        let visibleWidth = appState.rightPanelVisible ? sheetWidth : 0
+
+        return HStack(spacing: 0) {
+            FXDivider(.vertical)
+            rightPanel(totalWidth: totalWidth)
+        }
+        .frame(width: sheetWidth, alignment: .trailing)
+        .offset(x: appState.rightPanelVisible ? 0 : sheetWidth)
+        .frame(width: visibleWidth, alignment: .trailing)
+        .clipped()
+        .compositingGroup()
+        .allowsHitTesting(appState.rightPanelVisible)
+    }
+
+    private func settingsOverlay(totalSize: CGSize) -> some View {
+        HStack(spacing: 0) {
+            FXDivider(.vertical)
+            SettingsPanel()
+                .frame(width: settingsPanelWidth, height: max(0, totalSize.height - titleBarHeight))
+        }
+        .background(FXColors.panelBg)
+        .shadow(color: FXColors.overlay.opacity(0.24), radius: 18, x: -4, y: 0)
     }
 
     private func rightPanelResizeHandle(totalWidth: CGFloat) -> some View {
@@ -201,12 +230,20 @@ struct MainLayout: View {
 
                     if agent.additions > 0 || agent.deletions > 0 {
                         metadataSeparator
-                        Text("+\(agent.additions)")
-                            .font(FXTypography.monoSmall)
-                            .foregroundStyle(FXColors.success)
-                        Text("-\(agent.deletions)")
-                            .font(FXTypography.monoSmall)
-                            .foregroundStyle(FXColors.error)
+                        Button(action: appState.toggleGitPanel) {
+                            HStack(spacing: FXSpacing.sm) {
+                                Text("+\(agent.additions)")
+                                    .font(FXTypography.monoSmall)
+                                    .foregroundStyle(FXColors.success)
+                                Text("-\(agent.deletions)")
+                                    .font(FXTypography.monoSmall)
+                                    .foregroundStyle(FXColors.error)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Toggle git panel")
+                        .accessibilityLabel("Toggle git panel")
                     }
                 }
             }
@@ -235,7 +272,7 @@ struct MainLayout: View {
                                 label: "Toggle git panel",
                                 active: appState.rightPanelVisible
                             ) {
-                                withAnimation(FXAnimation.panel) { appState.rightPanelVisible.toggle() }
+                                appState.toggleGitPanel()
                             }
                         }
                         headerButton(
@@ -243,16 +280,7 @@ struct MainLayout: View {
                             label: "Toggle browser split",
                             active: appState.activeAgent?.workspace.splitOpen == true && appState.activeAgent?.workspace.splitContent == .browser
                         ) {
-                            withAnimation(FXAnimation.panel) {
-                                if let agent = appState.activeAgent {
-                                    if agent.workspace.splitOpen && agent.workspace.splitContent == .browser {
-                                        agent.workspace.splitOpen = false
-                                    } else {
-                                        agent.workspace.splitContent = .browser
-                                        agent.workspace.splitOpen = true
-                                    }
-                                }
-                            }
+                            appState.toggleBrowserPreview()
                         }
                         headerButton(icon: "gearshape", label: "Toggle settings", active: appState.settingsVisible) {
                             withAnimation(FXAnimation.panel) { appState.settingsVisible.toggle() }
@@ -475,15 +503,12 @@ private struct CommandPaletteView: View {
                 }
             },
             PaletteAction(
-                title: appState.rightPanelVisible ? "Hide Inspector" : "Show Inspector",
-                subtitle: "Toggle the right changes and files panel",
+                title: appState.rightPanelVisible ? "Hide Git Panel" : "Show Git Panel",
+                subtitle: "Toggle the right git panel",
                 systemImage: "sidebar.right",
-                keywords: ["inspector", "changes", "files", "right panel"]
+                keywords: ["git", "changes", "diff", "right panel"]
             ) {
-                withAnimation(FXAnimation.panel) {
-                    appState.settingsVisible = false
-                    appState.rightPanelVisible.toggle()
-                }
+                appState.toggleGitPanel()
             },
             PaletteAction(
                 title: appState.settingsVisible ? "Hide Settings" : "Show Settings",
@@ -492,7 +517,6 @@ private struct CommandPaletteView: View {
                 keywords: ["settings", "preferences", "config"]
             ) {
                 withAnimation(FXAnimation.panel) {
-                    appState.rightPanelVisible = false
                     appState.settingsVisible.toggle()
                 }
             },
@@ -519,14 +543,7 @@ private struct CommandPaletteView: View {
                     systemImage: "globe",
                     keywords: ["browser", "preview", "web"]
                 ) {
-                    withAnimation(FXAnimation.panel) {
-                        if agent.workspace.splitOpen && agent.workspace.splitContent == .browser {
-                            agent.workspace.splitOpen = false
-                        } else {
-                            agent.workspace.splitContent = .browser
-                            agent.workspace.splitOpen = true
-                        }
-                    }
+                    appState.toggleBrowserPreview()
                 }
             )
         }
@@ -549,12 +566,10 @@ private struct CommandPaletteView: View {
                         title: "Show Git Panel",
                         subtitle: "Inspect current git changes",
                         systemImage: "arrow.triangle.branch",
-                        keywords: ["changes", "git", "diff", "inspector"]
+                    keywords: ["changes", "git", "diff", "inspector"]
                     ) {
-                        withAnimation(FXAnimation.panel) {
-                            appState.settingsVisible = false
-                            appState.rightPanelVisible = true
-                            appState.rightPanelTab = .changes
+                        if !appState.rightPanelVisible {
+                            appState.toggleGitPanel()
                         }
                     }
                 )

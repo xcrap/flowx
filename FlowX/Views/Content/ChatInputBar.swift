@@ -80,29 +80,18 @@ struct ChatInputBar: View {
 
                     menuControl(
                         text: providerAndModelLabel,
-                        content: {
-                            ForEach(providers, id: \.id) { provider in
-                                Section(simplifiedProviderName(for: provider.displayName)) {
-                                    ForEach(provider.availableModels, id: \.id) { model in
-                                        Button(simplifiedModelName(for: model.name)) {
-                                            agent.providerID = provider.id
-                                            agent.modelID = model.id
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        panelWidth: 240,
+                        placement: .above,
+                        sections: providerSections
                     )
 
                     inlineDivider
 
                     menuControl(
                         text: agent.effort.capitalized,
-                        content: {
-                            ForEach(["Low", "Medium", "High", "Max"], id: \.self) { level in
-                                Button(level) { agent.effort = level.lowercased() }
-                            }
-                        }
+                        panelWidth: 160,
+                        placement: .above,
+                        sections: effortSections
                     )
 
                     inlineDivider
@@ -152,8 +141,10 @@ struct ChatInputBar: View {
                 .padding(.horizontal, FXSpacing.lg)
                 .padding(.bottom, FXSpacing.md)
             }
-            .background(FXColors.bgSurface)
-            .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
+            .background(
+                RoundedRectangle(cornerRadius: FXRadii.xl)
+                    .fill(FXColors.bgSurface)
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.xl)
                     .strokeBorder(FXColors.border, lineWidth: 0.5)
@@ -182,6 +173,40 @@ struct ChatInputBar: View {
 
     private var currentModel: AIModel? {
         currentProvider?.availableModels.first(where: { $0.id == agent.modelID })
+    }
+
+    private var providerSections: [FXDropdownSection] {
+        providers.map { provider in
+            FXDropdownSection(
+                title: simplifiedProviderName(for: provider.displayName),
+                items: provider.availableModels.map { model in
+                    FXDropdownItem(
+                        id: "\(provider.id)-\(model.id)",
+                        title: simplifiedModelName(for: model.name),
+                        isSelected: agent.providerID == provider.id && agent.modelID == model.id
+                    ) {
+                        agent.providerID = provider.id
+                        agent.modelID = model.id
+                    }
+                }
+            )
+        }
+    }
+
+    private var effortSections: [FXDropdownSection] {
+        [
+            FXDropdownSection(
+                items: ["low", "medium", "high", "max"].map { level in
+                    FXDropdownItem(
+                        id: level,
+                        title: effortLabel(for: level),
+                        isSelected: agent.effort == level
+                    ) {
+                        agent.effort = level
+                    }
+                }
+            )
+        ]
     }
 
     private var providerAndModelLabel: String {
@@ -276,18 +301,19 @@ struct ChatInputBar: View {
         .accessibilityLabel(tooltip)
     }
 
-    private func menuControl<Content: View>(text: String, @ViewBuilder content: @escaping () -> Content) -> some View {
-        Menu {
-            content()
-        } label: {
-            controlLabel(text, isMenu: true)
+    private func menuControl(
+        text: String,
+        panelWidth: CGFloat? = nil,
+        placement: FXDropdownPlacement = .automatic,
+        sections: [FXDropdownSection]
+    ) -> some View {
+        FXDropdown(sections: sections, panelWidth: panelWidth, placement: placement) { isExpanded in
+            controlLabel(text, isMenu: true, isExpanded: isExpanded)
         }
-        .menuIndicator(.hidden)
-        .menuStyle(.borderlessButton)
         .fixedSize()
     }
 
-    private func controlLabel(_ text: String, highlighted: Bool = false, isMenu: Bool = false) -> some View {
+    private func controlLabel(_ text: String, highlighted: Bool = false, isMenu: Bool = false, isExpanded: Bool = false) -> some View {
         HStack(spacing: isMenu ? FXSpacing.md : FXSpacing.sm) {
             Text(text)
                 .font(.system(size: 12, weight: .medium))
@@ -295,6 +321,7 @@ struct ChatInputBar: View {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .semibold))
                     .foregroundStyle(FXColors.fgTertiary)
+                    .rotationEffect(.degrees(isExpanded ? 180 : 0))
             }
         }
         .foregroundStyle(highlighted ? FXColors.accent : FXColors.fgSecondary)
@@ -333,6 +360,21 @@ struct ChatInputBar: View {
     private func simplifiedModelName(for modelName: String) -> String {
         modelName
             .replacingOccurrences(of: " (latest)", with: "")
+    }
+
+    private func effortLabel(for value: String) -> String {
+        switch value {
+        case "low":
+            "Low"
+        case "medium":
+            "Medium"
+        case "high":
+            "High"
+        case "max":
+            "Max"
+        default:
+            value.capitalized
+        }
     }
 
     private func focusComposer() {

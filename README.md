@@ -1,6 +1,6 @@
 # FlowX
 
-FlowX is a native macOS AI workspace built as the cleaner, node-free evolution of `/Users/xcrap/projects/flow`. It keeps the provider, conversation, terminal, and git foundations from Flow, but moves them into a more focused shell with a stronger UI.
+FlowX is a native macOS AI workspace for orchestrating conversations, browser previews, git inspection, and terminals in a focused desktop shell.
 
 ## Features
 

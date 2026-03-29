@@ -11,7 +11,7 @@ struct FlowXCommands: Commands {
                     appState.commandPaletteVisible = true
                 }
             }
-            .keyboardShortcut("p", modifiers: [.command, .shift])
+            .keyboardShortcut("k", modifiers: .command)
 
             Button("Toggle Sidebar") {
                 withAnimation(FXAnimation.panel) {
@@ -20,23 +20,25 @@ struct FlowXCommands: Commands {
             }
             .keyboardShortcut("b", modifiers: .command)
 
-            Button("Toggle Right Panel") {
-                withAnimation(FXAnimation.panel) {
-                    appState.rightPanelVisible.toggle()
-                }
+            Button("Toggle Git Panel") {
+                appState.toggleGitPanel()
             }
-            .keyboardShortcut("\\", modifiers: .command)
+            .keyboardShortcut("g", modifiers: .command)
 
             Button("Toggle Terminal") {
                 withAnimation(FXAnimation.panel) {
                     appState.activeAgent?.workspace.terminalVisible.toggle()
                 }
             }
-            .keyboardShortcut("`", modifiers: .command)
+            .keyboardShortcut("t", modifiers: .command)
+
+            Button("Toggle Browser Preview") {
+                appState.toggleBrowserPreview()
+            }
+            .keyboardShortcut("p", modifiers: .command)
 
             Button("Settings") {
                 withAnimation(FXAnimation.panel) {
-                    appState.rightPanelVisible = false
                     appState.settingsVisible.toggle()
                 }
             }

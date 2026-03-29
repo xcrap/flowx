@@ -87,6 +87,7 @@ struct PersistedProjectRecord: Codable {
     var selectedInspectorPath: String?
     var inspectorComparisonMode: InspectorComparisonMode
     var inspectorDiffDisplayMode: InspectorDiffDisplayMode
+    var changedFilesRailWidth: Double
     var workspaces: [PersistedWorkspace]
 
     enum CodingKeys: String, CodingKey {
@@ -97,6 +98,7 @@ struct PersistedProjectRecord: Codable {
         case selectedInspectorPath
         case inspectorComparisonMode
         case inspectorDiffDisplayMode
+        case changedFilesRailWidth
         case workspaces
     }
 
@@ -108,6 +110,7 @@ struct PersistedProjectRecord: Codable {
         selectedInspectorPath: String?,
         inspectorComparisonMode: InspectorComparisonMode,
         inspectorDiffDisplayMode: InspectorDiffDisplayMode,
+        changedFilesRailWidth: Double,
         workspaces: [PersistedWorkspace]
     ) {
         self.project = project
@@ -117,6 +120,7 @@ struct PersistedProjectRecord: Codable {
         self.selectedInspectorPath = selectedInspectorPath
         self.inspectorComparisonMode = inspectorComparisonMode
         self.inspectorDiffDisplayMode = inspectorDiffDisplayMode
+        self.changedFilesRailWidth = changedFilesRailWidth
         self.workspaces = workspaces
     }
 
@@ -129,6 +133,7 @@ struct PersistedProjectRecord: Codable {
         selectedInspectorPath = try container.decodeIfPresent(String.self, forKey: .selectedInspectorPath)
         inspectorComparisonMode = try container.decodeIfPresent(InspectorComparisonMode.self, forKey: .inspectorComparisonMode) ?? .unstaged
         inspectorDiffDisplayMode = try container.decodeIfPresent(InspectorDiffDisplayMode.self, forKey: .inspectorDiffDisplayMode) ?? .inline
+        changedFilesRailWidth = try container.decodeIfPresent(Double.self, forKey: .changedFilesRailWidth) ?? Double(FlowXLayoutDefaults.defaultChangedFilesRailWidth)
         workspaces = try container.decodeIfPresent([PersistedWorkspace].self, forKey: .workspaces) ?? []
     }
 }
@@ -202,6 +207,7 @@ enum ProjectPersistence {
                     selectedInspectorPath: project.selectedInspectorPath,
                     inspectorComparisonMode: project.inspectorComparisonMode,
                     inspectorDiffDisplayMode: project.inspectorDiffDisplayMode,
+                    changedFilesRailWidth: Double(project.changedFilesRailWidth),
                     workspaces: project.agents.map { agent in
                         PersistedWorkspace(
                             agentID: agent.id,
@@ -263,6 +269,7 @@ enum ProjectPersistence {
             projectState.selectedInspectorPath = persisted.selectedInspectorPath
             projectState.inspectorComparisonMode = persisted.inspectorComparisonMode
             projectState.inspectorDiffDisplayMode = persisted.inspectorDiffDisplayMode
+            projectState.changedFilesRailWidth = CGFloat(persisted.changedFilesRailWidth)
             return projectState
         }
         appState.activeProjectID = payload.activeProjectID

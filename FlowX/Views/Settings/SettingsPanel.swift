@@ -13,6 +13,10 @@ struct SettingsPanel: View {
         case providers = "Providers"
         case appearance = "Appearance"
         case shortcuts = "Shortcuts"
+
+        var displayTitle: String {
+            rawValue.uppercased()
+        }
     }
 
     var body: some View {
@@ -28,25 +32,28 @@ struct SettingsPanel: View {
             FXDivider()
 
             // Tab bar
-            HStack(spacing: FXSpacing.xxs) {
+            HStack(spacing: FXSpacing.sm) {
                 ForEach(SettingsTab.allCases, id: \.self) { tab in
                     Button(action: { withAnimation(FXAnimation.quick) { selectedTab = tab } }) {
-                        Text(tab.rawValue)
+                        Text(tab.displayTitle)
                             .font(FXTypography.captionMedium)
+                            .tracking(0.6)
                             .foregroundStyle(selectedTab == tab ? FXColors.fg : FXColors.fgTertiary)
-                            .padding(.horizontal, FXSpacing.md)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, FXSpacing.sm)
                             .padding(.vertical, FXSpacing.xs)
                             .background(selectedTab == tab ? FXColors.bgSelected : .clear)
                             .clipShape(RoundedRectangle(cornerRadius: FXRadii.sm))
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
                 Spacer()
             }
             .padding(.horizontal, FXSpacing.lg)
-            .padding(.vertical, FXSpacing.sm)
-
-            FXDivider()
+            .padding(.top, FXSpacing.md)
+            .padding(.bottom, FXSpacing.md)
 
             // Content
             ScrollView {
@@ -72,53 +79,97 @@ struct SettingsPanel: View {
             settingsSection("Default Provider") {
                 settingsMenuRow(
                     "Provider",
-                    value: simplifiedProviderName(for: selectedProvider?.displayName ?? preferences.defaultProviderID)
-                ) {
-                    ForEach(providers, id: \.id) { provider in
-                        Button(simplifiedProviderName(for: provider.displayName)) {
-                            preferences.setDefaultProvider(provider.id, using: appState.providerRegistry)
-                        }
-                    }
-                }
+                    value: simplifiedProviderName(for: selectedProvider?.displayName ?? preferences.defaultProviderID),
+                    sections: [
+                        FXDropdownSection(
+                            items: providers.map { provider in
+                                FXDropdownItem(
+                                    id: provider.id,
+                                    title: simplifiedProviderName(for: provider.displayName),
+                                    isSelected: preferences.defaultProviderID == provider.id
+                                ) {
+                                    preferences.setDefaultProvider(provider.id, using: appState.providerRegistry)
+                                }
+                            }
+                        )
+                    ]
+                )
 
                 settingsMenuRow(
                     "Model",
                     value: simplifiedModelName(for: selectedModel?.name ?? preferences.defaultModelID),
-                    enabled: selectedProvider != nil
-                ) {
-                    ForEach(selectedProvider?.availableModels ?? [], id: \.id) { model in
-                        Button(simplifiedModelName(for: model.name)) {
-                            preferences.defaultModelID = model.id
-                        }
-                    }
-                }
+                    enabled: selectedProvider != nil,
+                    sections: [
+                        FXDropdownSection(
+                            items: (selectedProvider?.availableModels ?? []).map { model in
+                                FXDropdownItem(
+                                    id: model.id,
+                                    title: simplifiedModelName(for: model.name),
+                                    isSelected: preferences.defaultModelID == model.id
+                                ) {
+                                    preferences.defaultModelID = model.id
+                                }
+                            }
+                        )
+                    ]
+                )
 
-                settingsMenuRow("Effort", value: effortLabel(for: preferences.defaultEffort)) {
-                    ForEach(["low", "medium", "high", "max"], id: \.self) { level in
-                        Button(effortLabel(for: level)) {
-                            preferences.defaultEffort = level
-                        }
-                    }
-                }
+                settingsMenuRow(
+                    "Effort",
+                    value: effortLabel(for: preferences.defaultEffort),
+                    sections: [
+                        FXDropdownSection(
+                            items: ["low", "medium", "high", "max"].map { level in
+                                FXDropdownItem(
+                                    id: level,
+                                    title: effortLabel(for: level),
+                                    isSelected: preferences.defaultEffort == level
+                                ) {
+                                    preferences.defaultEffort = level
+                                }
+                            }
+                        )
+                    ]
+                )
 
                 settingsNote("Applies when you create a new agent. Existing agents keep their own settings.")
             }
             settingsSection("Agent Defaults") {
-                settingsMenuRow("Access Level", value: accessLabel(preferences.defaultAccess)) {
-                    ForEach(AgentAccess.allCases, id: \.self) { access in
-                        Button(accessLabel(access)) {
-                            preferences.defaultAccess = access
-                        }
-                    }
-                }
+                settingsMenuRow(
+                    "Access Level",
+                    value: accessLabel(preferences.defaultAccess),
+                    sections: [
+                        FXDropdownSection(
+                            items: AgentAccess.allCases.map { access in
+                                FXDropdownItem(
+                                    id: access.rawValue,
+                                    title: accessLabel(access),
+                                    isSelected: preferences.defaultAccess == access
+                                ) {
+                                    preferences.defaultAccess = access
+                                }
+                            }
+                        )
+                    ]
+                )
 
-                settingsMenuRow("Agent Mode", value: modeLabel(preferences.defaultMode)) {
-                    ForEach(AgentMode.allCases, id: \.self) { mode in
-                        Button(modeLabel(mode)) {
-                            preferences.defaultMode = mode
-                        }
-                    }
-                }
+                settingsMenuRow(
+                    "Agent Mode",
+                    value: modeLabel(preferences.defaultMode),
+                    sections: [
+                        FXDropdownSection(
+                            items: AgentMode.allCases.map { mode in
+                                FXDropdownItem(
+                                    id: mode.rawValue,
+                                    title: modeLabel(mode),
+                                    isSelected: preferences.defaultMode == mode
+                                ) {
+                                    preferences.defaultMode = mode
+                                }
+                            }
+                        )
+                    ]
+                )
             }
         }
     }
@@ -137,24 +188,63 @@ struct SettingsPanel: View {
     private var appearanceSettings: some View {
         VStack(alignment: .leading, spacing: FXSpacing.xl) {
             settingsSection("Theme") {
-                settingsMenuRow("Appearance", value: preferences.appearanceMode.label) {
-                    ForEach(FXAppearanceMode.allCases, id: \.self) { mode in
-                        Button(mode.label) {
-                            preferences.appearanceMode = mode
-                        }
-                    }
-                }
+                settingsMenuRow(
+                    "Appearance",
+                    value: preferences.appearanceMode.label,
+                    panelWidth: 152,
+                    sections: [
+                        FXDropdownSection(
+                            items: FXAppearanceMode.allCases.map { mode in
+                                FXDropdownItem(
+                                    id: mode.rawValue,
+                                    title: mode.label,
+                                    isSelected: preferences.appearanceMode == mode
+                                ) {
+                                    preferences.appearanceMode = mode
+                                }
+                            }
+                        )
+                    ]
+                )
 
-                accentColorRow
+                settingsMenuRow(
+                    "Accent Color",
+                    value: preferences.accentColor.label,
+                    panelWidth: 152,
+                    sections: [
+                        FXDropdownSection(
+                            items: FXAccentColorOption.allCases.map { option in
+                                FXDropdownItem(
+                                    id: option.rawValue,
+                                    title: option.label,
+                                    isSelected: preferences.accentColor == option
+                                ) {
+                                    preferences.accentColor = option
+                                }
+                            }
+                        )
+                    ]
+                )
             }
             settingsSection("Interface") {
-                settingsMenuRow("Text Size", value: preferences.textSizePreset.label) {
-                    ForEach(FXTextSizePreset.allCases, id: \.self) { preset in
-                        Button(preset.label) {
-                            preferences.textSizePreset = preset
-                        }
-                    }
-                }
+                settingsMenuRow(
+                    "Text Size",
+                    value: textSizeLabel(preferences.textSizePreset),
+                    panelWidth: 176,
+                    sections: [
+                        FXDropdownSection(
+                            items: FXTextSizePreset.allCases.map { preset in
+                                FXDropdownItem(
+                                    id: preset.rawValue,
+                                    title: textSizeLabel(preset),
+                                    isSelected: preferences.textSizePreset == preset
+                                ) {
+                                    preferences.textSizePreset = preset
+                                }
+                            }
+                        )
+                    ]
+                )
 
                 settingsNote("Text size updates the shell immediately.")
             }
@@ -167,12 +257,13 @@ struct SettingsPanel: View {
         VStack(alignment: .leading, spacing: FXSpacing.xl) {
             settingsSection("Navigation") {
                 shortcutRow("Toggle Sidebar", shortcut: "⌘B")
-                shortcutRow("Toggle Inspector", shortcut: "⌘\\")
-                shortcutRow("Toggle Terminal", shortcut: "⌘`")
+                shortcutRow("Toggle Git Panel", shortcut: "⌘G")
+                shortcutRow("Toggle Browser Preview", shortcut: "⌘P")
+                shortcutRow("Toggle Terminal", shortcut: "⌘T")
                 shortcutRow("Jump to Agent 1-9", shortcut: "⌘1-9")
             }
             settingsSection("Actions") {
-                shortcutRow("Command Palette", shortcut: "⌘⇧P")
+                shortcutRow("Command Palette", shortcut: "⌘K")
                 shortcutRow("Send Prompt", shortcut: "⌘↩")
                 shortcutRow("Settings", shortcut: "⌘,")
             }
@@ -196,21 +287,22 @@ struct SettingsPanel: View {
         _ label: String,
         value: String,
         enabled: Bool = true,
-        @ViewBuilder content: () -> some View
+        panelWidth: CGFloat = 160,
+        sections: [FXDropdownSection]
     ) -> some View {
         HStack {
             Text(label)
                 .font(FXTypography.body)
                 .foregroundStyle(FXColors.fgSecondary)
             Spacer()
-            Menu {
-                content()
-            } label: {
-                settingsValueLabel(value, enabled: enabled)
+            FXDropdown(
+                sections: sections,
+                enabled: enabled,
+                panelWidth: panelWidth,
+                alignment: .trailing
+            ) { isExpanded in
+                settingsValueLabel(value, enabled: enabled, isExpanded: isExpanded)
             }
-            .menuIndicator(.hidden)
-            .menuStyle(.borderlessButton)
-            .disabled(!enabled)
         }
     }
 
@@ -272,59 +364,24 @@ struct SettingsPanel: View {
             ?? selectedProvider?.availableModels.first
     }
 
-    private var accentColorRow: some View {
-        HStack(alignment: .center, spacing: FXSpacing.md) {
-            Text("Accent Color")
-                .font(FXTypography.body)
-                .foregroundStyle(FXColors.fgSecondary)
-
-            Spacer()
-
-            HStack(spacing: FXSpacing.sm) {
-                ForEach(FXAccentColorOption.allCases, id: \.self) { option in
-                    Button {
-                        preferences.accentColor = option
-                    } label: {
-                        Circle()
-                            .fill(option.color)
-                            .frame(width: 18, height: 18)
-                            .overlay {
-                                Circle()
-                                    .strokeBorder(
-                                        preferences.accentColor == option ? FXColors.fg : FXColors.border,
-                                        lineWidth: preferences.accentColor == option ? 2 : 1
-                                    )
-                            }
-                    }
-                    .buttonStyle(.plain)
-                    .help(option.label)
-                }
-
-                Text(preferences.accentColor.label)
-                    .font(FXTypography.body)
-                    .foregroundStyle(FXColors.fg)
-                    .padding(.leading, FXSpacing.xs)
-            }
-            .padding(.horizontal, FXSpacing.sm)
-            .padding(.vertical, FXSpacing.xxs)
-            .background(FXColors.bgSurface)
-            .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
-        }
-    }
-
-    private func settingsValueLabel(_ value: String, enabled: Bool) -> some View {
-        HStack(spacing: FXSpacing.xs) {
+    private func settingsValueLabel(_ value: String, enabled: Bool, isExpanded: Bool) -> some View {
+        HStack(spacing: FXSpacing.sm) {
             Text(value)
                 .font(FXTypography.body)
                 .foregroundStyle(enabled ? FXColors.fg : FXColors.fgTertiary)
-            Image(systemName: "chevron.up.chevron.down")
+            Image(systemName: "chevron.down")
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(enabled ? FXColors.fgTertiary : FXColors.fgQuaternary)
+                .foregroundStyle(
+                    enabled
+                        ? (isExpanded ? FXColors.accent : FXColors.fgTertiary)
+                        : FXColors.fgQuaternary
+                )
+                .rotationEffect(.degrees(isExpanded ? 180 : 0))
         }
-        .padding(.horizontal, FXSpacing.sm)
+        .padding(.horizontal, FXSpacing.xxs)
         .padding(.vertical, FXSpacing.xxxs)
-        .background(FXColors.bgSurface)
-        .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
+        .frame(minWidth: 0, alignment: .trailing)
+        .contentShape(Rectangle())
     }
 
     private func settingsNote(_ text: String) -> some View {
@@ -370,5 +427,9 @@ struct SettingsPanel: View {
         case .fullAccess:
             "Full Access"
         }
+    }
+
+    private func textSizeLabel(_ preset: FXTextSizePreset) -> String {
+        "\(preset.label) (\(Int((14 * preset.scale).rounded())) pt)"
     }
 }

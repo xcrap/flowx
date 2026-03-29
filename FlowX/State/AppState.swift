@@ -334,6 +334,7 @@ final class ProjectState: Identifiable {
     var selectedInspectorContentKind: InspectorContentKind = .message
     var inspectorComparisonMode: InspectorComparisonMode = .unstaged { didSet { onChange?() } }
     var inspectorDiffDisplayMode: InspectorDiffDisplayMode = .inline { didSet { onChange?() } }
+    var changedFilesRailWidth: CGFloat = FlowXLayoutDefaults.defaultChangedFilesRailWidth { didSet { onChange?() } }
     var commitComposerVisible = false
     var commitMessageDraft = ""
     var includeUntrackedInCommit = true
@@ -544,6 +545,9 @@ enum FlowXLayoutDefaults {
     static let defaultRightPanelWidth: CGFloat = 760
     static let minRightPanelWidth: CGFloat = 560
     static let maxRightPanelWidth: CGFloat = 1100
+    static let defaultChangedFilesRailWidth: CGFloat = 248
+    static let minChangedFilesRailWidth: CGFloat = 188
+    static let maxChangedFilesRailWidth: CGFloat = 360
 }
 
 @Observable
@@ -1141,6 +1145,30 @@ final class AppState {
     private func canShowGitPanel(for project: ProjectState?) -> Bool {
         guard let project else { return false }
         return project.gitInfo.isGitRepo && project.gitInfo.hasChanges
+    }
+
+    func toggleGitPanel() {
+        guard activeProjectCanShowGitPanel else { return }
+
+        withAnimation(FXAnimation.panel) {
+            let shouldShowPanel = settingsVisible || !rightPanelVisible || rightPanelTab != .changes
+            settingsVisible = false
+            rightPanelTab = .changes
+            rightPanelVisible = shouldShowPanel
+        }
+    }
+
+    func toggleBrowserPreview() {
+        guard let agent = activeAgent else { return }
+
+        withAnimation(FXAnimation.panel) {
+            if agent.workspace.splitOpen && agent.workspace.splitContent == .browser {
+                agent.workspace.splitOpen = false
+            } else {
+                agent.workspace.splitContent = .browser
+                agent.workspace.splitOpen = true
+            }
+        }
     }
 
     private func synchronizeActiveProjectPanels() {

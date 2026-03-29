@@ -9,7 +9,7 @@ Native macOS app for orchestrating AI conversations, browser previews, git inspe
   - `FXCore` — shared models, environment, runtime discovery
   - `FXAgent` — providers, conversation engine, streaming, approvals
   - `FXTerminal` — terminal session management via SwiftTerm
-  - `FXDesign` — shared design tokens and UI primitives
+  - `FXDesign` — shared design tokens and UI primitives; this is the code-level source of truth for FlowX interface styling and components
 - **Main app target** in `FlowX/`:
   - `State/AppState.swift` wires providers, persistence, git polling, and workspace state
   - `Views/` contains the shell, sidebar, conversation UI, panels, and settings
@@ -24,6 +24,14 @@ Native macOS app for orchestrating AI conversations, browser previews, git inspe
 - Optional bottom terminal area with up to 3 side-by-side panes
 - Right inspector for changes and files
 - Settings panel and command palette
+
+## Design System Source of Truth
+
+- `Packages/FXDesign` is the primary UI source of truth for FlowX
+- Implement UI by extending `FXDesign` first, then consuming those components from app views
+- Keep tokens, component shapes, spacing, interaction patterns, and dropdown behavior consistent across the app
+- Avoid default macOS visual treatments when FlowX already defines a custom control style
+- If a component is missing from `FXDesign`, add it there first and then use it from app views instead of styling each screen ad hoc
 
 ## Build
 
@@ -68,5 +76,6 @@ Debug and release use separate app-support directories so local development does
 
 ## Working Notes
 
-- Keep Flow capabilities when possible, but preserve the FlowX shell and mockup direction
-- If shell behavior and the mockup disagree, bias toward the mockup unless functionality would regress
+- Preserve current FlowX product behavior unless a change is intentional
+- Treat the FlowX design system as binding guidance, not loose inspiration
+- Do not ship native glassy menus, left-side menu indicators, or improvised control styles when FlowX defines a flatter custom alternative
