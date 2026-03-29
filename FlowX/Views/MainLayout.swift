@@ -204,18 +204,6 @@ struct MainLayout: View {
                         .font(FXTypography.bodyMedium)
                         .foregroundStyle(FXColors.fg)
 
-                    if agent.toolCallCount > 0 {
-                        metadataSeparator
-
-                        Image(systemName: "hammer")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(FXColors.fgTertiary)
-
-                        Text("\(agent.toolCallCount)")
-                            .font(FXTypography.monoSmall)
-                            .foregroundStyle(FXColors.fgSecondary)
-                    }
-
                     if agent.additions > 0 || agent.deletions > 0 {
                         metadataSeparator
                         Button(action: appState.toggleGitPanel) {
