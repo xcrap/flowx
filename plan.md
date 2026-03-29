@@ -26,18 +26,17 @@ The app is no longer just a visual mockup. The FlowX shell now builds against re
 - Real `AppState`, `ProjectPersistence`, and `ConversationPersistence`
 - Real provider registration, runtime health checks, send / cancel / reset flows
 - Real runtime activity rendering, queued prompt editing/removal, supervised approval handling, session resume/retry UX, token/context status, and per-agent terminal sessions
-- Real git polling, searchable file inspection, structured diff/file rendering, and commit / push actions
+- Real git polling, searchable file inspection, staged / unstaged / base inspection, inline / split diff rendering, and commit / push actions
 - Real split browser panel backed by `WKWebView` with per-agent persisted URL state
 - More polished empty states plus core shell shortcuts for sidebar, right panel, terminal, send, settings, agent switching, and command palette
 
 **Still outstanding before calling the core shell “feature-complete”:**
 - Provider/session polish: deeper session recovery edge cases and additional multi-provider supervision depth
-- Additional git polish: staged-vs-unstaged depth and alternate diff modes
 - Accessibility and performance passes, plus any remaining focus edge cases
 - Additional session restore and agent/workspace quality-of-life polish
 
 **Active next slice:**
-- Keep closing shell polish gaps around accessibility, remaining focus edge cases, and git/session depth
+- Keep closing shell polish gaps around accessibility, performance, and remaining session/workspace depth
 
 ---
 
@@ -383,7 +382,7 @@ Each agent gets its own `WorkspaceState` so split/terminal preferences are indep
 
 **Goal:** Real git status, diff viewing, and WebKit browser.
 
-**Status:** 🟡 Git polling, searchable files, structured diff inspection, inline commit/push workflow, and WebKit browser are in; staged/unstaged depth and alternate diff modes remain.
+**Status:** 🟢 Git polling, searchable files, staged/unstaged/base inspection, inline/split diff rendering, inline commit/push workflow, and WebKit browser are in.
 
 ### 5a. Git
 - Port `GitStatusService` with 5s polling
@@ -395,7 +394,7 @@ Each agent gets its own `WorkspaceState` so split/terminal preferences are indep
 ### 5b. Diff View
 - Custom SwiftUI diff renderer OR WKWebView with highlight.js
 - Show file diffs when selecting a file in CHANGES panel
-- Side-by-side or inline diff modes
+- Side-by-side and inline diff modes
 
 ### 5c. WebKit Browser
 - `WKWebView` wrapped in `NSViewRepresentable`

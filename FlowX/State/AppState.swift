@@ -21,7 +21,8 @@ enum RightPanelTab: String, CaseIterable {
 }
 
 enum InspectorComparisonMode: String, CaseIterable {
-    case local = "Local"
+    case unstaged = "Unstaged"
+    case staged = "Staged"
     case base = "Base"
 }
 
@@ -29,6 +30,11 @@ enum InspectorContentKind {
     case diff
     case file
     case message
+}
+
+enum InspectorDiffDisplayMode: String, CaseIterable {
+    case inline = "Inline"
+    case split = "Split"
 }
 
 enum AgentStatus: String {
@@ -321,7 +327,8 @@ final class ProjectState: Identifiable {
     var selectedInspectorPath: String?
     var selectedInspectorText: String = ""
     var selectedInspectorContentKind: InspectorContentKind = .message
-    var inspectorComparisonMode: InspectorComparisonMode = .local
+    var inspectorComparisonMode: InspectorComparisonMode = .unstaged
+    var inspectorDiffDisplayMode: InspectorDiffDisplayMode = .inline
     var commitComposerVisible = false
     var commitMessageDraft = ""
     var includeUntrackedInCommit = true
@@ -668,6 +675,24 @@ final class AppState {
     func setInspectorComparisonMode(_ mode: InspectorComparisonMode, for project: ProjectState) {
         guard project.inspectorComparisonMode != mode else { return }
         project.inspectorComparisonMode = mode
+        let visiblePaths = project.gitInfo.files
+            .filter { file in
+                switch mode {
+                case .unstaged:
+                    file.hasUnstagedChanges
+                case .staged:
+                    file.hasStagedChanges
+                case .base:
+                    true
+                }
+            }
+            .map(\.path)
+
+        if let selectedPath = project.selectedInspectorPath, !visiblePaths.contains(selectedPath) {
+            project.selectedInspectorPath = visiblePaths.first
+        } else if project.selectedInspectorPath == nil {
+            project.selectedInspectorPath = visiblePaths.first
+        }
         Task { @MainActor in
             await refreshInspector(for: project)
         }
@@ -735,12 +760,19 @@ final class AppState {
             return
         }
 
-        switch project.inspectorComparisonMode {
-        case .local:
-            let diff = project.gitInfo.hasCommits
-                ? await gitStatusService.diffAgainstHead(projectID: project.id, path: selectedPath)
-                : await gitStatusService.diff(projectID: project.id, path: selectedPath)
+        let fileStatus = project.gitInfo.files.first(where: { $0.path == selectedPath })
 
+        switch project.inspectorComparisonMode {
+        case .unstaged:
+            guard fileStatus?.hasUnstagedChanges == true else {
+                project.selectedInspectorText = fileStatus?.hasStagedChanges == true
+                    ? "This file only has staged changes right now."
+                    : "This file has no unstaged changes."
+                project.selectedInspectorContentKind = .message
+                return
+            }
+
+            let diff = await gitStatusService.diffUnstaged(projectID: project.id, path: selectedPath)
             if !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 project.selectedInspectorText = diff
                 project.selectedInspectorContentKind = .diff
@@ -753,6 +785,31 @@ final class AppState {
                 project.selectedInspectorContentKind = .file
             } else {
                 project.selectedInspectorText = "No local content available for this file."
+                project.selectedInspectorContentKind = .message
+            }
+
+        case .staged:
+            guard fileStatus?.hasStagedChanges == true else {
+                project.selectedInspectorText = fileStatus?.hasUnstagedChanges == true
+                    ? "This file has unstaged changes, but nothing staged yet."
+                    : "This file has no staged changes."
+                project.selectedInspectorContentKind = .message
+                return
+            }
+
+            let diff = await gitStatusService.diffStaged(projectID: project.id, path: selectedPath)
+            if !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                project.selectedInspectorText = diff
+                project.selectedInspectorContentKind = .diff
+                return
+            }
+
+            if let stagedContents = await gitStatusService.fileContentsFromIndex(projectID: project.id, path: selectedPath),
+               !stagedContents.isEmpty {
+                project.selectedInspectorText = stagedContents
+                project.selectedInspectorContentKind = .file
+            } else {
+                project.selectedInspectorText = "No staged content is available for this file."
                 project.selectedInspectorContentKind = .message
             }
 

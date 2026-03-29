@@ -61,16 +61,16 @@ struct ChangesPanel: View {
                 title: "No git repository",
                 body: "Open a git-backed folder to inspect changes and compare against the current base."
             )
-        } else if project.gitInfo.files.isEmpty {
+        } else if visibleFiles(for: project).isEmpty {
             panelMessage(
-                icon: "checkmark.circle",
-                title: "No local changes",
-                body: "Working tree is clean. Start a prompt or edit files to see changes here."
+                icon: emptyStateIcon(for: project.inspectorComparisonMode),
+                title: emptyStateTitle(for: project.inspectorComparisonMode),
+                body: emptyStateBody(for: project.inspectorComparisonMode)
             )
         } else {
             ScrollView {
                 LazyVStack(spacing: FXSpacing.xxs) {
-                    ForEach(project.gitInfo.files) { file in
+                    ForEach(visibleFiles(for: project)) { file in
                         fileRow(file, in: project)
                     }
                 }
@@ -85,6 +85,8 @@ struct ChangesPanel: View {
         let isSelected = project.selectedInspectorPath == file.path
         let filename = fileName(for: file.path)
         let parent = parentPath(for: file.path)
+        let additions = visibleAdditions(for: file, mode: project.inspectorComparisonMode)
+        let deletions = visibleDeletions(for: file, mode: project.inspectorComparisonMode)
 
         return Button(action: {
             appState.selectInspectorPath(file.path, for: project)
@@ -92,7 +94,7 @@ struct ChangesPanel: View {
             HStack(spacing: FXSpacing.md) {
                 Image(systemName: iconName(for: file))
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(statusColor(for: file))
+                    .foregroundStyle(statusColor(for: file, mode: project.inspectorComparisonMode))
                     .frame(width: 14)
 
                 VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
@@ -113,29 +115,33 @@ struct ChangesPanel: View {
                 Spacer(minLength: 0)
 
                 HStack(spacing: FXSpacing.xs) {
-                    if file.additions > 0 {
-                        Text("+\(file.additions)")
+                    if additions > 0 {
+                        Text("+\(additions)")
                             .font(FXTypography.monoSmall)
                             .foregroundStyle(FXColors.success)
                     }
 
-                    if file.deletions > 0 {
-                        Text("-\(file.deletions)")
+                    if deletions > 0 {
+                        Text("-\(deletions)")
                             .font(FXTypography.monoSmall)
                             .foregroundStyle(FXColors.error)
                     }
 
-                    Text(statusLabel(for: file))
+                    Text(statusLabel(for: file, mode: project.inspectorComparisonMode))
                         .font(FXTypography.monoSmall)
-                        .foregroundStyle(statusColor(for: file))
+                        .foregroundStyle(statusColor(for: file, mode: project.inspectorComparisonMode))
                         .padding(.horizontal, FXSpacing.xs)
                         .padding(.vertical, 1)
-                        .background(statusColor(for: file).opacity(0.12))
+                        .background(statusColor(for: file, mode: project.inspectorComparisonMode).opacity(0.12))
                         .clipShape(Capsule())
 
-                    Image(systemName: file.isStaged ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 12))
-                        .foregroundStyle(file.isStaged ? FXColors.success : FXColors.fgQuaternary)
+                    if file.hasStagedChanges {
+                        stageBadge("S", tint: FXColors.success)
+                    }
+
+                    if file.hasUnstagedChanges {
+                        stageBadge("U", tint: FXColors.warning)
+                    }
                 }
             }
             .padding(.horizontal, FXSpacing.md)
@@ -177,8 +183,48 @@ struct ChangesPanel: View {
 
     private func summaryText(for project: ProjectState) -> String? {
         guard project.gitInfo.isGitRepo else { return nil }
-        let count = project.gitInfo.files.count
-        return count == 1 ? "1 changed file" : "\(count) changed files"
+        let count = visibleFiles(for: project).count
+        switch project.inspectorComparisonMode {
+        case .unstaged:
+            return count == 1 ? "1 unstaged file" : "\(count) unstaged files"
+        case .staged:
+            return count == 1 ? "1 staged file" : "\(count) staged files"
+        case .base:
+            return count == 1 ? "1 changed file" : "\(count) changed files"
+        }
+    }
+
+    private func visibleFiles(for project: ProjectState) -> [GitStatusService.FileStatus] {
+        switch project.inspectorComparisonMode {
+        case .unstaged:
+            project.gitInfo.files.filter(\.hasUnstagedChanges)
+        case .staged:
+            project.gitInfo.files.filter(\.hasStagedChanges)
+        case .base:
+            project.gitInfo.files
+        }
+    }
+
+    private func visibleAdditions(for file: GitStatusService.FileStatus, mode: InspectorComparisonMode) -> Int {
+        switch mode {
+        case .unstaged:
+            file.unstagedAdditions
+        case .staged:
+            file.stagedAdditions
+        case .base:
+            file.additions
+        }
+    }
+
+    private func visibleDeletions(for file: GitStatusService.FileStatus, mode: InspectorComparisonMode) -> Int {
+        switch mode {
+        case .unstaged:
+            file.unstagedDeletions
+        case .staged:
+            file.stagedDeletions
+        case .base:
+            file.deletions
+        }
     }
 
     private func fileName(for path: String) -> String {
@@ -203,32 +249,93 @@ struct ChangesPanel: View {
         return "doc.text"
     }
 
-    private func statusColor(for file: GitStatusService.FileStatus) -> Color {
-        if file.isUntracked {
+    private func statusColor(for file: GitStatusService.FileStatus, mode: InspectorComparisonMode) -> Color {
+        let effectiveStatus = statusCode(for: file, mode: mode)
+
+        if effectiveStatus == "??" {
             return FXColors.success
         }
-        if file.status.contains("D") {
+        if effectiveStatus.contains("D") {
             return FXColors.error
         }
-        if file.status.contains("R") {
+        if effectiveStatus.contains("R") {
             return FXColors.info
         }
         return FXColors.warning
     }
 
-    private func statusLabel(for file: GitStatusService.FileStatus) -> String {
-        if file.isUntracked {
+    private func statusLabel(for file: GitStatusService.FileStatus, mode: InspectorComparisonMode) -> String {
+        let effectiveStatus = statusCode(for: file, mode: mode)
+
+        if effectiveStatus == "??" {
             return "NEW"
         }
-        if file.status.contains("D") {
+        if effectiveStatus.contains("D") {
             return "DEL"
         }
-        if file.status.contains("R") {
+        if effectiveStatus.contains("R") {
             return "REN"
         }
-        if file.status.contains("A") {
+        if effectiveStatus.contains("A") {
             return "ADD"
         }
         return "MOD"
+    }
+
+    private func statusCode(for file: GitStatusService.FileStatus, mode: InspectorComparisonMode) -> String {
+        switch mode {
+        case .unstaged:
+            return file.isUntracked ? "??" : file.unstagedStatus
+        case .staged:
+            return file.stagedStatus
+        case .base:
+            if file.hasUnstagedChanges {
+                return file.isUntracked ? "??" : file.unstagedStatus
+            }
+            return file.stagedStatus
+        }
+    }
+
+    private func emptyStateIcon(for mode: InspectorComparisonMode) -> String {
+        switch mode {
+        case .unstaged:
+            "checkmark.circle"
+        case .staged:
+            "square.and.arrow.down"
+        case .base:
+            "checkmark.circle"
+        }
+    }
+
+    private func emptyStateTitle(for mode: InspectorComparisonMode) -> String {
+        switch mode {
+        case .unstaged:
+            "No unstaged changes"
+        case .staged:
+            "Nothing staged"
+        case .base:
+            "No local changes"
+        }
+    }
+
+    private func emptyStateBody(for mode: InspectorComparisonMode) -> String {
+        switch mode {
+        case .unstaged:
+            "Working tree is clean. Edit files or start a prompt to see unstaged changes here."
+        case .staged:
+            "Stage changes in git to inspect the exact snapshot that will be committed."
+        case .base:
+            "Working tree is clean. Start a prompt or edit files to see changes here."
+        }
+    }
+
+    private func stageBadge(_ title: String, tint: Color) -> some View {
+        Text(title)
+            .font(FXTypography.monoSmall)
+            .foregroundStyle(tint)
+            .padding(.horizontal, FXSpacing.xs)
+            .padding(.vertical, 1)
+            .background(tint.opacity(0.12))
+            .clipShape(Capsule())
     }
 }

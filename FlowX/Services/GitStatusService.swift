@@ -11,11 +11,25 @@ final class GitStatusService {
     struct FileStatus: Equatable, Identifiable {
         var id: String { path }
         var path: String
-        var status: String
-        var additions: Int
-        var deletions: Int
-        var isStaged: Bool
-        var isUntracked: Bool { status == "??" }
+        var stagedStatus: String
+        var unstagedStatus: String
+        var stagedAdditions: Int
+        var stagedDeletions: Int
+        var unstagedAdditions: Int
+        var unstagedDeletions: Int
+
+        var status: String {
+            let combined = "\(stagedStatus)\(unstagedStatus)"
+            let trimmed = combined.trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty ? "?" : trimmed
+        }
+
+        var additions: Int { stagedAdditions + unstagedAdditions }
+        var deletions: Int { stagedDeletions + unstagedDeletions }
+        var isStaged: Bool { hasStagedChanges }
+        var isUntracked: Bool { stagedStatus == "?" && unstagedStatus == "?" }
+        var hasStagedChanges: Bool { stagedStatus != " " && stagedStatus != "?" }
+        var hasUnstagedChanges: Bool { isUntracked || (unstagedStatus != " " && unstagedStatus != "?") }
     }
 
     struct GitInfo: Equatable {
@@ -29,6 +43,8 @@ final class GitStatusService {
         var additions: Int = 0
         var deletions: Int = 0
         var filesChanged: Int = 0
+        var stagedFileCount: Int = 0
+        var unstagedFileCount: Int = 0
         var statusFileCount: Int = 0
         var files: [FileStatus] = []
         var hasChanges: Bool { statusFileCount > 0 }
@@ -70,9 +86,14 @@ final class GitStatusService {
         }
     }
 
-    func diff(projectID: UUID, path: String) async -> String {
+    func diffUnstaged(projectID: UUID, path: String) async -> String {
         guard let rootPath = rootPaths[projectID] else { return "" }
-        return await runGit(["diff", "--", path], in: rootPath)
+        return await runGit(["diff", "--no-ext-diff", "--no-color", "--", path], in: rootPath)
+    }
+
+    func diffStaged(projectID: UUID, path: String) async -> String {
+        guard let rootPath = rootPaths[projectID] else { return "" }
+        return await runGit(["diff", "--no-ext-diff", "--no-color", "--cached", "--", path], in: rootPath)
     }
 
     func diffAgainstHead(projectID: UUID, path: String) async -> String {
@@ -93,6 +114,13 @@ final class GitStatusService {
     func fileContentsAtHead(projectID: UUID, path: String) async -> String? {
         guard let rootPath = rootPaths[projectID] else { return nil }
         let result = await runGitForResult(["show", "HEAD:\(path)"], in: rootPath)
+        guard result.succeeded else { return nil }
+        return result.output
+    }
+
+    func fileContentsFromIndex(projectID: UUID, path: String) async -> String? {
+        guard let rootPath = rootPaths[projectID] else { return nil }
+        let result = await runGitForResult(["show", ":\(path)"], in: rootPath)
         guard result.succeeded else { return nil }
         return result.output
     }
@@ -182,24 +210,8 @@ final class GitStatusService {
             }
         }
 
-        let diffStat = await runGit(["diff", "--shortstat"], in: rootPath)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if !diffStat.isEmpty {
-            for part in diffStat.components(separatedBy: ",") {
-                let trimmed = part.trimmingCharacters(in: .whitespaces)
-                if trimmed.contains("file") {
-                    gitInfo.filesChanged = Int(trimmed.components(separatedBy: " ").first ?? "") ?? 0
-                } else if trimmed.contains("insertion") {
-                    gitInfo.additions = Int(trimmed.components(separatedBy: " ").first ?? "") ?? 0
-                } else if trimmed.contains("deletion") {
-                    gitInfo.deletions = Int(trimmed.components(separatedBy: " ").first ?? "") ?? 0
-                }
-            }
-        }
-
-        let numstatOutput = await runGit(["diff", "--numstat"], in: rootPath)
-        let numstatMap = parseNumstat(numstatOutput)
+        let unstagedNumstatMap = parseNumstat(await runGit(["diff", "--numstat"], in: rootPath))
+        let stagedNumstatMap = parseNumstat(await runGit(["diff", "--cached", "--numstat"], in: rootPath))
 
         let statusOutput = await runGit(["status", "--porcelain"], in: rootPath)
         let statusLines = statusOutput.components(separatedBy: "\n").filter { !$0.isEmpty }
@@ -207,20 +219,28 @@ final class GitStatusService {
             guard line.count >= 3 else { return nil }
 
             let x = String(line.prefix(1))
-            let status = String(line.prefix(2)).trimmingCharacters(in: .whitespaces)
+            let y = String(line.dropFirst(1).prefix(1))
             let rawPath = String(line.dropFirst(3))
             let path = rawPath.components(separatedBy: " -> ").last ?? rawPath
-            let counts = numstatMap[path] ?? (0, 0)
+            let unstagedCounts = unstagedNumstatMap[path] ?? (0, 0)
+            let stagedCounts = stagedNumstatMap[path] ?? (0, 0)
 
             return FileStatus(
                 path: path,
-                status: status.isEmpty ? "?" : status,
-                additions: counts.0,
-                deletions: counts.1,
-                isStaged: x != " " && x != "?"
+                stagedStatus: x,
+                unstagedStatus: y,
+                stagedAdditions: stagedCounts.0,
+                stagedDeletions: stagedCounts.1,
+                unstagedAdditions: unstagedCounts.0,
+                unstagedDeletions: unstagedCounts.1
             )
         }
+        gitInfo.stagedFileCount = gitInfo.files.filter(\.hasStagedChanges).count
+        gitInfo.unstagedFileCount = gitInfo.files.filter(\.hasUnstagedChanges).count
         gitInfo.statusFileCount = gitInfo.files.count
+        gitInfo.filesChanged = gitInfo.files.count
+        gitInfo.additions = gitInfo.files.reduce(into: 0) { $0 += $1.additions }
+        gitInfo.deletions = gitInfo.files.reduce(into: 0) { $0 += $1.deletions }
 
         info[projectID] = gitInfo
     }
