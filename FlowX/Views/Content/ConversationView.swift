@@ -16,28 +16,27 @@ struct ConversationView: View {
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                LazyVStack(spacing: FXSpacing.xxxl) {
-                    if !agent.activities.isEmpty {
-                        RuntimeActivityBar(activities: agent.activities, toolCallCount: agent.toolCallCount)
-                            .id("runtime-activity")
-                    }
-
+                LazyVStack(spacing: 0) {
                     ForEach(agent.messages) { message in
                         MessageBubble(message: message)
                             .id(messageScrollID(for: message))
+                            .padding(.bottom, messageSpacing(for: message))
                     }
 
                     if !agent.conversationState.streamingText.isEmpty {
                         MessageBubble(streamingText: agent.conversationState.streamingText)
                             .id("streaming-message")
+                            .padding(.bottom, FXSpacing.xl)
                     } else if agent.isStreaming {
                         streamingIndicator
                             .id("streaming-indicator")
+                            .padding(.bottom, FXSpacing.xl)
                     }
 
                     if let error = agent.conversationState.error {
                         errorCard(error)
                             .id("conversation-error")
+                            .padding(.bottom, FXSpacing.xl)
                     }
 
                     Color.clear
@@ -88,11 +87,25 @@ struct ConversationView: View {
 
     private var contentVersion: Int {
         var version = agent.messages.count
-        version += agent.activities.count
         version += agent.conversationState.streamingText.isEmpty ? 0 : 1
         version += agent.isStreaming ? 1 : 0
         version += agent.conversationState.error == nil ? 0 : 1
         return version
+    }
+
+    private func messageSpacing(for message: ConversationMessage) -> CGFloat {
+        isToolEventMessage(message) ? FXSpacing.sm : FXSpacing.xl
+    }
+
+    private func isToolEventMessage(_ message: ConversationMessage) -> Bool {
+        !message.content.isEmpty && message.content.allSatisfy { item in
+            switch item {
+            case .toolUse, .toolResult:
+                true
+            default:
+                false
+            }
+        }
     }
 
     private var showsContextBar: Bool {
