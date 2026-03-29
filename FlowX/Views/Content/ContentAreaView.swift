@@ -35,7 +35,7 @@ struct ContentAreaView: View {
 
     @ViewBuilder
     private func upperZone(agent: AgentInfo) -> some View {
-        if agent.workspace.splitOpen {
+        if agent.workspace.splitOpen, agent.workspace.splitContent == .browser {
             HSplitView {
                 ConversationView(agent: agent)
                     .frame(minWidth: 480)
@@ -50,7 +50,8 @@ struct ContentAreaView: View {
     @ViewBuilder
     private func splitContentView(agent: AgentInfo) -> some View {
         switch agent.workspace.splitContent {
-        case .diff: DiffView()
+        case .diff:
+            unavailableSplitView
         case .browser:
             BrowserPanel(agent: agent)
                 .id(agent.id)
@@ -71,5 +72,31 @@ struct ContentAreaView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(FXColors.contentBg)
+    }
+
+    private var unavailableSplitView: some View {
+        VStack(spacing: FXSpacing.md) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 22, weight: .regular))
+                .foregroundStyle(FXColors.fgTertiary)
+
+            VStack(spacing: FXSpacing.xs) {
+                Text("Git diff unavailable")
+                    .font(FXTypography.bodyMedium)
+                    .foregroundStyle(FXColors.fgSecondary)
+
+                Text(unavailableSplitBody)
+                    .font(FXTypography.caption)
+                    .foregroundStyle(FXColors.fgTertiary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 220)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(FXColors.contentBg)
+    }
+
+    private var unavailableSplitBody: String {
+        "Git now lives in the right-side Git panel."
     }
 }

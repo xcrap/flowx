@@ -15,48 +15,132 @@ struct DragHandle: NSViewRepresentable {
 
 struct MainLayout: View {
     @Environment(AppState.self) private var appState
+    @State private var rightPanelDragStartWidth: CGFloat?
+    @State private var liveRightPanelWidth: CGFloat?
+    @State private var rightPanelHandleHovered = false
+
+    private let rightPanelHandleWidth: CGFloat = 12
 
     var body: some View {
-        ZStack(alignment: .top) {
-            VStack(spacing: 0) {
-                // Single-row title bar — traffic lights float on top of this
-                titleBar
+        GeometryReader { geometry in
+            ZStack(alignment: .top) {
+                VStack(spacing: 0) {
+                    // Single-row title bar — traffic lights float on top of this
+                    titleBar
 
-                // Content
-                HStack(spacing: 0) {
-                    if appState.sidebarVisible {
-                        SidebarView()
-                            .frame(width: 260)
-                            .transition(.move(edge: .leading))
-                        FXDivider(.vertical)
+                    // Content
+                    HStack(spacing: 0) {
+                        if appState.sidebarVisible {
+                            SidebarView()
+                                .frame(width: 260)
+                                .transition(.move(edge: .leading))
+                            FXDivider(.vertical)
+                        }
+
+                        ContentAreaView()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                        if appState.settingsVisible {
+                            FXDivider(.vertical)
+                            SettingsPanel()
+                                .frame(width: 380)
+                                .transition(.move(edge: .trailing))
+                        } else if appState.rightPanelVisible {
+                            FXDivider(.vertical)
+                            rightPanel(totalWidth: geometry.size.width)
+                                .transition(.move(edge: .trailing))
+                        }
                     }
-
-                    ContentAreaView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                    if appState.settingsVisible {
-                        FXDivider(.vertical)
-                        SettingsPanel()
-                            .frame(width: 380)
-                            .transition(.move(edge: .trailing))
-                    } else if appState.rightPanelVisible {
-                        FXDivider(.vertical)
-                        RightPanelView()
-                            .frame(width: 300)
-                            .transition(.move(edge: .trailing))
-                    }
+                    .animation(FXAnimation.panel, value: appState.sidebarVisible)
+                    .animation(FXAnimation.panel, value: appState.rightPanelVisible)
+                    .animation(FXAnimation.panel, value: appState.settingsVisible)
                 }
-                .animation(FXAnimation.panel, value: appState.sidebarVisible)
-                .animation(FXAnimation.panel, value: appState.rightPanelVisible)
-                .animation(FXAnimation.panel, value: appState.settingsVisible)
-            }
 
-            if appState.commandPaletteVisible {
-                CommandPaletteView()
-                    .transition(.opacity)
-                    .zIndex(10)
+                if appState.commandPaletteVisible {
+                    CommandPaletteView()
+                        .transition(.opacity)
+                        .zIndex(10)
+                }
             }
         }
+    }
+
+    private func rightPanel(totalWidth: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            rightPanelResizeHandle(totalWidth: totalWidth)
+            RightPanelView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(width: displayedRightPanelWidth(in: totalWidth))
+    }
+
+    private func rightPanelResizeHandle(totalWidth: CGFloat) -> some View {
+        Rectangle()
+            .fill(.clear)
+            .frame(width: rightPanelHandleWidth)
+            .overlay {
+                Rectangle()
+                    .fill(rightPanelHandleHovered ? FXColors.accent.opacity(0.8) : FXColors.borderSubtle)
+                    .frame(width: 1)
+            }
+            .contentShape(Rectangle())
+            .background(rightPanelHandleHovered ? FXColors.accent.opacity(0.08) : .clear)
+            .onHover { hovering in
+                rightPanelHandleHovered = hovering
+                if hovering {
+                    NSCursor.resizeLeftRight.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    .onChanged { value in
+                        if rightPanelDragStartWidth == nil {
+                            rightPanelDragStartWidth = displayedRightPanelWidth(in: totalWidth)
+                            liveRightPanelWidth = rightPanelDragStartWidth
+                        }
+
+                        let baseWidth = rightPanelDragStartWidth ?? displayedRightPanelWidth(in: totalWidth)
+                        let proposedWidth = baseWidth - value.translation.width
+                        liveRightPanelWidth = clampRightPanelWidth(proposedWidth, in: totalWidth)
+                    }
+                    .onEnded { _ in
+                        if let liveRightPanelWidth {
+                            appState.rightPanelWidth = liveRightPanelWidth
+                        }
+                        liveRightPanelWidth = nil
+                        rightPanelDragStartWidth = nil
+                        if rightPanelHandleHovered {
+                            NSCursor.resizeLeftRight.set()
+                        } else {
+                            NSCursor.arrow.set()
+                        }
+                    }
+            )
+            .help("Resize git panel")
+    }
+
+    private func displayedRightPanelWidth(in totalWidth: CGFloat) -> CGFloat {
+        let bounds = rightPanelWidthBounds(in: totalWidth)
+        let sourceWidth = liveRightPanelWidth ?? appState.rightPanelWidth
+        return min(max(sourceWidth, bounds.lowerBound), bounds.upperBound)
+    }
+
+    private func clampRightPanelWidth(_ width: CGFloat, in totalWidth: CGFloat) -> CGFloat {
+        let bounds = rightPanelWidthBounds(in: totalWidth)
+        return min(max(width, bounds.lowerBound), bounds.upperBound)
+    }
+
+    private func rightPanelWidthBounds(in totalWidth: CGFloat) -> ClosedRange<CGFloat> {
+        let reservedSidebarWidth: CGFloat = appState.sidebarVisible ? 260 : 0
+        let minimumContentWidth: CGFloat = 300
+        let maximumVisibleWidth = min(
+            FlowXLayoutDefaults.maxRightPanelWidth,
+            max(0, totalWidth - reservedSidebarWidth - minimumContentWidth)
+        )
+        let minimumVisibleWidth = min(FlowXLayoutDefaults.minRightPanelWidth, maximumVisibleWidth)
+        return minimumVisibleWidth ... maximumVisibleWidth
     }
 
     private var titleBar: some View {
@@ -139,34 +223,20 @@ struct MainLayout: View {
                 if appState.activeAgent != nil {
                     HStack(spacing: FXSpacing.xxs) {
                         headerButton(
-                            icon: "rectangle.split.2x1",
-                            label: "Toggle split view",
-                            active: appState.activeAgent?.workspace.splitOpen == true && appState.activeAgent?.workspace.splitContent == .diff
-                        ) {
-                            withAnimation(FXAnimation.panel) {
-                                if let agent = appState.activeAgent {
-                                    if agent.workspace.splitOpen && agent.workspace.splitContent == .diff {
-                                        agent.workspace.splitOpen = false
-                                    } else {
-                                        agent.workspace.splitContent = .diff
-                                        agent.workspace.splitOpen = true
-                                    }
-                                }
-                            }
-                        }
-                        headerButton(
                             icon: "terminal",
                             label: "Toggle terminal",
                             active: appState.activeAgent?.workspace.terminalVisible == true
                         ) {
                             withAnimation(FXAnimation.panel) { appState.activeAgent?.workspace.terminalVisible.toggle() }
                         }
-                        headerButton(
-                            icon: "sidebar.right",
-                            label: "Toggle inspector",
-                            active: appState.rightPanelVisible
-                        ) {
-                            withAnimation(FXAnimation.panel) { appState.rightPanelVisible.toggle() }
+                        if appState.activeProjectCanShowGitPanel {
+                            headerButton(
+                                icon: "sidebar.right",
+                                label: "Toggle git panel",
+                                active: appState.rightPanelVisible
+                            ) {
+                                withAnimation(FXAnimation.panel) { appState.rightPanelVisible.toggle() }
+                            }
                         }
                         headerButton(
                             icon: "globe",
@@ -473,35 +543,22 @@ private struct CommandPaletteView: View {
                 }
             )
 
-            items.append(
-                PaletteAction(
-                    title: "Show Changes",
-                    subtitle: "Focus the changes inspector tab",
-                    systemImage: "arrow.triangle.branch",
-                    keywords: ["changes", "git", "diff"]
-                ) {
-                    withAnimation(FXAnimation.panel) {
-                        appState.settingsVisible = false
-                        appState.rightPanelVisible = true
-                        appState.rightPanelTab = .changes
+            if appState.activeProjectCanShowGitPanel {
+                items.append(
+                    PaletteAction(
+                        title: "Show Git Panel",
+                        subtitle: "Inspect current git changes",
+                        systemImage: "arrow.triangle.branch",
+                        keywords: ["changes", "git", "diff", "inspector"]
+                    ) {
+                        withAnimation(FXAnimation.panel) {
+                            appState.settingsVisible = false
+                            appState.rightPanelVisible = true
+                            appState.rightPanelTab = .changes
+                        }
                     }
-                }
-            )
-
-            items.append(
-                PaletteAction(
-                    title: "Show Files",
-                    subtitle: "Focus the repository files tab",
-                    systemImage: "doc.on.doc",
-                    keywords: ["files", "tree", "repository"]
-                ) {
-                    withAnimation(FXAnimation.panel) {
-                        appState.settingsVisible = false
-                        appState.rightPanelVisible = true
-                        appState.rightPanelTab = .files
-                    }
-                }
-            )
+                )
+            }
 
             for agent in project.agents {
                 items.append(

@@ -2,11 +2,6 @@
 
 Native macOS app for orchestrating AI conversations, browser previews, git inspection, and terminals in a clean shell layout.
 
-## Current Direction
-
-- This repo is the node-free evolution of `/Users/xcrap/projects/flow`
-- `plan.md` is the source of truth for remaining work
-
 ## Architecture
 
 - **Swift 6.2 / SwiftUI** targeting macOS 26
@@ -74,5 +69,4 @@ Debug and release use separate app-support directories so local development does
 ## Working Notes
 
 - Keep Flow capabilities when possible, but preserve the FlowX shell and mockup direction
-- Prefer updating `plan.md` when a phase materially changes
 - If shell behavior and the mockup disagree, bias toward the mockup unless functionality would regress

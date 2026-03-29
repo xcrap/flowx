@@ -401,11 +401,169 @@ final class ProjectState: Identifiable {
 
 @Observable
 @MainActor
+final class AppPreferences {
+    private enum Keys {
+        static let defaultProviderID = "flowx.defaultProviderID"
+        static let defaultModelID = "flowx.defaultModelID"
+        static let defaultEffort = "flowx.defaultEffort"
+        static let defaultAccess = "flowx.defaultAccess"
+        static let defaultMode = "flowx.defaultMode"
+        static let appearanceMode = "flowx.appearanceMode"
+        static let accentColor = "flowx.accentColor"
+        static let textSizePreset = "flowx.textSizePreset"
+    }
+
+    private let defaults: UserDefaults
+
+    var defaultProviderID: String {
+        didSet { defaults.set(defaultProviderID, forKey: Keys.defaultProviderID) }
+    }
+
+    var defaultModelID: String {
+        didSet { defaults.set(defaultModelID, forKey: Keys.defaultModelID) }
+    }
+
+    var defaultEffort: String {
+        didSet { defaults.set(defaultEffort, forKey: Keys.defaultEffort) }
+    }
+
+    var defaultAccess: AgentAccess {
+        didSet {
+            defaults.set(defaultAccess.rawValue, forKey: Keys.defaultAccess)
+            defaults.set(defaultAccess.rawValue, forKey: "defaultAccess")
+        }
+    }
+
+    var defaultMode: AgentMode {
+        didSet { defaults.set(defaultMode.rawValue, forKey: Keys.defaultMode) }
+    }
+
+    var appearanceMode: FXAppearanceMode {
+        didSet {
+            defaults.set(appearanceMode.rawValue, forKey: Keys.appearanceMode)
+            applyTheme()
+        }
+    }
+
+    var accentColor: FXAccentColorOption {
+        didSet {
+            defaults.set(accentColor.rawValue, forKey: Keys.accentColor)
+            applyTheme()
+        }
+    }
+
+    var textSizePreset: FXTextSizePreset {
+        didSet {
+            defaults.set(textSizePreset.rawValue, forKey: Keys.textSizePreset)
+            applyTheme()
+        }
+    }
+
+    var themeVersion: Int = 0
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        defaultProviderID = defaults.string(forKey: Keys.defaultProviderID) ?? "claude"
+        defaultModelID = defaults.string(forKey: Keys.defaultModelID) ?? "sonnet"
+        defaultEffort = defaults.string(forKey: Keys.defaultEffort) ?? "high"
+        defaultAccess = AgentAccess(rawValue: defaults.string(forKey: Keys.defaultAccess) ?? "") ?? .fullAccess
+        defaultMode = AgentMode(rawValue: defaults.string(forKey: Keys.defaultMode) ?? "") ?? .auto
+        appearanceMode = FXAppearanceMode(rawValue: defaults.string(forKey: Keys.appearanceMode) ?? "") ?? .dark
+        accentColor = FXAccentColorOption(rawValue: defaults.string(forKey: Keys.accentColor) ?? "") ?? .violet
+        textSizePreset = FXTextSizePreset(rawValue: defaults.string(forKey: Keys.textSizePreset) ?? "") ?? .standard
+        applyTheme()
+        defaults.set(defaultAccess.rawValue, forKey: "defaultAccess")
+    }
+
+    var preferredColorScheme: ColorScheme? {
+        FXTheme.preferredColorScheme
+    }
+
+    var windowBackgroundColor: NSColor {
+        FXTheme.windowBackgroundColor
+    }
+
+    func setDefaultProvider(_ providerID: String, using registry: ProviderRegistry) {
+        defaultProviderID = providerID
+        normalizeProviderDefaults(using: registry)
+    }
+
+    func normalizeProviderDefaults(using registry: ProviderRegistry) {
+        if registry.provider(for: defaultProviderID) == nil {
+            defaultProviderID = registry.allProviders.sorted { $0.displayName < $1.displayName }.first?.id ?? "claude"
+        }
+
+        guard let provider = registry.provider(for: defaultProviderID) else {
+            defaultModelID = Self.fallbackModelID(for: defaultProviderID)
+            return
+        }
+
+        if !provider.availableModels.contains(where: { $0.id == defaultModelID }) {
+            defaultModelID = provider.availableModels.first?.id ?? Self.fallbackModelID(for: provider.id)
+        }
+    }
+
+    func resolvedDefaultProviderID(using registry: ProviderRegistry) -> String {
+        if registry.provider(for: defaultProviderID) != nil {
+            return defaultProviderID
+        }
+        return registry.allProviders.sorted { $0.displayName < $1.displayName }.first?.id ?? "claude"
+    }
+
+    func resolvedDefaultModelID(for providerID: String, using registry: ProviderRegistry) -> String {
+        guard let provider = registry.provider(for: providerID) else {
+            return Self.fallbackModelID(for: providerID)
+        }
+
+        if providerID == defaultProviderID,
+           provider.availableModels.contains(where: { $0.id == defaultModelID }) {
+            return defaultModelID
+        }
+
+        return provider.availableModels.first?.id ?? Self.fallbackModelID(for: providerID)
+    }
+
+    private func applyTheme() {
+        FXTheme.appearanceMode = appearanceMode
+        FXTheme.accentColorOption = accentColor
+        FXTheme.textSizePreset = textSizePreset
+        themeVersion &+= 1
+    }
+
+    private static func fallbackModelID(for providerID: String) -> String {
+        switch providerID {
+        case "codex":
+            "gpt-5.4"
+        default:
+            "sonnet"
+        }
+    }
+}
+
+enum FlowXLayoutDefaults {
+    static let defaultRightPanelWidth: CGFloat = 760
+    static let minRightPanelWidth: CGFloat = 560
+    static let maxRightPanelWidth: CGFloat = 1100
+}
+
+@Observable
+@MainActor
 final class AppState {
+    let preferences: AppPreferences
     var projects: [ProjectState] = []
     var activeProjectID: UUID?
     var activeAgentID: UUID?
     var rightPanelVisible = false { didSet { persistStateIfBootstrapped() } }
+    var rightPanelWidth: CGFloat = FlowXLayoutDefaults.defaultRightPanelWidth {
+        didSet {
+            let clampedWidth = min(max(rightPanelWidth, FlowXLayoutDefaults.minRightPanelWidth), FlowXLayoutDefaults.maxRightPanelWidth)
+            if rightPanelWidth != clampedWidth {
+                rightPanelWidth = clampedWidth
+                return
+            }
+            persistStateIfBootstrapped()
+        }
+    }
     var rightPanelTab: RightPanelTab = .changes { didSet { persistStateIfBootstrapped() } }
     var sidebarVisible = true { didSet { persistStateIfBootstrapped() } }
     var settingsVisible = false
@@ -430,6 +588,10 @@ final class AppState {
         return project.agents.first { $0.id == agentID }
     }
 
+    var activeProjectCanShowGitPanel: Bool {
+        canShowGitPanel(for: activeProject)
+    }
+
     var windowTitle: String {
         guard let project = activeProject else { return "FlowX" }
 
@@ -440,7 +602,8 @@ final class AppState {
         return project.project.name
     }
 
-    init() {
+    init(preferences: AppPreferences) {
+        self.preferences = preferences
         conversationService = ConversationService(registry: providerRegistry)
 
         Task { @MainActor in
@@ -454,6 +617,7 @@ final class AppState {
 
         providerRegistry.register(ClaudeCodeProvider(discovery: runtimeDiscovery))
         providerRegistry.register(CodexProvider(discovery: runtimeDiscovery))
+        preferences.normalizeProviderDefaults(using: providerRegistry)
         await refreshRuntimeHealth()
 
         ProjectPersistence.load(into: self)
@@ -472,6 +636,7 @@ final class AppState {
         if activeAgent == nil {
             activeAgentID = resolvedLastAgentID(for: activeProject)
         }
+        synchronizeActiveProjectPanels()
 
         isBootstrapped = true
 
@@ -529,16 +694,16 @@ final class AppState {
     @discardableResult
     func addAgent(to project: ProjectState, title: String? = nil) -> AgentInfo {
         let providerID = preferredProviderID()
-        let modelID = providerRegistry.provider(for: providerID)?.availableModels.first?.id ?? defaultModelID(for: providerID)
+        let modelID = preferences.resolvedDefaultModelID(for: providerID, using: providerRegistry)
 
         let agent = Agent(
             title: title ?? defaultAgentTitle(for: project.agents.count + 1),
             configuration: AgentConfiguration(
                 providerID: providerID,
                 modelID: modelID,
-                effort: "high",
-                agentMode: .auto,
-                agentAccess: .fullAccess
+                effort: preferences.defaultEffort,
+                agentMode: preferences.defaultMode,
+                agentAccess: preferences.defaultAccess
             )
         )
 
@@ -612,6 +777,7 @@ final class AppState {
         guard let project = projects.first(where: { $0.id == projectID }) else { return }
         activeProjectID = projectID
         activeAgentID = resolvedLastAgentID(for: project)
+        synchronizeActiveProjectPanels()
     }
 
     func activateAgent(_ agentID: UUID, in projectID: UUID) {
@@ -625,6 +791,7 @@ final class AppState {
         if project.lastSelectedAgentID != agentID {
             project.lastSelectedAgentID = agentID
         }
+        synchronizeActiveProjectPanels()
     }
 
     func cancelPrompt(for agent: AgentInfo) {
@@ -732,9 +899,6 @@ final class AppState {
 
     func selectInspectorPath(_ path: String, for project: ProjectState) {
         project.selectedInspectorPath = path
-        Task { @MainActor in
-            await refreshInspector(for: project)
-        }
     }
 
     func setInspectorComparisonMode(_ mode: InspectorComparisonMode, for project: ProjectState) {
@@ -957,8 +1121,31 @@ final class AppState {
             project.gitActionMessage = nil
         }
 
+        for agent in project.agents where agent.workspace.splitContent == .diff {
+            agent.workspace.splitOpen = false
+        }
+
+        if activeProjectID == projectID, rightPanelTab == .files {
+            rightPanelTab = .changes
+        }
+
+        if activeProjectID == projectID {
+            synchronizeActiveProjectPanels()
+        }
+
         if project.selectedInspectorPath == nil {
             project.selectedInspectorPath = gitInfo.files.first?.path ?? project.repositoryFiles.first
+        }
+    }
+
+    private func canShowGitPanel(for project: ProjectState?) -> Bool {
+        guard let project else { return false }
+        return project.gitInfo.isGitRepo && project.gitInfo.hasChanges
+    }
+
+    private func synchronizeActiveProjectPanels() {
+        if !canShowGitPanel(for: activeProject) {
+            rightPanelVisible = false
         }
     }
 
@@ -1042,13 +1229,17 @@ final class AppState {
     }
 
     private func preferredProviderID() -> String {
+        let configuredProviderID = preferences.resolvedDefaultProviderID(using: providerRegistry)
+        if providerRegistry.provider(for: configuredProviderID) != nil {
+            return configuredProviderID
+        }
         if runtimeHealth["claude"]?.isUsable == true {
             return "claude"
         }
         if runtimeHealth["codex"]?.isUsable == true {
             return "codex"
         }
-        return "claude"
+        return configuredProviderID
     }
 
     private func defaultModelID(for providerID: String) -> String {

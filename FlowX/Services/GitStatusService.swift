@@ -106,18 +106,17 @@ final class GitStatusService {
 
         var chunks: [String] = []
         let sortedFiles = files.sorted { $0.path.localizedCaseInsensitiveCompare($1.path) == .orderedAscending }
-        let trackedPaths = sortedFiles.filter { !($0.isUntracked && mode != .staged) }.map(\.path)
         let untrackedPaths = sortedFiles.filter { $0.isUntracked && mode != .staged }.map(\.path)
 
-        if !trackedPaths.isEmpty {
+        if sortedFiles.contains(where: { !($0.isUntracked && mode != .staged) }) {
             let args: [String]
             switch mode {
             case .unstaged:
-                args = ["diff", "--no-ext-diff", "--no-color", "--"] + trackedPaths
+                args = ["diff", "--no-ext-diff", "--no-color"]
             case .staged:
-                args = ["diff", "--no-ext-diff", "--no-color", "--cached", "--"] + trackedPaths
+                args = ["diff", "--no-ext-diff", "--no-color", "--cached"]
             case .base:
-                args = ["diff", "--no-ext-diff", "--no-color", "HEAD", "--"] + trackedPaths
+                args = ["diff", "--no-ext-diff", "--no-color", "HEAD"]
             }
 
             let trackedDiff = await runGit(args, in: rootPath).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -303,43 +302,47 @@ final class GitStatusService {
 
     private func runGit(_ args: [String], in directory: String) async -> String {
         await withCheckedContinuation { continuation in
-            let process = Process()
-            let pipe = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            process.arguments = args
-            process.currentDirectoryURL = URL(fileURLWithPath: directory)
-            process.standardOutput = pipe
-            process.standardError = FileHandle.nullDevice
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                let pipe = Pipe()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                process.arguments = args
+                process.currentDirectoryURL = URL(fileURLWithPath: directory)
+                process.standardOutput = pipe
+                process.standardError = FileHandle.nullDevice
 
-            do {
-                try process.run()
-                process.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                continuation.resume(returning: String(data: data, encoding: .utf8) ?? "")
-            } catch {
-                continuation.resume(returning: "")
+                do {
+                    try process.run()
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    process.waitUntilExit()
+                    continuation.resume(returning: String(data: data, encoding: .utf8) ?? "")
+                } catch {
+                    continuation.resume(returning: "")
+                }
             }
         }
     }
 
     private func runGitForResult(_ args: [String], in directory: String) async -> CommandResult {
         await withCheckedContinuation { continuation in
-            let process = Process()
-            let pipe = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            process.arguments = args
-            process.currentDirectoryURL = URL(fileURLWithPath: directory)
-            process.standardOutput = pipe
-            process.standardError = pipe
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                let pipe = Pipe()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                process.arguments = args
+                process.currentDirectoryURL = URL(fileURLWithPath: directory)
+                process.standardOutput = pipe
+                process.standardError = pipe
 
-            do {
-                try process.run()
-                process.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? ""
-                continuation.resume(returning: CommandResult(succeeded: process.terminationStatus == 0, output: output))
-            } catch {
-                continuation.resume(returning: CommandResult(succeeded: false, output: error.localizedDescription))
+                do {
+                    try process.run()
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    process.waitUntilExit()
+                    let output = String(data: data, encoding: .utf8) ?? ""
+                    continuation.resume(returning: CommandResult(succeeded: process.terminationStatus == 0, output: output))
+                } catch {
+                    continuation.resume(returning: CommandResult(succeeded: false, output: error.localizedDescription))
+                }
             }
         }
     }

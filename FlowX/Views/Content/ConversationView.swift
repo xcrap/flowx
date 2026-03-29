@@ -16,11 +16,6 @@ struct ConversationView: View {
         VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(spacing: FXSpacing.xxxl) {
-                    if showsEmptyState {
-                        emptyStateCard
-                            .id("empty-state")
-                    }
-
                     if !agent.activities.isEmpty {
                         RuntimeActivityBar(activities: agent.activities, toolCallCount: agent.toolCallCount)
                             .id("runtime-activity")
@@ -92,14 +87,6 @@ struct ConversationView: View {
         version += agent.isStreaming ? 1 : 0
         version += agent.conversationState.error == nil ? 0 : 1
         return version
-    }
-
-    private var showsEmptyState: Bool {
-        agent.messages.isEmpty
-            && agent.activities.isEmpty
-            && agent.conversationState.streamingText.isEmpty
-            && !agent.isStreaming
-            && agent.conversationState.error == nil
     }
 
     private var showsContextBar: Bool {
@@ -215,50 +202,6 @@ struct ConversationView: View {
             && staleTerms.contains(where: { error.contains($0) })
     }
 
-    private var projectName: String {
-        URL(fileURLWithPath: agent.projectRootPath).lastPathComponent
-    }
-
-    private var providerModelBadgeText: String {
-        let provider = simplifiedProviderName(for: agent.providerName)
-        let model = simplifiedModelName(for: currentModelName)
-
-        if model.localizedCaseInsensitiveContains(provider) {
-            return model
-        }
-
-        return "\(provider) \(model)"
-    }
-
-    private var currentModelName: String {
-        let providers = appState.providerRegistry.allProviders
-        let provider = providers.first(where: { $0.id == agent.providerID })
-        return provider?.availableModels.first(where: { $0.id == agent.modelID })?.name ?? agent.modelID
-    }
-
-    private var modeBadgeText: String {
-        agent.agentMode == .plan ? "Plan mode" : "Chat mode"
-    }
-
-    private var accessBadgeText: String {
-        switch agent.agentAccess {
-        case .supervised:
-            "Supervised"
-        case .acceptEdits:
-            "Accept edits"
-        case .fullAccess:
-            "Full access"
-        }
-    }
-
-    private var starterPrompts: [String] {
-        [
-            "Summarize this repository and point out the risky areas.",
-            "Inspect the current changes and suggest the next clean commit.",
-            "Find one high-impact improvement and implement it."
-        ]
-    }
-
     private var streamingIndicator: some View {
         HStack {
             HStack(spacing: FXSpacing.sm) {
@@ -275,106 +218,6 @@ struct ConversationView: View {
 
             Spacer(minLength: 80)
         }
-    }
-
-    private var emptyStateCard: some View {
-        VStack(alignment: .leading, spacing: FXSpacing.xl) {
-            VStack(alignment: .leading, spacing: FXSpacing.md) {
-                HStack(spacing: FXSpacing.md) {
-                    Image(systemName: "sparkles.rectangle.stack")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(FXColors.accent)
-
-                    VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
-                        Text("\(agent.title) is ready")
-                            .font(FXTypography.title3)
-                            .foregroundStyle(FXColors.fg)
-
-                        Text("Working in \(projectName)")
-                            .font(FXTypography.body)
-                            .foregroundStyle(FXColors.fgSecondary)
-                    }
-                }
-
-                Text(agent.projectRootPath)
-                    .font(FXTypography.caption)
-                    .foregroundStyle(FXColors.fgTertiary)
-                    .textSelection(.enabled)
-            }
-
-            HStack(spacing: FXSpacing.sm) {
-                FXBadge(providerModelBadgeText, tone: .accent)
-                FXBadge(modeBadgeText, tone: .info)
-                FXBadge(accessBadgeText, tone: .neutral)
-            }
-
-            VStack(alignment: .leading, spacing: FXSpacing.sm) {
-                Text("Start with")
-                    .font(FXTypography.captionMedium)
-                    .foregroundStyle(FXColors.fgSecondary)
-
-                ForEach(starterPrompts, id: \.self) { prompt in
-                    Button(action: {
-                        agent.conversationState.inputText = prompt
-                    }) {
-                        HStack(spacing: FXSpacing.sm) {
-                            Image(systemName: "arrow.up.right")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(FXColors.fgTertiary)
-
-                            Text(prompt)
-                                .font(FXTypography.body)
-                                .foregroundStyle(FXColors.fgSecondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .padding(.horizontal, FXSpacing.md)
-                        .padding(.vertical, FXSpacing.md)
-                        .background(FXColors.bgSurface)
-                        .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: FXRadii.md)
-                                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            HStack(spacing: FXSpacing.sm) {
-                quickActionButton(icon: "terminal", title: "Open terminal") {
-                    withAnimation(FXAnimation.panel) {
-                        agent.workspace.terminalVisible = true
-                    }
-                }
-
-                quickActionButton(icon: "sidebar.right", title: "Show files") {
-                    withAnimation(FXAnimation.panel) {
-                        appState.rightPanelVisible = true
-                        appState.rightPanelTab = .files
-                    }
-                }
-
-                quickActionButton(icon: "globe", title: "Open browser") {
-                    withAnimation(FXAnimation.panel) {
-                        agent.workspace.splitContent = .browser
-                        agent.workspace.splitOpen = true
-                    }
-                }
-            }
-
-            Text("Send with Command-Return")
-                .font(FXTypography.caption)
-                .foregroundStyle(FXColors.fgTertiary)
-        }
-        .padding(FXSpacing.xxxl)
-        .background(FXColors.bgElevated)
-        .clipShape(RoundedRectangle(cornerRadius: FXRadii.xxl))
-        .overlay(
-            RoundedRectangle(cornerRadius: FXRadii.xxl)
-                .strokeBorder(FXColors.border, lineWidth: 0.5)
-        )
-        .frame(maxWidth: 720)
-        .frame(maxWidth: .infinity, minHeight: 360, alignment: .center)
     }
 
     private var queueTray: some View {
@@ -699,24 +542,6 @@ struct ConversationView: View {
             RoundedRectangle(cornerRadius: FXRadii.xl)
                 .strokeBorder(FXColors.error.opacity(0.18), lineWidth: 0.5)
         )
-    }
-
-    private func quickActionButton(icon: String, title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: FXSpacing.sm) {
-                Image(systemName: icon)
-                    .font(.system(size: 12, weight: .medium))
-                Text(title)
-                    .font(FXTypography.captionMedium)
-            }
-            .foregroundStyle(FXColors.fgSecondary)
-            .padding(.horizontal, FXSpacing.md)
-            .padding(.vertical, FXSpacing.sm)
-            .frame(maxWidth: .infinity)
-            .background(FXColors.bgSurface)
-            .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
-        }
-        .buttonStyle(.plain)
     }
 
     private func riskBadge(for riskLevel: ToolRiskLevel) -> some View {

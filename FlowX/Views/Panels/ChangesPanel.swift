@@ -6,10 +6,18 @@ struct ChangesPanel: View {
 
     var body: some View {
         if let project = appState.activeProject {
-            VStack(spacing: 0) {
-                header(project)
-                FXDivider()
-                content(project)
+            if project.gitInfo.isGitRepo {
+                VStack(spacing: 0) {
+                    header(project)
+                    FXDivider()
+                    content(project)
+                }
+            } else {
+                panelMessage(
+                    icon: "tray",
+                    title: "No git repository",
+                    body: "Open a git-backed folder to inspect changes and compare against the current base."
+                )
             }
         } else {
             panelMessage(
@@ -55,13 +63,7 @@ struct ChangesPanel: View {
 
     @ViewBuilder
     private func content(_ project: ProjectState) -> some View {
-        if !project.gitInfo.isGitRepo {
-            panelMessage(
-                icon: "tray",
-                title: "No git repository",
-                body: "Open a git-backed folder to inspect changes and compare against the current base."
-            )
-        } else if visibleFiles(for: project).isEmpty {
+        if visibleFiles(for: project).isEmpty {
             panelMessage(
                 icon: emptyStateIcon(for: project.inspectorComparisonMode),
                 title: emptyStateTitle(for: project.inspectorComparisonMode),

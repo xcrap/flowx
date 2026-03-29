@@ -139,6 +139,7 @@ struct PersistedFlowXAppState: Codable {
     var activeAgentID: UUID?
     var sidebarVisible: Bool
     var rightPanelVisible: Bool
+    var rightPanelWidth: Double
     var rightPanelTab: RightPanelTab
 
     enum CodingKeys: String, CodingKey {
@@ -147,6 +148,7 @@ struct PersistedFlowXAppState: Codable {
         case activeAgentID
         case sidebarVisible
         case rightPanelVisible
+        case rightPanelWidth
         case rightPanelTab
     }
 
@@ -156,6 +158,7 @@ struct PersistedFlowXAppState: Codable {
         activeAgentID: UUID?,
         sidebarVisible: Bool,
         rightPanelVisible: Bool,
+        rightPanelWidth: Double,
         rightPanelTab: RightPanelTab
     ) {
         self.projects = projects
@@ -163,6 +166,7 @@ struct PersistedFlowXAppState: Codable {
         self.activeAgentID = activeAgentID
         self.sidebarVisible = sidebarVisible
         self.rightPanelVisible = rightPanelVisible
+        self.rightPanelWidth = rightPanelWidth
         self.rightPanelTab = rightPanelTab
     }
 
@@ -173,6 +177,7 @@ struct PersistedFlowXAppState: Codable {
         activeAgentID = try container.decodeIfPresent(UUID.self, forKey: .activeAgentID)
         sidebarVisible = try container.decodeIfPresent(Bool.self, forKey: .sidebarVisible) ?? true
         rightPanelVisible = try container.decodeIfPresent(Bool.self, forKey: .rightPanelVisible) ?? false
+        rightPanelWidth = try container.decodeIfPresent(Double.self, forKey: .rightPanelWidth) ?? Double(FlowXLayoutDefaults.defaultRightPanelWidth)
         rightPanelTab = try container.decodeIfPresent(RightPanelTab.self, forKey: .rightPanelTab) ?? .changes
     }
 }
@@ -217,6 +222,7 @@ enum ProjectPersistence {
             activeAgentID: appState.activeAgentID,
             sidebarVisible: appState.sidebarVisible,
             rightPanelVisible: appState.rightPanelVisible,
+            rightPanelWidth: Double(appState.rightPanelWidth),
             rightPanelTab: appState.rightPanelTab
         )
 
@@ -263,6 +269,7 @@ enum ProjectPersistence {
         appState.activeAgentID = payload.activeAgentID
         appState.sidebarVisible = payload.sidebarVisible
         appState.rightPanelVisible = payload.rightPanelVisible
+        appState.rightPanelWidth = CGFloat(payload.rightPanelWidth)
         appState.rightPanelTab = payload.rightPanelTab
     }
 }

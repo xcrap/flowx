@@ -13,64 +13,59 @@ struct RightPanelView: View {
         activeProject?.gitInfo
     }
 
+    private var hasGitRepo: Bool {
+        gitInfo?.isGitRepo == true
+    }
+
     private var showsCommitButton: Bool {
-        appState.rightPanelTab == .changes && (gitInfo?.isGitRepo == true) && (gitInfo?.hasChanges == true)
+        hasGitRepo && (gitInfo?.hasChanges == true)
     }
 
     private var showsPushButton: Bool {
-        appState.rightPanelTab == .changes && (gitInfo?.canPush == true)
+        gitInfo?.canPush == true
+    }
+
+    private var showsActionBar: Bool {
+        activeProject?.commitComposerVisible == true || showsCommitButton || showsPushButton
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            // Tab bar
-            HStack(spacing: 0) {
-                ForEach(RightPanelTab.allCases, id: \.self) { tab in
-                    tabButton(tab, isActive: appState.rightPanelTab == tab) {
-                        withAnimation(FXAnimation.quick) {
-                            appState.rightPanelTab = tab
-                        }
-                    }
-                }
-                Spacer()
+            if showsActionBar {
+                HStack(spacing: 0) {
+                    Spacer()
 
-                if let project = activeProject, showsCommitButton {
-                    FXButton(project.commitComposerVisible ? "Cancel" : "Commit", icon: project.commitComposerVisible ? "xmark" : "checkmark", style: .secondary) {
-                        appState.toggleCommitComposer()
-                    }
-                    .disabled(project.isPerformingGitAction)
-                    .opacity(project.isPerformingGitAction ? 0.5 : 1.0)
-                    .padding(.trailing, FXSpacing.sm)
-                }
-
-                if showsPushButton {
-                    FXButton("Push", icon: "arrow.up", style: .primary) {
-                        Task { @MainActor in
-                            await appState.pushActiveProject()
+                    if let project = activeProject, showsCommitButton {
+                        FXButton(project.commitComposerVisible ? "Cancel" : "Commit", icon: project.commitComposerVisible ? "xmark" : "checkmark", style: .secondary) {
+                            appState.toggleCommitComposer()
                         }
+                        .disabled(project.isPerformingGitAction)
+                        .opacity(project.isPerformingGitAction ? 0.5 : 1.0)
+                        .padding(.trailing, FXSpacing.sm)
                     }
-                    .disabled(activeProject?.isPerformingGitAction == true)
-                    .opacity(activeProject?.isPerformingGitAction == true ? 0.5 : 1.0)
-                    .padding(.trailing, FXSpacing.md)
+
+                    if showsPushButton {
+                        FXButton("Push", icon: "arrow.up", style: .primary) {
+                            Task { @MainActor in
+                                await appState.pushActiveProject()
+                            }
+                        }
+                        .disabled(activeProject?.isPerformingGitAction == true)
+                        .opacity(activeProject?.isPerformingGitAction == true ? 0.5 : 1.0)
+                    }
                 }
+                .padding(.horizontal, FXSpacing.md)
+                .padding(.vertical, FXSpacing.xs)
+
+                FXDivider()
             }
-            .padding(.leading, FXSpacing.md)
-            .padding(.vertical, FXSpacing.xs)
 
-            FXDivider()
-
-            if let project = activeProject, appState.rightPanelTab == .changes, project.commitComposerVisible {
+            if let project = activeProject, project.commitComposerVisible {
                 commitComposer(project)
                 FXDivider()
             }
 
-            // Content
-            switch appState.rightPanelTab {
-            case .changes:
-                ChangesPanel()
-            case .files:
-                FilesPanel()
-            }
+            DiffView()
         }
         .background(FXColors.panelBg)
         .onChange(of: activeProject?.commitComposerVisible == true) { _, isVisible in
@@ -79,21 +74,6 @@ struct RightPanelView: View {
                 commitMessageFocused = true
             }
         }
-    }
-
-    private func tabButton(_ tab: RightPanelTab, isActive: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(tab.rawValue)
-                .font(FXTypography.captionMedium)
-                .foregroundStyle(isActive ? FXColors.fg : FXColors.fgTertiary)
-                .padding(.horizontal, FXSpacing.md)
-                .padding(.vertical, FXSpacing.xs)
-                .background(
-                    isActive ? FXColors.bgSelected : .clear
-                )
-                .clipShape(RoundedRectangle(cornerRadius: FXRadii.sm))
-        }
-        .buttonStyle(.plain)
     }
 
     private func commitComposer(_ project: ProjectState) -> some View {

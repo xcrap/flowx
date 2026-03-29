@@ -4,15 +4,30 @@ import FXDesign
 
 @main
 struct FlowXApp: App {
-    @State private var appState = AppState()
+    @State private var preferences: AppPreferences
+    @State private var appState: AppState
+
+    init() {
+        let preferences = AppPreferences()
+        _preferences = State(initialValue: preferences)
+        _appState = State(initialValue: AppState(preferences: preferences))
+    }
 
     var body: some Scene {
         Window("FlowX", id: "main") {
             MainLayout()
                 .environment(appState)
+                .environment(preferences)
                 .frame(minWidth: 900, minHeight: 600)
-                .preferredColorScheme(.dark)
-                .background(WindowAccessor(title: appState.windowTitle))
+                .tint(FXColors.accent)
+                .preferredColorScheme(preferences.preferredColorScheme)
+                .background(
+                    WindowAccessor(
+                        title: appState.windowTitle,
+                        backgroundColor: preferences.windowBackgroundColor,
+                        themeVersion: preferences.themeVersion
+                    )
+                )
         }
         .defaultSize(width: 1400, height: 900)
         .commands {
@@ -25,6 +40,8 @@ struct FlowXApp: App {
 /// Traffic lights float on top of our custom title bar — single row, no glass.
 struct WindowAccessor: NSViewRepresentable {
     let title: String
+    let backgroundColor: NSColor
+    let themeVersion: Int
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
@@ -50,7 +67,7 @@ struct WindowAccessor: NSViewRepresentable {
 
         // Solid opaque background
         window.isOpaque = true
-        window.backgroundColor = NSColor(red: 0.067, green: 0.067, blue: 0.075, alpha: 1)
+        window.backgroundColor = backgroundColor
 
         // Window draggable from our custom title bar area
         window.isMovableByWindowBackground = false
@@ -65,6 +82,10 @@ struct WindowAccessor: NSViewRepresentable {
         if window.title != title {
             window.title = title
         }
+        if window.backgroundColor != backgroundColor {
+            window.backgroundColor = backgroundColor
+        }
+        _ = themeVersion
     }
 
     private func killVibrancy(in view: NSView?) {

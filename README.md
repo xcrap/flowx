@@ -2,18 +2,6 @@
 
 FlowX is a native macOS AI workspace built as the cleaner, node-free evolution of `/Users/xcrap/projects/flow`. It keeps the provider, conversation, terminal, and git foundations from Flow, but moves them into a more focused shell with a stronger UI.
 
-## Current State
-
-The app is already running on real foundations, not a static mockup:
-
-- Claude Code and Codex providers wired into the app shell
-- Real streaming conversations, queued prompts, resume/retry, and supervised approvals
-- Per-agent workspace state with split browser and multi-pane terminals
-- Git changes, files, commit, and push flows
-- Persistence for projects, agents, conversations, and workspace layout
-
-This repo is still in active implementation. The remaining roadmap lives in [`plan.md`](./plan.md).
-
 ## Features
 
 - **Clean shell layout** instead of canvas nodes
@@ -57,13 +45,8 @@ open FlowX.xcodeproj
 - `Packages/FXAgent` — providers and conversation engine
 - `Packages/FXTerminal` — terminal integration
 - `Packages/FXDesign` — design system primitives
-- `plan.md` — implementation roadmap and current status
 
 ## Persistence
 
 - Debug app data: `~/Library/Application Support/FlowX-Dev/`
 - Release app data: `~/Library/Application Support/FlowX/`
-
-## Status
-
-FlowX is already beyond mockup stage, but it is not feature-complete yet. The main remaining work is deeper git/session polish, performance, and final accessibility/detail passes.
