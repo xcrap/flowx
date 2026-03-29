@@ -15,12 +15,12 @@ struct FileChangeInfo: Identifiable, Equatable {
     var status: String
 }
 
-enum RightPanelTab: String, CaseIterable {
+enum RightPanelTab: String, CaseIterable, Codable {
     case changes = "CHANGES"
     case files = "FILES"
 }
 
-enum InspectorComparisonMode: String, CaseIterable {
+enum InspectorComparisonMode: String, CaseIterable, Codable {
     case unstaged = "Unstaged"
     case staged = "Staged"
     case base = "Base"
@@ -32,7 +32,7 @@ enum InspectorContentKind {
     case message
 }
 
-enum InspectorDiffDisplayMode: String, CaseIterable {
+enum InspectorDiffDisplayMode: String, CaseIterable, Codable {
     case inline = "Inline"
     case split = "Split"
 }
@@ -59,6 +59,8 @@ final class WorkspaceState {
     var terminalHeight: CGFloat = 220 { didSet { onChange?() } }
     var terminalCount: Int = 1 { didSet { onChange?() } }
     var browserURLString: String = "" { didSet { onChange?() } }
+    var conversationScrollOffset: CGFloat = 0 { didSet { onChange?() } }
+    var conversationPinnedToBottom: Bool = true { didSet { onChange?() } }
 
     var onChange: (() -> Void)?
 
@@ -72,6 +74,8 @@ final class WorkspaceState {
         terminalHeight = CGFloat(persisted.terminalHeight)
         terminalCount = persisted.terminalCount
         browserURLString = persisted.browserURLString == "https://localhost:3000" ? "" : persisted.browserURLString
+        conversationScrollOffset = CGFloat(persisted.conversationScrollOffset)
+        conversationPinnedToBottom = persisted.conversationPinnedToBottom
     }
 }
 
@@ -320,20 +324,21 @@ final class ProjectState: Identifiable {
     let id: UUID
     var project: Project
     var agents: [AgentInfo]
-    var isExpanded: Bool
+    var isExpanded: Bool { didSet { onChange?() } }
 
     var gitInfo = GitStatusService.GitInfo()
     var repositoryFiles: [String] = []
-    var selectedInspectorPath: String?
+    var selectedInspectorPath: String? { didSet { onChange?() } }
     var selectedInspectorText: String = ""
     var selectedInspectorContentKind: InspectorContentKind = .message
-    var inspectorComparisonMode: InspectorComparisonMode = .unstaged
-    var inspectorDiffDisplayMode: InspectorDiffDisplayMode = .inline
+    var inspectorComparisonMode: InspectorComparisonMode = .unstaged { didSet { onChange?() } }
+    var inspectorDiffDisplayMode: InspectorDiffDisplayMode = .inline { didSet { onChange?() } }
     var commitComposerVisible = false
     var commitMessageDraft = ""
     var includeUntrackedInCommit = true
     var isPerformingGitAction = false
     var gitActionMessage: String?
+    var onChange: (() -> Void)?
     init(project: Project, agents: [AgentInfo], isExpanded: Bool = true) {
         id = project.id
         self.project = project
@@ -398,9 +403,9 @@ final class AppState {
     var projects: [ProjectState] = []
     var activeProjectID: UUID?
     var activeAgentID: UUID?
-    var rightPanelVisible = false
-    var rightPanelTab: RightPanelTab = .changes
-    var sidebarVisible = true
+    var rightPanelVisible = false { didSet { persistStateIfBootstrapped() } }
+    var rightPanelTab: RightPanelTab = .changes { didSet { persistStateIfBootstrapped() } }
+    var sidebarVisible = true { didSet { persistStateIfBootstrapped() } }
     var settingsVisible = false
     var commandPaletteVisible = false
     var runtimeHealth: [String: BinaryHealth] = [:]
@@ -421,6 +426,16 @@ final class AppState {
     var activeAgent: AgentInfo? {
         guard let project = activeProject, let agentID = activeAgentID else { return nil }
         return project.agents.first { $0.id == agentID }
+    }
+
+    var windowTitle: String {
+        guard let project = activeProject else { return "FlowX" }
+
+        if let agent = activeAgent {
+            return "\(project.project.name) - \(agent.title)"
+        }
+
+        return project.project.name
     }
 
     init() {
@@ -843,6 +858,7 @@ final class AppState {
     }
 
     private func hydrate(_ project: ProjectState) {
+        configureProject(project)
         project.refreshFiles()
         if project.agents.isEmpty {
             _ = addAgent(to: project)
@@ -888,8 +904,19 @@ final class AppState {
 
     private func configureAgent(_ agent: AgentInfo) {
         agent.onChange = { [weak self] in
-            self?.scheduleSave()
+            self?.persistStateIfBootstrapped()
         }
+    }
+
+    private func configureProject(_ project: ProjectState) {
+        project.onChange = { [weak self] in
+            self?.persistStateIfBootstrapped()
+        }
+    }
+
+    private func persistStateIfBootstrapped() {
+        guard isBootstrapped else { return }
+        scheduleSave()
     }
 
     private func project(for agentID: UUID) -> ProjectState? {

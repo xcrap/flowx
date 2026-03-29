@@ -12,7 +12,7 @@ struct FlowXApp: App {
                 .environment(appState)
                 .frame(minWidth: 900, minHeight: 600)
                 .preferredColorScheme(.dark)
-                .background(WindowAccessor())
+                .background(WindowAccessor(title: appState.windowTitle))
         }
         .defaultSize(width: 1400, height: 900)
         .commands {
@@ -24,13 +24,19 @@ struct FlowXApp: App {
 /// Reaches into NSWindow to make the titlebar transparent and content full-size.
 /// Traffic lights float on top of our custom title bar — single row, no glass.
 struct WindowAccessor: NSViewRepresentable {
+    let title: String
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         DispatchQueue.main.async { configure(view) }
         return view
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            updateWindow(for: nsView)
+        }
+    }
 
     private func configure(_ view: NSView) {
         guard let window = view.window else { return }
@@ -51,6 +57,14 @@ struct WindowAccessor: NSViewRepresentable {
 
         // Nuke every NSVisualEffectView
         killVibrancy(in: window.contentView?.superview)
+        window.title = title
+    }
+
+    private func updateWindow(for view: NSView) {
+        guard let window = view.window else { return }
+        if window.title != title {
+            window.title = title
+        }
     }
 
     private func killVibrancy(in view: NSView?) {

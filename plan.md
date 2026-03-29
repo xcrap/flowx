@@ -29,10 +29,11 @@ The app is no longer just a visual mockup. The FlowX shell now builds against re
 - Real git polling, searchable file inspection, staged / unstaged / base inspection, inline / split diff rendering, and commit / push actions
 - Real split browser panel backed by `WKWebView` with per-agent persisted URL state
 - More polished empty states plus core shell shortcuts for sidebar, right panel, terminal, send, settings, agent switching, and command palette
+- Deeper workspace persistence for conversation scroll position, inspector state, and shell panel visibility
 
 **Still outstanding before calling the core shell “feature-complete”:**
 - Provider/session polish: deeper session recovery edge cases and additional multi-provider supervision depth
-- Accessibility and performance passes, plus any remaining focus edge cases
+- Accessibility and performance passes beyond the now-landed lazy conversation rendering and dynamic window title
 - Additional session restore and agent/workspace quality-of-life polish
 
 **Active next slice:**

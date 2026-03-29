@@ -141,9 +141,18 @@ struct MainLayout: View {
                         headerButton(
                             icon: "rectangle.split.2x1",
                             label: "Toggle split view",
-                            active: appState.activeAgent?.workspace.splitOpen == true
+                            active: appState.activeAgent?.workspace.splitOpen == true && appState.activeAgent?.workspace.splitContent == .diff
                         ) {
-                            withAnimation(FXAnimation.panel) { appState.activeAgent?.workspace.splitOpen.toggle() }
+                            withAnimation(FXAnimation.panel) {
+                                if let agent = appState.activeAgent {
+                                    if agent.workspace.splitOpen && agent.workspace.splitContent == .diff {
+                                        agent.workspace.splitOpen = false
+                                    } else {
+                                        agent.workspace.splitContent = .diff
+                                        agent.workspace.splitOpen = true
+                                    }
+                                }
+                            }
                         }
                         headerButton(
                             icon: "terminal",

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import FXDesign
 import FXCore
@@ -13,53 +14,57 @@ struct ConversationView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(spacing: FXSpacing.xxxl) {
-                        if showsEmptyState {
-                            emptyStateCard
-                        }
-
-                        if !agent.activities.isEmpty {
-                            RuntimeActivityBar(activities: agent.activities, toolCallCount: agent.toolCallCount)
-                        }
-
-                        ForEach(agent.messages) { message in
-                            MessageBubble(message: message)
-                        }
-
-                        if !agent.conversationState.streamingText.isEmpty {
-                            MessageBubble(streamingText: agent.conversationState.streamingText)
-                        } else if agent.isStreaming {
-                            streamingIndicator
-                        }
-
-                        if let error = agent.conversationState.error {
-                            errorCard(error)
-                        }
-
-                        Color.clear.frame(height: 1).id("bottom")
+            ScrollView {
+                LazyVStack(spacing: FXSpacing.xxxl) {
+                    if showsEmptyState {
+                        emptyStateCard
+                            .id("empty-state")
                     }
-                    .frame(maxWidth: maxContentWidth)
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, FXSpacing.xxl)
-                    .padding(.top, FXSpacing.xxl)
-                    .padding(.bottom, FXSpacing.md)
+
+                    if !agent.activities.isEmpty {
+                        RuntimeActivityBar(activities: agent.activities, toolCallCount: agent.toolCallCount)
+                            .id("runtime-activity")
+                    }
+
+                    ForEach(agent.messages) { message in
+                        MessageBubble(message: message)
+                            .id(messageScrollID(for: message))
+                    }
+
+                    if !agent.conversationState.streamingText.isEmpty {
+                        MessageBubble(streamingText: agent.conversationState.streamingText)
+                            .id("streaming-message")
+                    } else if agent.isStreaming {
+                        streamingIndicator
+                            .id("streaming-indicator")
+                    }
+
+                    if let error = agent.conversationState.error {
+                        errorCard(error)
+                            .id("conversation-error")
+                    }
+
+                    Color.clear
+                        .frame(height: 1)
+                        .id(bottomScrollID)
                 }
-                .scrollContentBackground(.hidden)
-                .onAppear {
-                    scrollToBottom(using: proxy, animated: false)
-                }
-                .onChange(of: agent.messages.count) { _, _ in
-                    scrollToBottom(using: proxy)
-                }
-                .onChange(of: agent.conversationState.streamingText) { _, _ in
-                    scrollToBottom(using: proxy, animated: false)
-                }
-                .onChange(of: agent.activities.count) { _, _ in
-                    scrollToBottom(using: proxy)
-                }
+                .scrollTargetLayout()
+                .frame(maxWidth: maxContentWidth)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, FXSpacing.xxl)
+                .padding(.top, FXSpacing.xxl)
+                .padding(.bottom, FXSpacing.md)
+                .background(
+                    ConversationScrollBridge(
+                        desiredOffset: agent.workspace.conversationScrollOffset,
+                        stickToBottom: agent.workspace.conversationPinnedToBottom,
+                        contentVersion: contentVersion
+                    ) { offset, maxOffset in
+                        updateScrollState(offset: offset, maxOffset: maxOffset)
+                    }
+                )
             }
+            .scrollContentBackground(.hidden)
 
             if agent.conversationState.pendingToolApprovalCount > 0 {
                 approvalTray
@@ -76,6 +81,17 @@ struct ConversationView: View {
             ChatInputBar(agent: agent)
         }
         .background(FXColors.contentBg)
+    }
+
+    private var bottomScrollID: String { "conversation-bottom" }
+
+    private var contentVersion: Int {
+        var version = agent.messages.count
+        version += agent.activities.count
+        version += agent.conversationState.streamingText.isEmpty ? 0 : 1
+        version += agent.isStreaming ? 1 : 0
+        version += agent.conversationState.error == nil ? 0 : 1
+        return version
     }
 
     private var showsEmptyState: Bool {
@@ -746,13 +762,20 @@ struct ConversationView: View {
         cancelEditingQueuedPrompt()
     }
 
-    private func scrollToBottom(using proxy: ScrollViewProxy, animated: Bool = true) {
-        if animated {
-            withAnimation(FXAnimation.quick) {
-                proxy.scrollTo("bottom", anchor: .bottom)
-            }
-        } else {
-            proxy.scrollTo("bottom", anchor: .bottom)
+    private func messageScrollID(for message: ConversationMessage) -> String {
+        "message-\(message.id.uuidString)"
+    }
+
+    private func updateScrollState(offset: CGFloat, maxOffset: CGFloat) {
+        let normalizedOffset = max(0, min(offset, maxOffset))
+        let pinnedToBottom = maxOffset <= 1 || normalizedOffset >= maxOffset - 24
+
+        if abs(agent.workspace.conversationScrollOffset - normalizedOffset) > 1 {
+            agent.workspace.conversationScrollOffset = normalizedOffset
+        }
+
+        if agent.workspace.conversationPinnedToBottom != pinnedToBottom {
+            agent.workspace.conversationPinnedToBottom = pinnedToBottom
         }
     }
 
@@ -784,5 +807,123 @@ struct ConversationView: View {
     private func simplifiedModelName(for modelName: String) -> String {
         modelName
             .replacingOccurrences(of: " (latest)", with: "")
+    }
+}
+
+private struct ConversationScrollBridge: NSViewRepresentable {
+    var desiredOffset: CGFloat
+    var stickToBottom: Bool
+    var contentVersion: Int
+    var onScrollChange: (CGFloat, CGFloat) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onScrollChange: onScrollChange)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            context.coordinator.attachIfNeeded(to: view)
+            context.coordinator.applyScrollPosition(desiredOffset: desiredOffset, stickToBottom: stickToBottom)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onScrollChange = onScrollChange
+        context.coordinator.attachIfNeeded(to: nsView)
+        context.coordinator.applyScrollPosition(desiredOffset: desiredOffset, stickToBottom: stickToBottom)
+        _ = contentVersion
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var onScrollChange: (CGFloat, CGFloat) -> Void
+
+        private weak var scrollView: NSScrollView?
+        private weak var clipView: NSClipView?
+        private var observingScrollBounds = false
+        private var isApplyingProgrammaticScroll = false
+
+        init(onScrollChange: @escaping (CGFloat, CGFloat) -> Void) {
+            self.onScrollChange = onScrollChange
+        }
+
+        func attachIfNeeded(to view: NSView) {
+            guard scrollView == nil else { return }
+            guard let scrollView = enclosingScrollView(from: view) else { return }
+
+            self.scrollView = scrollView
+            clipView = scrollView.contentView
+            scrollView.contentView.postsBoundsChangedNotifications = true
+
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleScrollBoundsDidChange),
+                name: NSView.boundsDidChangeNotification,
+                object: scrollView.contentView
+            )
+            observingScrollBounds = true
+
+            reportScrollPosition()
+        }
+
+        func detach() {
+            if observingScrollBounds {
+                NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification, object: clipView)
+            }
+            observingScrollBounds = false
+            scrollView = nil
+            clipView = nil
+        }
+
+        func applyScrollPosition(desiredOffset: CGFloat, stickToBottom: Bool) {
+            guard let scrollView, let clipView else { return }
+            let maxOffset = maximumOffset(for: scrollView)
+            let targetOffset = stickToBottom ? maxOffset : max(0, min(desiredOffset, maxOffset))
+
+            guard abs(clipView.bounds.origin.y - targetOffset) > 1 else {
+                reportScrollPosition()
+                return
+            }
+
+            isApplyingProgrammaticScroll = true
+            clipView.setBoundsOrigin(NSPoint(x: 0, y: targetOffset))
+            scrollView.reflectScrolledClipView(clipView)
+            isApplyingProgrammaticScroll = false
+            reportScrollPosition()
+        }
+
+        @objc
+        private func handleScrollBoundsDidChange() {
+            reportScrollPosition()
+        }
+
+        private func reportScrollPosition() {
+            guard let scrollView, let clipView else { return }
+            let maxOffset = maximumOffset(for: scrollView)
+            let offset = max(0, min(clipView.bounds.origin.y, maxOffset))
+            onScrollChange(offset, maxOffset)
+        }
+
+        private func maximumOffset(for scrollView: NSScrollView) -> CGFloat {
+            guard let documentView = scrollView.documentView else { return 0 }
+            return max(0, documentView.frame.height - scrollView.contentView.bounds.height)
+        }
+
+        private func enclosingScrollView(from view: NSView) -> NSScrollView? {
+            var current: NSView? = view
+            while let candidate = current {
+                if let scrollView = candidate.enclosingScrollView {
+                    return scrollView
+                }
+                current = candidate.superview
+            }
+            return nil
+        }
     }
 }

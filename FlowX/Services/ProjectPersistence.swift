@@ -10,6 +10,8 @@ struct PersistedWorkspace: Codable {
     var terminalHeight: Double
     var terminalCount: Int
     var browserURLString: String
+    var conversationScrollOffset: Double
+    var conversationPinnedToBottom: Bool
 
     enum CodingKeys: String, CodingKey {
         case agentID
@@ -20,6 +22,8 @@ struct PersistedWorkspace: Codable {
         case terminalHeight
         case terminalCount
         case browserURLString
+        case conversationScrollOffset
+        case conversationPinnedToBottom
     }
 
     init(
@@ -30,7 +34,9 @@ struct PersistedWorkspace: Codable {
         terminalVisible: Bool,
         terminalHeight: Double,
         terminalCount: Int,
-        browserURLString: String
+        browserURLString: String,
+        conversationScrollOffset: Double,
+        conversationPinnedToBottom: Bool
     ) {
         self.agentID = agentID
         self.splitOpen = splitOpen
@@ -40,6 +46,8 @@ struct PersistedWorkspace: Codable {
         self.terminalHeight = terminalHeight
         self.terminalCount = terminalCount
         self.browserURLString = browserURLString
+        self.conversationScrollOffset = conversationScrollOffset
+        self.conversationPinnedToBottom = conversationPinnedToBottom
     }
 
     init(from decoder: Decoder) throws {
@@ -52,6 +60,8 @@ struct PersistedWorkspace: Codable {
         terminalHeight = try container.decode(Double.self, forKey: .terminalHeight)
         terminalCount = try container.decodeIfPresent(Int.self, forKey: .terminalCount) ?? 1
         browserURLString = try container.decode(String.self, forKey: .browserURLString)
+        conversationScrollOffset = try container.decodeIfPresent(Double.self, forKey: .conversationScrollOffset) ?? 0
+        conversationPinnedToBottom = try container.decodeIfPresent(Bool.self, forKey: .conversationPinnedToBottom) ?? true
     }
 
     func encode(to encoder: Encoder) throws {
@@ -64,6 +74,8 @@ struct PersistedWorkspace: Codable {
         try container.encode(terminalHeight, forKey: .terminalHeight)
         try container.encode(terminalCount, forKey: .terminalCount)
         try container.encode(browserURLString, forKey: .browserURLString)
+        try container.encode(conversationScrollOffset, forKey: .conversationScrollOffset)
+        try container.encode(conversationPinnedToBottom, forKey: .conversationPinnedToBottom)
     }
 }
 
@@ -71,13 +83,93 @@ struct PersistedProjectRecord: Codable {
     var project: Project
     var agents: [Agent]
     var isExpanded: Bool
+    var selectedInspectorPath: String?
+    var inspectorComparisonMode: InspectorComparisonMode
+    var inspectorDiffDisplayMode: InspectorDiffDisplayMode
     var workspaces: [PersistedWorkspace]
+
+    enum CodingKeys: String, CodingKey {
+        case project
+        case agents
+        case isExpanded
+        case selectedInspectorPath
+        case inspectorComparisonMode
+        case inspectorDiffDisplayMode
+        case workspaces
+    }
+
+    init(
+        project: Project,
+        agents: [Agent],
+        isExpanded: Bool,
+        selectedInspectorPath: String?,
+        inspectorComparisonMode: InspectorComparisonMode,
+        inspectorDiffDisplayMode: InspectorDiffDisplayMode,
+        workspaces: [PersistedWorkspace]
+    ) {
+        self.project = project
+        self.agents = agents
+        self.isExpanded = isExpanded
+        self.selectedInspectorPath = selectedInspectorPath
+        self.inspectorComparisonMode = inspectorComparisonMode
+        self.inspectorDiffDisplayMode = inspectorDiffDisplayMode
+        self.workspaces = workspaces
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        project = try container.decode(Project.self, forKey: .project)
+        agents = try container.decode([Agent].self, forKey: .agents)
+        isExpanded = try container.decode(Bool.self, forKey: .isExpanded)
+        selectedInspectorPath = try container.decodeIfPresent(String.self, forKey: .selectedInspectorPath)
+        inspectorComparisonMode = try container.decodeIfPresent(InspectorComparisonMode.self, forKey: .inspectorComparisonMode) ?? .unstaged
+        inspectorDiffDisplayMode = try container.decodeIfPresent(InspectorDiffDisplayMode.self, forKey: .inspectorDiffDisplayMode) ?? .inline
+        workspaces = try container.decodeIfPresent([PersistedWorkspace].self, forKey: .workspaces) ?? []
+    }
 }
 
 struct PersistedFlowXAppState: Codable {
     var projects: [PersistedProjectRecord]
     var activeProjectID: UUID?
     var activeAgentID: UUID?
+    var sidebarVisible: Bool
+    var rightPanelVisible: Bool
+    var rightPanelTab: RightPanelTab
+
+    enum CodingKeys: String, CodingKey {
+        case projects
+        case activeProjectID
+        case activeAgentID
+        case sidebarVisible
+        case rightPanelVisible
+        case rightPanelTab
+    }
+
+    init(
+        projects: [PersistedProjectRecord],
+        activeProjectID: UUID?,
+        activeAgentID: UUID?,
+        sidebarVisible: Bool,
+        rightPanelVisible: Bool,
+        rightPanelTab: RightPanelTab
+    ) {
+        self.projects = projects
+        self.activeProjectID = activeProjectID
+        self.activeAgentID = activeAgentID
+        self.sidebarVisible = sidebarVisible
+        self.rightPanelVisible = rightPanelVisible
+        self.rightPanelTab = rightPanelTab
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        projects = try container.decode([PersistedProjectRecord].self, forKey: .projects)
+        activeProjectID = try container.decodeIfPresent(UUID.self, forKey: .activeProjectID)
+        activeAgentID = try container.decodeIfPresent(UUID.self, forKey: .activeAgentID)
+        sidebarVisible = try container.decodeIfPresent(Bool.self, forKey: .sidebarVisible) ?? true
+        rightPanelVisible = try container.decodeIfPresent(Bool.self, forKey: .rightPanelVisible) ?? false
+        rightPanelTab = try container.decodeIfPresent(RightPanelTab.self, forKey: .rightPanelTab) ?? .changes
+    }
 }
 
 @MainActor
@@ -96,6 +188,9 @@ enum ProjectPersistence {
                     project: project.project,
                     agents: project.agents.map(\.agent),
                     isExpanded: project.isExpanded,
+                    selectedInspectorPath: project.selectedInspectorPath,
+                    inspectorComparisonMode: project.inspectorComparisonMode,
+                    inspectorDiffDisplayMode: project.inspectorDiffDisplayMode,
                     workspaces: project.agents.map { agent in
                         PersistedWorkspace(
                             agentID: agent.id,
@@ -105,13 +200,18 @@ enum ProjectPersistence {
                             terminalVisible: agent.workspace.terminalVisible,
                             terminalHeight: Double(agent.workspace.terminalHeight),
                             terminalCount: agent.terminalPaneCount,
-                            browserURLString: agent.workspace.browserURLString
+                            browserURLString: agent.workspace.browserURLString,
+                            conversationScrollOffset: Double(agent.workspace.conversationScrollOffset),
+                            conversationPinnedToBottom: agent.workspace.conversationPinnedToBottom
                         )
                     }
                 )
             },
             activeProjectID: appState.activeProjectID,
-            activeAgentID: appState.activeAgentID
+            activeAgentID: appState.activeAgentID,
+            sidebarVisible: appState.sidebarVisible,
+            rightPanelVisible: appState.rightPanelVisible,
+            rightPanelTab: appState.rightPanelTab
         )
 
         do {
@@ -142,13 +242,20 @@ enum ProjectPersistence {
                 )
             }
 
-            return ProjectState(
+            let projectState = ProjectState(
                 project: persisted.project,
                 agents: agents,
                 isExpanded: persisted.isExpanded
             )
+            projectState.selectedInspectorPath = persisted.selectedInspectorPath
+            projectState.inspectorComparisonMode = persisted.inspectorComparisonMode
+            projectState.inspectorDiffDisplayMode = persisted.inspectorDiffDisplayMode
+            return projectState
         }
         appState.activeProjectID = payload.activeProjectID
         appState.activeAgentID = payload.activeAgentID
+        appState.sidebarVisible = payload.sidebarVisible
+        appState.rightPanelVisible = payload.rightPanelVisible
+        appState.rightPanelTab = payload.rightPanelTab
     }
 }
