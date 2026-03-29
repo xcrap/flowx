@@ -76,6 +76,7 @@ struct TerminalPanel: View {
         terminalControlButton(
             icon: "plus",
             enabled: agent.terminalPaneCount < 3,
+            accessibilityLabel: "Add terminal split",
             tooltip: "Add split"
         ) {
             withAnimation(FXAnimation.quick) {
@@ -87,6 +88,7 @@ struct TerminalPanel: View {
     private func terminalControlButton(
         icon: String,
         enabled: Bool,
+        accessibilityLabel: String,
         tooltip: String,
         action: @escaping () -> Void
     ) -> some View {
@@ -108,6 +110,7 @@ struct TerminalPanel: View {
         .buttonStyle(.plain)
         .help(tooltip)
         .disabled(!enabled)
+        .accessibilityLabel(accessibilityLabel)
     }
 
     // MARK: - Terminal pane
@@ -151,6 +154,7 @@ struct TerminalPanel: View {
             }
             .buttonStyle(.plain)
             .help(agent.terminalPaneCount > 1 ? "Close this split" : "Hide terminal")
+            .accessibilityLabel(agent.terminalPaneCount > 1 ? "Close \(paneTitle(index: index, session: session))" : "Hide terminal")
         }
         .padding(.horizontal, FXSpacing.md)
         .padding(.vertical, FXSpacing.xs)

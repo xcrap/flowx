@@ -6,6 +6,7 @@ import FXCore
 struct ChatInputBar: View {
     @Environment(AppState.self) private var appState
     @Bindable var agent: AgentInfo
+    @FocusState private var composerFocused: Bool
 
     private let maxContentWidth: CGFloat = 920
 
@@ -37,6 +38,9 @@ struct ChatInputBar: View {
                         .padding(.horizontal, FXSpacing.xl)
                         .padding(.top, FXSpacing.lg)
                         .padding(.bottom, FXSpacing.sm)
+                        .focused($composerFocused)
+                        .accessibilityLabel("Prompt input")
+                        .accessibilityHint("Type a request for \(agent.title)")
                 }
 
                 if !agent.conversationState.pendingAttachments.isEmpty {
@@ -142,6 +146,8 @@ struct ChatInputBar: View {
                     .disabled(composerAction == .send && !hasDraftInput)
                     .keyboardShortcut(.return, modifiers: .command)
                     .help(composerHelpText)
+                    .accessibilityLabel(composerAccessibilityLabel)
+                    .accessibilityHint(composerHelpText)
                 }
                 .padding(.horizontal, FXSpacing.lg)
                 .padding(.bottom, FXSpacing.md)
@@ -159,6 +165,11 @@ struct ChatInputBar: View {
         .padding(.top, FXSpacing.sm)
         .padding(.bottom, FXSpacing.xxl)
         .background(FXColors.contentBg)
+        .onAppear(perform: focusComposer)
+        .onChange(of: appState.activeAgentID) { _, newValue in
+            guard newValue == agent.id else { return }
+            focusComposer()
+        }
     }
 
     private var providers: [any AIProvider] {
@@ -225,6 +236,17 @@ struct ChatInputBar: View {
         }
     }
 
+    private var composerAccessibilityLabel: String {
+        switch composerAction {
+        case .send:
+            "Send prompt"
+        case .queue:
+            "Queue prompt"
+        case .cancel:
+            "Cancel run"
+        }
+    }
+
     private var sendButtonColor: Color {
         switch composerAction {
         case .cancel:
@@ -251,6 +273,7 @@ struct ChatInputBar: View {
         }
         .buttonStyle(.plain)
         .help(tooltip)
+        .accessibilityLabel(tooltip)
     }
 
     private func menuControl<Content: View>(text: String, @ViewBuilder content: @escaping () -> Content) -> some View {
@@ -310,5 +333,14 @@ struct ChatInputBar: View {
     private func simplifiedModelName(for modelName: String) -> String {
         modelName
             .replacingOccurrences(of: " (latest)", with: "")
+    }
+
+    private func focusComposer() {
+        Task { @MainActor in
+            composerFocused = false
+            try? await Task.sleep(for: .milliseconds(60))
+            guard appState.activeAgentID == agent.id else { return }
+            composerFocused = true
+        }
     }
 }

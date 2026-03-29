@@ -138,16 +138,32 @@ struct MainLayout: View {
 
                 if appState.activeAgent != nil {
                     HStack(spacing: FXSpacing.xxs) {
-                        headerButton(icon: "rectangle.split.2x1", active: appState.activeAgent?.workspace.splitOpen == true) {
+                        headerButton(
+                            icon: "rectangle.split.2x1",
+                            label: "Toggle split view",
+                            active: appState.activeAgent?.workspace.splitOpen == true
+                        ) {
                             withAnimation(FXAnimation.panel) { appState.activeAgent?.workspace.splitOpen.toggle() }
                         }
-                        headerButton(icon: "terminal", active: appState.activeAgent?.workspace.terminalVisible == true) {
+                        headerButton(
+                            icon: "terminal",
+                            label: "Toggle terminal",
+                            active: appState.activeAgent?.workspace.terminalVisible == true
+                        ) {
                             withAnimation(FXAnimation.panel) { appState.activeAgent?.workspace.terminalVisible.toggle() }
                         }
-                        headerButton(icon: "sidebar.right", active: appState.rightPanelVisible) {
+                        headerButton(
+                            icon: "sidebar.right",
+                            label: "Toggle inspector",
+                            active: appState.rightPanelVisible
+                        ) {
                             withAnimation(FXAnimation.panel) { appState.rightPanelVisible.toggle() }
                         }
-                        headerButton(icon: "globe", active: appState.activeAgent?.workspace.splitOpen == true && appState.activeAgent?.workspace.splitContent == .browser) {
+                        headerButton(
+                            icon: "globe",
+                            label: "Toggle browser split",
+                            active: appState.activeAgent?.workspace.splitOpen == true && appState.activeAgent?.workspace.splitContent == .browser
+                        ) {
                             withAnimation(FXAnimation.panel) {
                                 if let agent = appState.activeAgent {
                                     if agent.workspace.splitOpen && agent.workspace.splitContent == .browser {
@@ -159,7 +175,7 @@ struct MainLayout: View {
                                 }
                             }
                         }
-                        headerButton(icon: "gearshape", active: appState.settingsVisible) {
+                        headerButton(icon: "gearshape", label: "Toggle settings", active: appState.settingsVisible) {
                             withAnimation(FXAnimation.panel) { appState.settingsVisible.toggle() }
                         }
                     }
@@ -204,7 +220,7 @@ struct MainLayout: View {
         }
     }
 
-    private func headerButton(icon: String, active: Bool = false, action: @escaping () -> Void) -> some View {
+    private func headerButton(icon: String, label: String, active: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 13, weight: .medium))
@@ -213,6 +229,8 @@ struct MainLayout: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityValue(active ? "Visible" : "Hidden")
     }
 }
 
@@ -271,6 +289,7 @@ private struct CommandPaletteView: View {
                 .font(FXTypography.body)
                 .foregroundStyle(FXColors.fg)
                 .focused($searchFocused)
+                .accessibilityLabel("Command palette search")
                 .onSubmit {
                     if let first = filteredActions.first {
                         run(first)
@@ -287,6 +306,7 @@ private struct CommandPaletteView: View {
                     .clipShape(Capsule())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Close command palette")
         }
         .padding(.horizontal, FXSpacing.lg)
         .padding(.vertical, FXSpacing.md)

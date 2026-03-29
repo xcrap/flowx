@@ -249,9 +249,9 @@ struct BrowserPanel: View {
     private var toolbar: some View {
         HStack(spacing: FXSpacing.sm) {
             HStack(spacing: FXSpacing.xs) {
-                toolbarButton("chevron.left", enabled: browser.canGoBack, action: browser.goBack)
-                toolbarButton("chevron.right", enabled: browser.canGoForward, action: browser.goForward)
-                toolbarButton("arrow.clockwise", enabled: true, action: browser.reload)
+                toolbarButton("chevron.left", label: "Go back", enabled: browser.canGoBack, action: browser.goBack)
+                toolbarButton("chevron.right", label: "Go forward", enabled: browser.canGoForward, action: browser.goForward)
+                toolbarButton("arrow.clockwise", label: "Reload page", enabled: true, action: browser.reload)
             }
 
             TextField("Enter a URL", text: $browser.urlText)
@@ -262,9 +262,10 @@ struct BrowserPanel: View {
                 .padding(.vertical, FXSpacing.xxs)
                 .background(FXColors.bgSurface)
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
+                .accessibilityLabel("Browser address")
                 .onSubmit(browser.loadCurrentInput)
 
-            toolbarButton("xmark", enabled: browser.hasPage) {
+            toolbarButton("xmark", label: "Clear page", enabled: browser.hasPage) {
                 browser.clearPage()
             }
         }
@@ -273,7 +274,7 @@ struct BrowserPanel: View {
         .background(FXColors.bgElevated)
     }
 
-    private func toolbarButton(_ icon: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+    private func toolbarButton(_ icon: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 11, weight: .medium))
@@ -284,5 +285,6 @@ struct BrowserPanel: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
+        .accessibilityLabel(label)
     }
 }

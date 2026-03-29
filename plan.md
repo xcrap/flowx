@@ -33,11 +33,11 @@ The app is no longer just a visual mockup. The FlowX shell now builds against re
 **Still outstanding before calling the core shell “feature-complete”:**
 - Provider/session polish: deeper session recovery edge cases and additional multi-provider supervision depth
 - Additional git polish: staged-vs-unstaged depth and alternate diff modes
-- Focus management, accessibility, and performance passes
+- Accessibility and performance passes, plus any remaining focus edge cases
 - Additional session restore and agent/workspace quality-of-life polish
 
 **Active next slice:**
-- Keep closing shell polish gaps around accessibility, focus, and remaining git/session depth
+- Keep closing shell polish gaps around accessibility, remaining focus edge cases, and git/session depth
 
 ---
 
@@ -428,6 +428,7 @@ Each agent gets its own `WorkspaceState` so split/terminal preferences are indep
 - Keyboard shortcuts: ⌘B (sidebar), ⌘1-9 (agents), ⌘\ (right panel), ⌘` (terminal), ⌘, (settings), ⌘⇧P (command palette)
 - Command palette (searchable actions for repositories, agents, panels, browser, and settings)
 - Focus management (auto-focus chat input on agent switch)
+- Accessibility pass for icon-only shell controls, command palette search, browser toolbar, and terminal chrome
 - Scroll performance optimization (lazy rendering for long conversations)
 - Memory management (cap message history, image cleanup)
 - App icon and window title
