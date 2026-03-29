@@ -65,6 +65,7 @@ private actor CodexSession {
     private var lastTurnStartRequestID: Int?
     private var didEmitTurnStarted = false
     private var pendingApprovalResponseIDs: [UUID: ApprovalResponseID] = [:]
+    private var activeAttachmentPaths: [URL] = []
 
     init(
         resumeThreadID: String?,
@@ -123,8 +124,12 @@ private actor CodexSession {
         let requestID = nextRequestID()
         lastTurnStartRequestID = requestID
 
+        clearActiveAttachments()
+        let attachmentPaths = Self.writeAttachmentsToTemp(attachments)
+        activeAttachmentPaths = attachmentPaths
+
         var input: [[String: Any]] = []
-        for path in Self.writeAttachmentsToTemp(attachments) {
+        for path in attachmentPaths {
             input.append([
                 "type": "localImage",
                 "path": path.path,
@@ -331,6 +336,7 @@ private actor CodexSession {
         lastTurnStartRequestID = nil
         didEmitTurnStarted = false
         pendingApprovalResponseIDs.removeAll()
+        clearActiveAttachments()
         threadReady = false
         writer = nil
         stderrPipe = nil
@@ -381,6 +387,7 @@ private actor CodexSession {
                     activeTurnID = nil
                     pendingInterrupt = false
                     lastTurnStartRequestID = nil
+                    clearActiveAttachments()
                 }
             }
             return
@@ -507,6 +514,7 @@ private actor CodexSession {
             lastTurnStartRequestID = nil
             didEmitTurnStarted = false
             pendingApprovalResponseIDs.removeAll()
+            clearActiveAttachments()
 
         default:
             break
@@ -820,6 +828,19 @@ private actor CodexSession {
             }
         }
         return paths
+    }
+
+    private static func cleanupAttachments(at paths: [URL]) {
+        guard !paths.isEmpty else { return }
+        let manager = FileManager.default
+        for path in paths {
+            try? manager.removeItem(at: path)
+        }
+    }
+
+    private func clearActiveAttachments() {
+        Self.cleanupAttachments(at: activeAttachmentPaths)
+        activeAttachmentPaths.removeAll()
     }
 }
 
