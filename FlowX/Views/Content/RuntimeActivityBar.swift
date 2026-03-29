@@ -11,6 +11,18 @@ struct RuntimeActivityBar: View {
         activities.filter(isCompleted).count
     }
 
+    private var headerTitle: String {
+        if toolCallCount > 0 {
+            return toolCallCount == 1 ? "1 tool call" : "\(toolCallCount) tool calls"
+        }
+
+        if activities.count == 1, let summary = activities.first?.summary, !summary.isEmpty {
+            return summary
+        }
+
+        return activities.count == 1 ? "1 runtime event" : "\(activities.count) runtime events"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Summary header
@@ -20,14 +32,14 @@ struct RuntimeActivityBar: View {
                         .font(.system(size: 12))
                         .foregroundStyle(FXColors.fgTertiary)
 
-                    Text("\(toolCallCount) tool calls")
+                    Text(headerTitle)
                         .font(FXTypography.body)
                         .foregroundStyle(FXColors.fgSecondary)
 
                     if !isExpanded {
                         Text("·")
                             .foregroundStyle(FXColors.fgTertiary)
-                        Text("\(completedTaskCount)/\(activities.count) tasks")
+                        Text("\(completedTaskCount)/\(activities.count) complete")
                             .font(FXTypography.body)
                             .foregroundStyle(FXColors.fgSecondary)
                     }

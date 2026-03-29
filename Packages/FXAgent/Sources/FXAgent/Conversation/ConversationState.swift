@@ -310,8 +310,52 @@ public final class ConversationState {
         [messages.last?.timestamp, latestRuntimeActivity?.timestamp].compactMap { $0 }.max()
     }
 
+    public var latestUserPrompt: String? {
+        messages
+            .reversed()
+            .first(where: { $0.role == .user })?
+            .textContent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public var latestPreviewText: String? {
+        if let latestUserPrompt, !latestUserPrompt.isEmpty {
+            return latestUserPrompt
+        }
+
+        return messages
+            .reversed()
+            .compactMap { message in
+                let text = message.textContent.trimmingCharacters(in: .whitespacesAndNewlines)
+                return text.isEmpty ? nil : text
+            }
+            .first
+            ?? latestRuntimeActivity?.summary
+    }
+
+    public var nextQueuedPromptPreview: String? {
+        queuedPromptPreviews.first
+    }
+
     public var latestRuntimeActivity: ConversationRuntimeActivity? {
         runtimeActivities.last
+    }
+
+    public var recentRuntimeActivities: [ConversationRuntimeActivity] {
+        var seen = Set<ConversationRuntimeActivityKind>()
+        var deduped: [ConversationRuntimeActivity] = []
+
+        for activity in runtimeActivities.suffix(8).reversed() {
+            guard activity.kind != .queue else { continue }
+
+            if activity.kind == .session || activity.kind == .contextCompaction {
+                guard seen.insert(activity.kind).inserted else { continue }
+            }
+
+            deduped.append(activity)
+        }
+
+        return Array(deduped.reversed().suffix(4))
     }
 
     public var visibleQueuedPromptPreviews: [String] {

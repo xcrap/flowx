@@ -65,6 +65,15 @@ public final class ConversationService {
 
         if isQueued {
             conversationState.enqueuePrompt(prompt)
+            let queuedCount = (pendingRequests[conversationState.agentID]?.count ?? 0) + 1
+            conversationState.recordRuntimeActivity(
+                kind: .queue,
+                tone: .info,
+                summary: "Prompt queued",
+                detail: queuedCount == 1 ? "Next up" : "\(queuedCount) prompts waiting",
+                state: "queued",
+                turnID: conversationState.activeTurnID
+            )
             pendingRequests[conversationState.agentID, default: []].append(request)
             return
         }
@@ -368,6 +377,14 @@ public final class ConversationService {
 
         let next = queue.removeFirst()
         pendingRequests[agentID] = queue.isEmpty ? nil : queue
+        conversationState.recordRuntimeActivity(
+            kind: .queue,
+            tone: .working,
+            summary: "Queued prompt started",
+            detail: Self.summarizedRuntimeText(next.prompt),
+            state: "started",
+            turnID: conversationState.activeTurnID
+        )
         start(next, for: conversationState)
     }
 

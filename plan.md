@@ -25,18 +25,19 @@ The app is no longer just a visual mockup. The FlowX shell now builds against re
 - FXCore / FXAgent / FXTerminal ported and compiling inside FlowX
 - Real `AppState`, `ProjectPersistence`, and `ConversationPersistence`
 - Real provider registration, runtime health checks, send / cancel / reset flows
-- Real runtime activity rendering and per-agent terminal sessions
-- Real git polling, file inspection, diff/file content loading, and push action
+- Real runtime activity rendering, queued prompt editing/removal, session resume/retry UX, token/context status, and per-agent terminal sessions
+- Real git polling, searchable file inspection, structured diff/file rendering, and commit / push actions
 - Real split browser panel backed by `WKWebView` with per-agent persisted URL state
+- More polished empty states plus core shell shortcuts for sidebar, right panel, terminal, send, and agent switching
 
 **Still outstanding before calling the core shell “feature-complete”:**
-- Richer diff rendering and better file tree UX
-- Commit UX (sheet or inline flow) instead of push-only git controls
-- More polished onboarding / empty states / keyboard shortcut coverage
+- Provider/session polish: supervised approval handling and deeper session recovery edge cases
+- Additional git polish: staged-vs-unstaged depth and alternate diff modes
+- Command palette, focus management, accessibility, and performance passes
 - Additional session restore and agent/workspace quality-of-life polish
 
 **Active next slice:**
-- Finish inspector quality: better diff presentation, file navigation, and commit workflow
+- Finish supervised approval flow and the remaining productivity shell features
 
 ---
 
@@ -366,15 +367,15 @@ Each agent gets its own `WorkspaceState` so split/terminal preferences are indep
 
 **Goal:** Actually talk to Claude Code and Codex.
 
-**Status:** 🟡 Core flow is wired; approvals, resume polish, and deeper session UX remain.
+**Status:** 🟡 Provider runtime, queued prompt UX, persisted session resume, retry recovery, and token/context status are in. Supervised approval handling still remains.
 
 - Wire `ProviderRegistry` registration in app startup
 - Wire `RuntimeDiscovery` for binary detection + health monitoring
 - Connect send flow: ChatInputBar → ConversationService → Provider → Stream → ConversationState → UI
-- Implement message queuing UI (show queued prompts)
-- Handle tool approval requests (if supervised mode)
-- Session resume on app restart (via persisted sessionID)
-- Token tracking display in status bar or conversation header
+- Implement queued prompt UI with visible/editable/removable follow-ups
+- Persist and reuse `sessionID` for restart + resume recovery
+- Display token/context usage in the conversation status strip
+- Remaining: handle tool approval requests for supervised mode
 
 ---
 
@@ -382,12 +383,12 @@ Each agent gets its own `WorkspaceState` so split/terminal preferences are indep
 
 **Goal:** Real git status, diff viewing, and WebKit browser.
 
-**Status:** 🟡 Git polling, file inspection, push, and WebKit browser are in; diff quality and commit UX remain.
+**Status:** 🟡 Git polling, searchable files, structured diff inspection, inline commit/push workflow, and WebKit browser are in; staged/unstaged depth and alternate diff modes remain.
 
 ### 5a. Git
 - Port `GitStatusService` with 5s polling
 - Wire to RightPanelView (CHANGES tab with real file list)
-- Implement commit sheet (inline or modal)
+- Implement commit flow (inline composer is now in place)
 - Push button with async execution
 - Branch display in status bar
 

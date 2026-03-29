@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import FXAgent
 import FXCore
+import FXDesign
 import FXTerminal
 import SwiftUI
 
@@ -17,6 +18,17 @@ struct FileChangeInfo: Identifiable, Equatable {
 enum RightPanelTab: String, CaseIterable {
     case changes = "CHANGES"
     case files = "FILES"
+}
+
+enum InspectorComparisonMode: String, CaseIterable {
+    case local = "Local"
+    case base = "Base"
+}
+
+enum InspectorContentKind {
+    case diff
+    case file
+    case message
 }
 
 enum AgentStatus: String {
@@ -40,7 +52,7 @@ final class WorkspaceState {
     var terminalVisible: Bool = false { didSet { onChange?() } }
     var terminalHeight: CGFloat = 220 { didSet { onChange?() } }
     var terminalCount: Int = 1 { didSet { onChange?() } }
-    var browserURLString: String = "https://localhost:3000" { didSet { onChange?() } }
+    var browserURLString: String = "" { didSet { onChange?() } }
 
     var onChange: (() -> Void)?
 
@@ -53,7 +65,7 @@ final class WorkspaceState {
         terminalVisible = persisted.terminalVisible
         terminalHeight = CGFloat(persisted.terminalHeight)
         terminalCount = persisted.terminalCount
-        browserURLString = persisted.browserURLString
+        browserURLString = persisted.browserURLString == "https://localhost:3000" ? "" : persisted.browserURLString
     }
 }
 
@@ -219,6 +231,18 @@ final class AgentInfo: Identifiable {
         setTerminalCount(terminalPaneCount - 1)
     }
 
+    func closeTerminalPane(at index: Int) {
+        guard terminalSessions.indices.contains(index) else { return }
+
+        if terminalPaneCount <= 1 {
+            workspace.terminalVisible = false
+            return
+        }
+
+        terminalSessions.remove(at: index).shutdown()
+        workspace.terminalCount = max(1, min(3, terminalSessions.count))
+    }
+
     func setTerminalLaunchDirectory(_ directory: String) {
         for session in terminalSessions {
             session.setLaunchDirectory(directory)
@@ -296,6 +320,13 @@ final class ProjectState: Identifiable {
     var repositoryFiles: [String] = []
     var selectedInspectorPath: String?
     var selectedInspectorText: String = ""
+    var selectedInspectorContentKind: InspectorContentKind = .message
+    var inspectorComparisonMode: InspectorComparisonMode = .local
+    var commitComposerVisible = false
+    var commitMessageDraft = ""
+    var includeUntrackedInCommit = true
+    var isPerformingGitAction = false
+    var gitActionMessage: String?
     init(project: Project, agents: [AgentInfo], isExpanded: Bool = true) {
         id = project.id
         self.project = project
@@ -541,40 +572,13 @@ final class AppState {
     }
 
     func sendPrompt(for agent: AgentInfo) {
-        guard let project = project(for: agent.id) else { return }
-
         let prompt = agent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
 
         let attachments = agent.conversationState.pendingAttachments
         agent.conversationState.inputText = ""
         agent.conversationState.clearAttachments()
-        agent.markConversationStarted()
-
-        conversationService.send(
-            prompt: prompt,
-            attachments: attachments,
-            to: agent.conversationState,
-            providerID: agent.providerID,
-            model: agent.modelID,
-            effort: agent.effort,
-            systemPrompt: agent.systemPrompt,
-            agentMode: agent.agentMode,
-            agentAccess: agent.agentAccess,
-            workingDirectory: project.project.rootURL,
-            onComplete: { [weak self] in
-                guard let self else { return }
-                Task { @MainActor in
-                    agent.syncExecutionStateFromConversation()
-                    ConversationPersistence.save(project: project)
-                    gitStatusService.forceRefresh(projectID: project.id)
-                    await refreshInspector(for: project)
-                    scheduleSave()
-                }
-            }
-        )
-
-        scheduleSave()
+        dispatchPrompt(prompt, attachments: attachments, for: agent)
     }
 
     func cancelPrompt(for agent: AgentInfo) {
@@ -583,18 +587,66 @@ final class AppState {
         if let project = project(for: agent.id) {
             ConversationPersistence.save(project: project)
         }
+        scheduleSave()
     }
 
     func resetConversation(for agent: AgentInfo) {
+        conversationService.cancelStreaming(for: agent.id)
+        conversationService.clearPendingRequests(for: agent.id)
         agent.conversationState.resetConversation()
         agent.syncExecutionStateFromConversation()
         if let project = project(for: agent.id) {
             ConversationPersistence.save(project: project)
         }
+        scheduleSave()
+    }
+
+    func queuedPromptText(at index: Int, for agent: AgentInfo) -> String? {
+        conversationService.queuedPrompt(at: index, for: agent.id)
+    }
+
+    func updateQueuedPrompt(at index: Int, with prompt: String, for agent: AgentInfo) {
+        conversationService.updateQueuedPrompt(
+            at: index,
+            with: prompt,
+            for: agent.id,
+            conversationState: agent.conversationState
+        )
+        persistConversation(for: agent)
+    }
+
+    func removeQueuedPrompt(at index: Int, for agent: AgentInfo) {
+        conversationService.removeQueuedPrompt(at: index, for: agent.id, conversationState: agent.conversationState)
+        persistConversation(for: agent)
+    }
+
+    func resumeConversation(for agent: AgentInfo) {
+        guard let sessionID = agent.conversationState.sessionID, !sessionID.isEmpty else { return }
+        agent.conversationState.dismissError()
+        dispatchPrompt("continue", for: agent, resumeSessionID: sessionID)
+    }
+
+    func retryLastPrompt(for agent: AgentInfo) {
+        guard let prompt = agent.conversationState.latestUserPrompt, !prompt.isEmpty else { return }
+        agent.conversationState.dismissError()
+        dispatchPrompt(prompt, for: agent)
+    }
+
+    func dismissConversationError(for agent: AgentInfo) {
+        agent.conversationState.dismissError()
+        persistConversation(for: agent)
     }
 
     func selectInspectorPath(_ path: String, for project: ProjectState) {
         project.selectedInspectorPath = path
+        Task { @MainActor in
+            await refreshInspector(for: project)
+        }
+    }
+
+    func setInspectorComparisonMode(_ mode: InspectorComparisonMode, for project: ProjectState) {
+        guard project.inspectorComparisonMode != mode else { return }
+        project.inspectorComparisonMode = mode
         Task { @MainActor in
             await refreshInspector(for: project)
         }
@@ -606,21 +658,100 @@ final class AppState {
 
     func pushActiveProject() async {
         guard let project = activeProject else { return }
-        _ = await gitStatusService.push(projectID: project.id)
+        project.gitActionMessage = nil
+        project.isPerformingGitAction = true
+        let success = await gitStatusService.push(projectID: project.id)
+        project.isPerformingGitAction = false
         applyGitInfo(to: project.id)
+        if !success {
+            project.gitActionMessage = gitStatusService.lastFailureMessage[project.id] ?? "Push failed."
+        }
+    }
+
+    func toggleCommitComposer() {
+        guard let project = activeProject, project.gitInfo.isGitRepo, project.gitInfo.hasChanges else { return }
+        project.gitActionMessage = nil
+        withAnimation(FXAnimation.quick) {
+            project.commitComposerVisible.toggle()
+        }
+    }
+
+    func commitActiveProject() async {
+        guard let project = activeProject else { return }
+
+        let message = project.commitMessageDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else {
+            project.gitActionMessage = "Enter a commit message."
+            return
+        }
+
+        project.gitActionMessage = nil
+        project.isPerformingGitAction = true
+        let success = await gitStatusService.commit(
+            projectID: project.id,
+            message: message,
+            includeUntracked: project.includeUntrackedInCommit
+        )
+        project.isPerformingGitAction = false
+        applyGitInfo(to: project.id)
+        await refreshInspector(for: project)
+
+        if success {
+            project.commitMessageDraft = ""
+            project.includeUntrackedInCommit = true
+            withAnimation(FXAnimation.quick) {
+                project.commitComposerVisible = false
+            }
+        } else {
+            project.gitActionMessage = gitStatusService.lastFailureMessage[project.id] ?? "Commit failed."
+        }
     }
 
     func refreshInspector(for project: ProjectState) async {
         guard let selectedPath = project.selectedInspectorPath else {
             project.selectedInspectorText = ""
+            project.selectedInspectorContentKind = .message
             return
         }
 
-        let diff = await gitStatusService.diff(projectID: project.id, path: selectedPath)
-        if !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            project.selectedInspectorText = diff
-        } else {
-            project.selectedInspectorText = await gitStatusService.fileContents(projectID: project.id, path: selectedPath)
+        switch project.inspectorComparisonMode {
+        case .local:
+            let diff = project.gitInfo.hasCommits
+                ? await gitStatusService.diffAgainstHead(projectID: project.id, path: selectedPath)
+                : await gitStatusService.diff(projectID: project.id, path: selectedPath)
+
+            if !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                project.selectedInspectorText = diff
+                project.selectedInspectorContentKind = .diff
+                return
+            }
+
+            let contents = await gitStatusService.fileContents(projectID: project.id, path: selectedPath)
+            if !contents.isEmpty {
+                project.selectedInspectorText = contents
+                project.selectedInspectorContentKind = .file
+            } else {
+                project.selectedInspectorText = "No local content available for this file."
+                project.selectedInspectorContentKind = .message
+            }
+
+        case .base:
+            guard project.gitInfo.hasCommits else {
+                project.selectedInspectorText = "This repository has no committed base revision yet."
+                project.selectedInspectorContentKind = .message
+                return
+            }
+
+            if let baseContents = await gitStatusService.fileContentsAtHead(projectID: project.id, path: selectedPath) {
+                project.selectedInspectorText = baseContents
+                project.selectedInspectorContentKind = .file
+            } else if project.gitInfo.files.contains(where: { $0.path == selectedPath && $0.isUntracked }) {
+                project.selectedInspectorText = "This file is new locally and does not exist in HEAD."
+                project.selectedInspectorContentKind = .message
+            } else {
+                project.selectedInspectorText = "This file does not exist in the current base revision."
+                project.selectedInspectorContentKind = .message
+            }
         }
     }
 
@@ -666,6 +797,12 @@ final class AppState {
             agent.applyGitInfo(gitInfo)
         }
 
+        if !gitInfo.hasChanges {
+            project.commitComposerVisible = false
+            project.commitMessageDraft = ""
+            project.gitActionMessage = nil
+        }
+
         if project.selectedInspectorPath == nil {
             project.selectedInspectorPath = gitInfo.files.first?.path ?? project.repositoryFiles.first
         }
@@ -681,6 +818,53 @@ final class AppState {
         projects.first { project in
             project.agents.contains { $0.id == agentID }
         }
+    }
+
+    private func dispatchPrompt(
+        _ prompt: String,
+        attachments: [Attachment] = [],
+        for agent: AgentInfo,
+        resumeSessionID: String? = nil
+    ) {
+        guard let project = project(for: agent.id) else { return }
+
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else { return }
+
+        agent.markConversationStarted()
+
+        conversationService.send(
+            prompt: trimmedPrompt,
+            attachments: attachments,
+            to: agent.conversationState,
+            providerID: agent.providerID,
+            model: agent.modelID,
+            effort: agent.effort,
+            systemPrompt: agent.systemPrompt,
+            agentMode: agent.agentMode,
+            agentAccess: agent.agentAccess,
+            workingDirectory: project.project.rootURL,
+            resumeSessionID: resumeSessionID,
+            onComplete: { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in
+                    agent.syncExecutionStateFromConversation()
+                    ConversationPersistence.save(project: project)
+                    gitStatusService.forceRefresh(projectID: project.id)
+                    await refreshInspector(for: project)
+                    scheduleSave()
+                }
+            }
+        )
+
+        scheduleSave()
+    }
+
+    private func persistConversation(for agent: AgentInfo) {
+        if let project = project(for: agent.id) {
+            ConversationPersistence.save(project: project)
+        }
+        scheduleSave()
     }
 
     private func preferredProviderID() -> String {

@@ -27,5 +27,20 @@ struct FlowXCommands: Commands {
             }
             .keyboardShortcut("`", modifiers: .command)
         }
+
+        CommandMenu("Agents") {
+            if let project = appState.activeProject, !project.agents.isEmpty {
+                ForEach(Array(project.agents.prefix(9).enumerated()), id: \.element.id) { index, agent in
+                    Button("Select \(agent.title)") {
+                        appState.activeProjectID = project.id
+                        appState.activeAgentID = agent.id
+                    }
+                    .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                }
+            } else {
+                Button("No Agents Available") {}
+                    .disabled(true)
+            }
+        }
     }
 }

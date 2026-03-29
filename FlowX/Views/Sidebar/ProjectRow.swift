@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import FXDesign
 
@@ -32,10 +33,10 @@ struct ProjectRow: View {
                     Label("New Agent", systemImage: "plus.bubble")
                 }
                 Divider()
-                Button(action: {}) {
+                Button(action: showInFinder) {
                     Label("Show in Finder", systemImage: "folder")
                 }
-                Button(action: {}) {
+                Button(action: copyPath) {
                     Label("Copy Path", systemImage: "doc.on.doc")
                 }
                 Divider()
@@ -53,5 +54,14 @@ struct ProjectRow: View {
                 }
             }
         }
+    }
+
+    private func showInFinder() {
+        NSWorkspace.shared.activateFileViewerSelecting([project.project.rootURL])
+    }
+
+    private func copyPath() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(project.project.rootPath, forType: .string)
     }
 }

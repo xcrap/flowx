@@ -65,55 +65,23 @@ struct TerminalPanel: View {
 
             Spacer()
 
-            splitControls
-
-            Button(action: {
-                withAnimation(FXAnimation.panel) {
-                    agent.workspace.terminalVisible = false
-                }
-            }) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(FXColors.fgTertiary)
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+            addSplitButton
         }
         .padding(.horizontal, FXSpacing.md)
         .padding(.vertical, FXSpacing.xs)
         .background(FXColors.bgElevated)
     }
 
-    private var splitControls: some View {
-        HStack(spacing: FXSpacing.xxxs) {
-            terminalControlButton(
-                icon: "minus",
-                enabled: agent.terminalPaneCount > 1,
-                tooltip: "Remove split"
-            ) {
-                withAnimation(FXAnimation.quick) {
-                    agent.removeTerminalPane()
-                }
-            }
-
-            terminalControlButton(
-                icon: "plus",
-                enabled: agent.terminalPaneCount < 3,
-                tooltip: "Add split"
-            ) {
-                withAnimation(FXAnimation.quick) {
-                    agent.addTerminalPane()
-                }
+    private var addSplitButton: some View {
+        terminalControlButton(
+            icon: "plus",
+            enabled: agent.terminalPaneCount < 3,
+            tooltip: "Add split"
+        ) {
+            withAnimation(FXAnimation.quick) {
+                agent.addTerminalPane()
             }
         }
-        .padding(FXSpacing.xxxs)
-        .background(FXColors.bgSurface.opacity(0.7))
-        .clipShape(RoundedRectangle(cornerRadius: FXRadii.sm))
-        .overlay(
-            RoundedRectangle(cornerRadius: FXRadii.sm)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
-        )
     }
 
     private func terminalControlButton(
@@ -130,8 +98,12 @@ struct TerminalPanel: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(enabled ? FXColors.fgSecondary : FXColors.fgQuaternary)
                 .frame(width: 24, height: 22)
-                .background(enabled ? FXColors.bgSelected : .clear)
+                .background(FXColors.bgSurface.opacity(enabled ? 0.7 : 0.3))
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
+                .overlay(
+                    RoundedRectangle(cornerRadius: FXRadii.xs)
+                        .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                )
         }
         .buttonStyle(.plain)
         .help(tooltip)
@@ -142,10 +114,8 @@ struct TerminalPanel: View {
 
     private func terminalPane(index: Int, session: TerminalSession) -> some View {
         VStack(spacing: 0) {
-            if agent.terminalPaneCount > 1 {
-                paneHeader(index: index, session: session)
-                FXDivider()
-            }
+            paneHeader(index: index, session: session)
+            FXDivider()
 
             TerminalSurface(session: session)
                 .background(FXColors.terminalBg)
@@ -155,7 +125,7 @@ struct TerminalPanel: View {
 
     private func paneHeader(index: Int, session: TerminalSession) -> some View {
         HStack(spacing: FXSpacing.sm) {
-            Text(session.terminalTitle ?? "Terminal \(index + 1)")
+            Text(paneTitle(index: index, session: session))
                 .font(FXTypography.captionMedium)
                 .foregroundStyle(FXColors.fgSecondary)
                 .lineLimit(1)
@@ -166,10 +136,32 @@ struct TerminalPanel: View {
                 .lineLimit(1)
 
             Spacer(minLength: 0)
+
+            Button(action: {
+                withAnimation(FXAnimation.quick) {
+                    agent.closeTerminalPane(at: index)
+                }
+            }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(FXColors.fgTertiary)
+                    .frame(width: 22, height: 22)
+                    .background(FXColors.bgSurface.opacity(0.55))
+                    .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
+            }
+            .buttonStyle(.plain)
+            .help(agent.terminalPaneCount > 1 ? "Close this split" : "Hide terminal")
         }
         .padding(.horizontal, FXSpacing.md)
         .padding(.vertical, FXSpacing.xs)
         .background(FXColors.bgSurface)
+    }
+
+    private func paneTitle(index: Int, session: TerminalSession) -> String {
+        if let title = session.terminalTitle, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return title
+        }
+        return agent.terminalPaneCount > 1 ? "Terminal \(index + 1)" : "Terminal"
     }
 }
 

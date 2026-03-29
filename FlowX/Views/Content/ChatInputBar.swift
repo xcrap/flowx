@@ -9,12 +9,18 @@ struct ChatInputBar: View {
 
     private let maxContentWidth: CGFloat = 920
 
+    private enum ComposerAction {
+        case send
+        case queue
+        case cancel
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 0) {
                 ZStack(alignment: .topLeading) {
                     if agent.conversationState.inputText.isEmpty {
-                        Text("Ask to make changes...")
+                        Text(composerPlaceholder)
                             .font(FXTypography.body)
                             .foregroundStyle(FXColors.fgTertiary)
                             .padding(.horizontal, FXSpacing.xl)
@@ -121,18 +127,21 @@ struct ChatInputBar: View {
                     Spacer()
 
                     Button(action: {
-                        if agent.isStreaming {
-                            appState.cancelPrompt(for: agent)
-                        } else {
+                        switch composerAction {
+                        case .send, .queue:
                             appState.sendPrompt(for: agent)
+                        case .cancel:
+                            appState.cancelPrompt(for: agent)
                         }
                     }) {
-                        Image(systemName: agent.isStreaming ? "stop.circle.fill" : "arrow.up.circle.fill")
+                        Image(systemName: composerIcon)
                             .font(.system(size: 26))
                             .foregroundStyle(sendButtonColor)
                     }
                     .buttonStyle(.plain)
-                    .disabled(!agent.isStreaming && agent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(composerAction == .send && !hasDraftInput)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .help(composerHelpText)
                 }
                 .padding(.horizontal, FXSpacing.lg)
                 .padding(.bottom, FXSpacing.md)
@@ -175,13 +184,56 @@ struct ChatInputBar: View {
         return "\(providerName) \(modelName)"
     }
 
-    private var sendButtonColor: Color {
+    private var trimmedInput: String {
+        agent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var hasDraftInput: Bool {
+        !trimmedInput.isEmpty
+    }
+
+    private var composerAction: ComposerAction {
         if agent.isStreaming {
-            return FXColors.error
+            return hasDraftInput ? .queue : .cancel
         }
-        return agent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? FXColors.fgQuaternary
-            : FXColors.accent
+        return .send
+    }
+
+    private var composerPlaceholder: String {
+        agent.isStreaming ? "Add a follow-up to the queue..." : "Ask to make changes..."
+    }
+
+    private var composerIcon: String {
+        switch composerAction {
+        case .send:
+            "arrow.up.circle.fill"
+        case .queue:
+            "plus.circle.fill"
+        case .cancel:
+            "stop.circle.fill"
+        }
+    }
+
+    private var composerHelpText: String {
+        switch composerAction {
+        case .send:
+            "Send prompt (Command-Return)"
+        case .queue:
+            "Queue prompt (Command-Return)"
+        case .cancel:
+            "Cancel current run"
+        }
+    }
+
+    private var sendButtonColor: Color {
+        switch composerAction {
+        case .cancel:
+            return FXColors.error
+        case .queue:
+            return FXColors.info
+        case .send:
+            return hasDraftInput ? FXColors.accent : FXColors.fgQuaternary
+        }
     }
 
     private var inlineDivider: some View {

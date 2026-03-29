@@ -5,7 +5,7 @@ import FXDesign
 @MainActor
 final class BrowserViewModel: NSObject, ObservableObject {
     @Published var urlText: String = ""
-    @Published var pageTitle: String = "Preview"
+    @Published var pageTitle: String = ""
     @Published var canGoBack = false
     @Published var canGoForward = false
     @Published var isLoading = false
@@ -22,7 +22,10 @@ final class BrowserViewModel: NSObject, ObservableObject {
 
     func synchronizeWorkspaceURL(_ workspaceURL: String) {
         let trimmed = workspaceURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else {
+            clearPage(propagateChange: false)
+            return
+        }
 
         let normalized = normalizedURLString(from: trimmed)
         if urlText != normalized {
@@ -68,6 +71,31 @@ final class BrowserViewModel: NSObject, ObservableObject {
         webView?.reload()
     }
 
+    func clearPage(propagateChange: Bool = true) {
+        urlText = ""
+        pageTitle = ""
+        canGoBack = false
+        canGoForward = false
+        isLoading = false
+        lastCommittedURLString = ""
+        pendingURLString = nil
+
+        if propagateChange {
+            onCommittedURLChange?("")
+        }
+
+        guard let webView else { return }
+        webView.stopLoading()
+        webView.loadHTMLString("", baseURL: nil)
+    }
+
+    var hasPage: Bool {
+        !urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !lastCommittedURLString.isEmpty
+            || webView?.url != nil
+            || isLoading
+    }
+
     func goBack() {
         webView?.goBack()
     }
@@ -78,6 +106,11 @@ final class BrowserViewModel: NSObject, ObservableObject {
 
     private func load(_ rawValue: String, propagateChange: Bool = true) {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            clearPage(propagateChange: propagateChange)
+            return
+        }
+
         guard let url = normalizedURL(from: trimmed) else { return }
 
         let normalized = url.absoluteString
@@ -100,7 +133,7 @@ final class BrowserViewModel: NSObject, ObservableObject {
 
     private func normalizedURLString(from rawValue: String) -> String {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "https://localhost:3000" }
+        guard !trimmed.isEmpty else { return "" }
 
         if trimmed.contains("://") {
             return trimmed
@@ -117,8 +150,8 @@ final class BrowserViewModel: NSObject, ObservableObject {
         canGoBack = webView?.canGoBack ?? false
         canGoForward = webView?.canGoForward ?? false
         pageTitle = webView?.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-            ? webView?.title ?? "Preview"
-            : "Preview"
+            ? webView?.title ?? ""
+            : ""
 
         if let currentURL = webView?.url?.absoluteString, !currentURL.isEmpty {
             urlText = currentURL
@@ -126,6 +159,9 @@ final class BrowserViewModel: NSObject, ObservableObject {
                 lastCommittedURLString = currentURL
                 onCommittedURLChange?(currentURL)
             }
+        } else if webView?.isLoading != true {
+            urlText = ""
+            lastCommittedURLString = ""
         }
     }
 }
@@ -228,10 +264,9 @@ struct BrowserPanel: View {
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
                 .onSubmit(browser.loadCurrentInput)
 
-            Text(browser.pageTitle)
-                .font(FXTypography.caption)
-                .foregroundStyle(FXColors.fgTertiary)
-                .lineLimit(1)
+            toolbarButton("xmark", enabled: browser.hasPage) {
+                browser.clearPage()
+            }
         }
         .padding(.horizontal, FXSpacing.md)
         .padding(.vertical, FXSpacing.sm)

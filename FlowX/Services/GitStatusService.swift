@@ -3,6 +3,11 @@ import Foundation
 @Observable
 @MainActor
 final class GitStatusService {
+    struct CommandResult {
+        var succeeded: Bool
+        var output: String
+    }
+
     struct FileStatus: Equatable, Identifiable {
         var id: String { path }
         var path: String
@@ -31,6 +36,7 @@ final class GitStatusService {
     }
 
     private(set) var info: [UUID: GitInfo] = [:]
+    private(set) var lastFailureMessage: [UUID: String] = [:]
     private var pollingTasks: [UUID: Task<Void, Never>] = [:]
     private var rootPaths: [UUID: String] = [:]
 
@@ -69,6 +75,11 @@ final class GitStatusService {
         return await runGit(["diff", "--", path], in: rootPath)
     }
 
+    func diffAgainstHead(projectID: UUID, path: String) async -> String {
+        guard let rootPath = rootPaths[projectID] else { return "" }
+        return await runGit(["diff", "--no-ext-diff", "--no-color", "HEAD", "--", path], in: rootPath)
+    }
+
     func fileContents(projectID: UUID, path: String) async -> String {
         guard let rootPath = rootPaths[projectID] else { return "" }
         let url = URL(fileURLWithPath: rootPath).appendingPathComponent(path)
@@ -79,23 +90,49 @@ final class GitStatusService {
         return text
     }
 
+    func fileContentsAtHead(projectID: UUID, path: String) async -> String? {
+        guard let rootPath = rootPaths[projectID] else { return nil }
+        let result = await runGitForResult(["show", "HEAD:\(path)"], in: rootPath)
+        guard result.succeeded else { return nil }
+        return result.output
+    }
+
     func commit(projectID: UUID, message: String, includeUntracked: Bool) async -> Bool {
         guard let rootPath = rootPaths[projectID] else { return false }
+
+        let addResult: CommandResult
         if includeUntracked {
-            _ = await runGit(["add", "-A"], in: rootPath)
+            addResult = await runGitForResult(["add", "-A"], in: rootPath)
         } else {
-            _ = await runGit(["add", "-u"], in: rootPath)
+            addResult = await runGitForResult(["add", "-u"], in: rootPath)
         }
-        let success = await runGitWithStatus(["commit", "-m", message], in: rootPath)
+        guard addResult.succeeded else {
+            lastFailureMessage[projectID] = normalizedFailureMessage(addResult.output, fallback: "Unable to stage changes.")
+            await refresh(projectID: projectID, rootPath: rootPath)
+            return false
+        }
+
+        let commitResult = await runGitForResult(["commit", "-m", message], in: rootPath)
+        if !commitResult.succeeded {
+            lastFailureMessage[projectID] = normalizedFailureMessage(commitResult.output, fallback: "Commit failed.")
+        } else {
+            lastFailureMessage[projectID] = nil
+        }
+
         await refresh(projectID: projectID, rootPath: rootPath)
-        return success
+        return commitResult.succeeded
     }
 
     func push(projectID: UUID) async -> Bool {
         guard let rootPath = rootPaths[projectID] else { return false }
-        let success = await runGitWithStatus(["push"], in: rootPath)
+        let result = await runGitForResult(["push"], in: rootPath)
+        if !result.succeeded {
+            lastFailureMessage[projectID] = normalizedFailureMessage(result.output, fallback: "Push failed.")
+        } else {
+            lastFailureMessage[projectID] = nil
+        }
         await refresh(projectID: projectID, rootPath: rootPath)
-        return success
+        return result.succeeded
     }
 
     private func refresh(projectID: UUID, rootPath: String) async {
@@ -221,22 +258,30 @@ final class GitStatusService {
         }
     }
 
-    private func runGitWithStatus(_ args: [String], in directory: String) async -> Bool {
+    private func runGitForResult(_ args: [String], in directory: String) async -> CommandResult {
         await withCheckedContinuation { continuation in
             let process = Process()
+            let pipe = Pipe()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
             process.arguments = args
             process.currentDirectoryURL = URL(fileURLWithPath: directory)
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
+            process.standardOutput = pipe
+            process.standardError = pipe
 
             do {
                 try process.run()
                 process.waitUntilExit()
-                continuation.resume(returning: process.terminationStatus == 0)
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: data, encoding: .utf8) ?? ""
+                continuation.resume(returning: CommandResult(succeeded: process.terminationStatus == 0, output: output))
             } catch {
-                continuation.resume(returning: false)
+                continuation.resume(returning: CommandResult(succeeded: false, output: error.localizedDescription))
             }
         }
+    }
+
+    private func normalizedFailureMessage(_ output: String, fallback: String) -> String {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
     }
 }
