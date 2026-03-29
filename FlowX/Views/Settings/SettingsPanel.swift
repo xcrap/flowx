@@ -113,8 +113,8 @@ struct SettingsPanel: View {
                 shortcutRow("Jump to Agent 1-9", shortcut: "⌘1-9")
             }
             settingsSection("Actions") {
-                shortcutRow("Command Palette", shortcut: "⌘K")
-                shortcutRow("New Agent", shortcut: "⌘N")
+                shortcutRow("Command Palette", shortcut: "⌘⇧P")
+                shortcutRow("Send Prompt", shortcut: "⌘↩")
                 shortcutRow("Settings", shortcut: "⌘,")
             }
         }

@@ -31,6 +31,7 @@ public final class ConversationState {
     public var currentContextTokens: Int?
     public var queuedPromptCount: Int = 0
     public var queuedPromptPreviews: [String] = []
+    public var pendingToolApprovals: [ToolApprovalRequest] = []
     public var pendingAttachments: [Attachment] = []
 
     public init(agentID: UUID) {
@@ -276,6 +277,24 @@ public final class ConversationState {
         queuedPromptCount = 0
     }
 
+    public func addToolApprovalRequest(_ request: ToolApprovalRequest) {
+        if let existingIndex = pendingToolApprovals.firstIndex(where: { $0.id == request.id }) {
+            pendingToolApprovals[existingIndex] = request
+        } else {
+            pendingToolApprovals.append(request)
+        }
+    }
+
+    @discardableResult
+    public func removeToolApprovalRequest(_ id: UUID) -> ToolApprovalRequest? {
+        guard let index = pendingToolApprovals.firstIndex(where: { $0.id == id }) else { return nil }
+        return pendingToolApprovals.remove(at: index)
+    }
+
+    public func clearToolApprovalRequests() {
+        pendingToolApprovals.removeAll()
+    }
+
     public func resetConversation() {
         messages.removeAll()
         runtimePhase = .idle
@@ -298,6 +317,7 @@ public final class ConversationState {
         currentContextTokens = nil
         queuedPromptCount = 0
         queuedPromptPreviews.removeAll()
+        pendingToolApprovals.removeAll()
         pendingAttachments.removeAll()
         runtimeActivities.removeAll()
     }
@@ -335,6 +355,10 @@ public final class ConversationState {
 
     public var nextQueuedPromptPreview: String? {
         queuedPromptPreviews.first
+    }
+
+    public var pendingToolApprovalCount: Int {
+        pendingToolApprovals.count
     }
 
     public var latestRuntimeActivity: ConversationRuntimeActivity? {

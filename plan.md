@@ -25,19 +25,19 @@ The app is no longer just a visual mockup. The FlowX shell now builds against re
 - FXCore / FXAgent / FXTerminal ported and compiling inside FlowX
 - Real `AppState`, `ProjectPersistence`, and `ConversationPersistence`
 - Real provider registration, runtime health checks, send / cancel / reset flows
-- Real runtime activity rendering, queued prompt editing/removal, session resume/retry UX, token/context status, and per-agent terminal sessions
+- Real runtime activity rendering, queued prompt editing/removal, supervised approval handling, session resume/retry UX, token/context status, and per-agent terminal sessions
 - Real git polling, searchable file inspection, structured diff/file rendering, and commit / push actions
 - Real split browser panel backed by `WKWebView` with per-agent persisted URL state
-- More polished empty states plus core shell shortcuts for sidebar, right panel, terminal, send, and agent switching
+- More polished empty states plus core shell shortcuts for sidebar, right panel, terminal, send, settings, agent switching, and command palette
 
 **Still outstanding before calling the core shell “feature-complete”:**
-- Provider/session polish: supervised approval handling and deeper session recovery edge cases
+- Provider/session polish: deeper session recovery edge cases and additional multi-provider supervision depth
 - Additional git polish: staged-vs-unstaged depth and alternate diff modes
-- Command palette, focus management, accessibility, and performance passes
+- Focus management, accessibility, and performance passes
 - Additional session restore and agent/workspace quality-of-life polish
 
 **Active next slice:**
-- Finish supervised approval flow and the remaining productivity shell features
+- Keep closing shell polish gaps around accessibility, focus, and remaining git/session depth
 
 ---
 
@@ -367,15 +367,15 @@ Each agent gets its own `WorkspaceState` so split/terminal preferences are indep
 
 **Goal:** Actually talk to Claude Code and Codex.
 
-**Status:** 🟡 Provider runtime, queued prompt UX, persisted session resume, retry recovery, and token/context status are in. Supervised approval handling still remains.
+**Status:** 🟢 Provider runtime, queued prompt UX, persisted session resume, supervised approval handling, retry recovery, and token/context status are in.
 
 - Wire `ProviderRegistry` registration in app startup
 - Wire `RuntimeDiscovery` for binary detection + health monitoring
 - Connect send flow: ChatInputBar → ConversationService → Provider → Stream → ConversationState → UI
 - Implement queued prompt UI with visible/editable/removable follow-ups
 - Persist and reuse `sessionID` for restart + resume recovery
+- Surface supervised approval requests with approve / deny controls
 - Display token/context usage in the conversation status strip
-- Remaining: handle tool approval requests for supervised mode
 
 ---
 
@@ -425,8 +425,8 @@ Each agent gets its own `WorkspaceState` so split/terminal preferences are indep
 
 **Goal:** Ship-quality experience.
 
-- Keyboard shortcuts: ⌘B (sidebar), ⌘1-9 (agents), ⌘\ (right panel), ⌘` (terminal), ⌘K (command palette)
-- Command palette (fuzzy search for projects, agents, actions)
+- Keyboard shortcuts: ⌘B (sidebar), ⌘1-9 (agents), ⌘\ (right panel), ⌘` (terminal), ⌘, (settings), ⌘⇧P (command palette)
+- Command palette (searchable actions for repositories, agents, panels, browser, and settings)
 - Focus management (auto-focus chat input on agent switch)
 - Scroll performance optimization (lazy rendering for long conversations)
 - Memory management (cap message history, image cleanup)

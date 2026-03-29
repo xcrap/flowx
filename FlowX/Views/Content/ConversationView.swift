@@ -1,5 +1,6 @@
 import SwiftUI
 import FXDesign
+import FXCore
 
 struct ConversationView: View {
     @Environment(AppState.self) private var appState
@@ -60,6 +61,10 @@ struct ConversationView: View {
                 }
             }
 
+            if agent.conversationState.pendingToolApprovalCount > 0 {
+                approvalTray
+            }
+
             if agent.conversationState.queuedPromptCount > 0 {
                 queueTray
             }
@@ -84,6 +89,7 @@ struct ConversationView: View {
     private var showsContextBar: Bool {
         hasUsageData
             || agent.conversationState.queuedPromptCount > 0
+            || agent.conversationState.pendingToolApprovalCount > 0
             || agent.isStreaming
             || agent.conversationState.sessionID != nil
     }
@@ -463,6 +469,102 @@ struct ConversationView: View {
         .padding(.horizontal, FXSpacing.xxl)
     }
 
+    private var approvalTray: some View {
+        VStack(alignment: .leading, spacing: FXSpacing.md) {
+            HStack(spacing: FXSpacing.sm) {
+                Label(
+                    agent.conversationState.pendingToolApprovalCount == 1
+                        ? "1 approval required"
+                        : "\(agent.conversationState.pendingToolApprovalCount) approvals required",
+                    systemImage: "hand.raised.fill"
+                )
+                .font(FXTypography.captionMedium)
+                .foregroundStyle(FXColors.fgSecondary)
+
+                Spacer()
+
+                Text("Supervised")
+                    .font(FXTypography.monoSmall)
+                    .foregroundStyle(FXColors.fgTertiary)
+            }
+
+            VStack(alignment: .leading, spacing: FXSpacing.sm) {
+                ForEach(agent.conversationState.pendingToolApprovals) { approval in
+                    VStack(alignment: .leading, spacing: FXSpacing.sm) {
+                        HStack(spacing: FXSpacing.sm) {
+                            Text(approval.toolName)
+                                .font(FXTypography.bodyMedium)
+                                .foregroundStyle(FXColors.fg)
+
+                            riskBadge(for: approval.riskLevel)
+
+                            Spacer(minLength: 0)
+                        }
+
+                        Text(approval.description)
+                            .font(FXTypography.caption)
+                            .foregroundStyle(FXColors.fgSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if !approval.parameters.isEmpty {
+                            VStack(alignment: .leading, spacing: FXSpacing.xxs) {
+                                ForEach(approval.parameters.keys.sorted(), id: \.self) { key in
+                                    if let value = approval.parameters[key] {
+                                        HStack(alignment: .top, spacing: FXSpacing.sm) {
+                                            Text(key.uppercased())
+                                                .font(FXTypography.monoSmall)
+                                                .foregroundStyle(FXColors.fgTertiary)
+                                                .frame(width: 58, alignment: .leading)
+
+                                            Text(value)
+                                                .font(FXTypography.monoSmall)
+                                                .foregroundStyle(FXColors.fgSecondary)
+                                                .textSelection(.enabled)
+                                                .lineLimit(4)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                        }
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, FXSpacing.md)
+                            .padding(.vertical, FXSpacing.sm)
+                            .background(FXColors.bgSurface)
+                            .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: FXRadii.md)
+                                    .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                            )
+                        }
+
+                        HStack(spacing: FXSpacing.sm) {
+                            actionPill(title: "Approve", icon: "checkmark", tint: FXColors.success) {
+                                appState.respondToToolApproval(approval.id, approved: true, for: agent)
+                            }
+
+                            actionPill(title: "Deny", icon: "xmark", tint: FXColors.error) {
+                                appState.respondToToolApproval(approval.id, approved: false, for: agent)
+                            }
+
+                            Spacer(minLength: 0)
+                        }
+                    }
+                    .padding(FXSpacing.lg)
+                    .background(FXColors.warning.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: FXRadii.xl)
+                            .strokeBorder(FXColors.warning.opacity(0.18), lineWidth: 0.5)
+                    )
+                }
+            }
+        }
+        .padding(.top, FXSpacing.md)
+        .padding(.bottom, FXSpacing.sm)
+        .frame(maxWidth: maxContentWidth, alignment: .leading)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, FXSpacing.xxl)
+    }
+
     private var contextBar: some View {
         VStack(alignment: .leading, spacing: FXSpacing.sm) {
             HStack(spacing: FXSpacing.sm) {
@@ -475,6 +577,11 @@ struct ConversationView: View {
                 if agent.conversationState.queuedPromptCount > 0 {
                     let count = agent.conversationState.queuedPromptCount
                     FXBadge(count == 1 ? "1 queued" : "\(count) queued", tone: .warning)
+                }
+
+                if agent.conversationState.pendingToolApprovalCount > 0 {
+                    let count = agent.conversationState.pendingToolApprovalCount
+                    FXBadge(count == 1 ? "1 approval needed" : "\(count) approvals needed", tone: .warning)
                 }
 
                 Spacer()
@@ -494,7 +601,12 @@ struct ConversationView: View {
                     .foregroundStyle(FXColors.fgTertiary)
             }
         }
-        .padding(.top, agent.conversationState.queuedPromptCount > 0 ? 0 : FXSpacing.md)
+        .padding(
+            .top,
+            (agent.conversationState.queuedPromptCount > 0 || agent.conversationState.pendingToolApprovalCount > 0)
+                ? 0
+                : FXSpacing.md
+        )
         .padding(.bottom, FXSpacing.sm)
         .frame(maxWidth: maxContentWidth, alignment: .leading)
         .frame(maxWidth: .infinity)
@@ -575,6 +687,26 @@ struct ConversationView: View {
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
         }
         .buttonStyle(.plain)
+    }
+
+    private func riskBadge(for riskLevel: ToolRiskLevel) -> some View {
+        let tint: Color
+        switch riskLevel {
+        case .safe:
+            tint = FXColors.info
+        case .moderate:
+            tint = FXColors.warning
+        case .dangerous:
+            tint = FXColors.error
+        }
+
+        return Text(riskLevel.rawValue.capitalized)
+            .font(FXTypography.monoSmall)
+            .foregroundStyle(tint)
+            .padding(.horizontal, FXSpacing.xs)
+            .padding(.vertical, 2)
+            .background(tint.opacity(0.12))
+            .clipShape(Capsule())
     }
 
     private func actionPill(title: String, icon: String?, tint: Color, action: @escaping () -> Void) -> some View {

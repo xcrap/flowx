@@ -21,6 +21,7 @@ public final class ConversationService {
     private struct ActiveRequest {
         let task: Task<Void, Never>
         let cancel: @Sendable () async -> Void
+        let respondToApproval: @Sendable (UUID, Bool) async -> Void
     }
 
     private let registry: ProviderRegistry
@@ -124,6 +125,12 @@ public final class ConversationService {
         }
         pendingRequests[agentID] = nil
         activeStates[agentID]?.clearQueuedPrompts()
+        activeStates[agentID]?.clearToolApprovalRequests()
+    }
+
+    public func respondToToolApproval(_ approvalID: UUID, approved: Bool, for agentID: UUID) async {
+        guard let activeRequest = activeRequests[agentID] else { return }
+        await activeRequest.respondToApproval(approvalID, approved)
     }
 
     private func start(_ request: PendingRequest, for conversationState: ConversationState) {
@@ -222,6 +229,25 @@ public final class ConversationService {
                     case .text(let text):
                         conversationState.appendStreamDelta(text)
 
+                    case .approvalRequest(let request):
+                        let approval = ToolApprovalRequest(
+                            id: request.id,
+                            toolName: request.toolName,
+                            description: request.description,
+                            parameters: request.parameters,
+                            riskLevel: request.riskLevel,
+                            agentID: conversationState.agentID
+                        )
+                        conversationState.addToolApprovalRequest(approval)
+                        conversationState.recordRuntimeActivity(
+                            kind: .note,
+                            tone: .warning,
+                            summary: "Approval required",
+                            detail: request.toolName,
+                            state: "pending",
+                            turnID: conversationState.activeTurnID
+                        )
+
                     case .toolUse(let id, let name, let input):
                         conversationState.recordRuntimeActivity(
                             kind: .tool,
@@ -317,10 +343,12 @@ public final class ConversationService {
 
                     case .done(let stopReason):
                         didReceiveCompletion = true
+                        conversationState.clearToolApprovalRequests()
                         conversationState.finishStreaming(stopReason: stopReason)
 
                     case .error(let message):
                         didReceiveError = true
+                        conversationState.clearToolApprovalRequests()
                         conversationState.setError(message)
                         conversationState.recordRuntimeActivity(
                             kind: .error,
@@ -335,6 +363,7 @@ public final class ConversationService {
             } catch {
                 if !Task.isCancelled {
                     didReceiveError = true
+                    conversationState.clearToolApprovalRequests()
                     conversationState.setError(error.localizedDescription)
                     conversationState.recordRuntimeActivity(
                         kind: .error,
@@ -348,6 +377,7 @@ public final class ConversationService {
             }
 
             if Task.isCancelled {
+                conversationState.clearToolApprovalRequests()
                 conversationState.finishStreaming(stopReason: "cancelled")
             } else if !didReceiveCompletion && !didReceiveError {
                 conversationState.finishStreaming()
@@ -364,7 +394,11 @@ public final class ConversationService {
             self.startNextRequestIfNeeded(for: conversationState)
         }
 
-        activeRequests[agentID] = ActiveRequest(task: task, cancel: handle.cancel)
+        activeRequests[agentID] = ActiveRequest(
+            task: task,
+            cancel: handle.cancel,
+            respondToApproval: handle.respondToApproval
+        )
     }
 
     private func startNextRequestIfNeeded(for conversationState: ConversationState) {

@@ -17,37 +17,45 @@ struct MainLayout: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Single-row title bar — traffic lights float on top of this
-            titleBar
+        ZStack(alignment: .top) {
+            VStack(spacing: 0) {
+                // Single-row title bar — traffic lights float on top of this
+                titleBar
 
-            // Content
-            HStack(spacing: 0) {
-                if appState.sidebarVisible {
-                    SidebarView()
-                        .frame(width: 260)
-                        .transition(.move(edge: .leading))
-                    FXDivider(.vertical)
+                // Content
+                HStack(spacing: 0) {
+                    if appState.sidebarVisible {
+                        SidebarView()
+                            .frame(width: 260)
+                            .transition(.move(edge: .leading))
+                        FXDivider(.vertical)
+                    }
+
+                    ContentAreaView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    if appState.settingsVisible {
+                        FXDivider(.vertical)
+                        SettingsPanel()
+                            .frame(width: 380)
+                            .transition(.move(edge: .trailing))
+                    } else if appState.rightPanelVisible {
+                        FXDivider(.vertical)
+                        RightPanelView()
+                            .frame(width: 300)
+                            .transition(.move(edge: .trailing))
+                    }
                 }
-
-                ContentAreaView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                if appState.settingsVisible {
-                    FXDivider(.vertical)
-                    SettingsPanel()
-                        .frame(width: 380)
-                        .transition(.move(edge: .trailing))
-                } else if appState.rightPanelVisible {
-                    FXDivider(.vertical)
-                    RightPanelView()
-                        .frame(width: 300)
-                        .transition(.move(edge: .trailing))
-                }
+                .animation(FXAnimation.panel, value: appState.sidebarVisible)
+                .animation(FXAnimation.panel, value: appState.rightPanelVisible)
+                .animation(FXAnimation.panel, value: appState.settingsVisible)
             }
-            .animation(FXAnimation.panel, value: appState.sidebarVisible)
-            .animation(FXAnimation.panel, value: appState.rightPanelVisible)
-            .animation(FXAnimation.panel, value: appState.settingsVisible)
+
+            if appState.commandPaletteVisible {
+                CommandPaletteView()
+                    .transition(.opacity)
+                    .zIndex(10)
+            }
         }
     }
 
@@ -205,5 +213,293 @@ struct MainLayout: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct CommandPaletteView: View {
+    @Environment(AppState.self) private var appState
+
+    @FocusState private var searchFocused: Bool
+    @State private var query = ""
+
+    private struct PaletteAction: Identifiable {
+        let id = UUID()
+        let title: String
+        let subtitle: String
+        let systemImage: String
+        let keywords: [String]
+        let perform: () -> Void
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Color.black.opacity(0.34)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture(perform: dismiss)
+
+            VStack(alignment: .leading, spacing: 0) {
+                searchField
+                FXDivider()
+                actionList
+            }
+            .frame(width: 560)
+            .background(FXColors.bgElevated)
+            .clipShape(RoundedRectangle(cornerRadius: FXRadii.xxl))
+            .overlay(
+                RoundedRectangle(cornerRadius: FXRadii.xxl)
+                    .strokeBorder(FXColors.borderMedium, lineWidth: 0.5)
+            )
+            .shadow(color: .black.opacity(0.35), radius: 28, y: 16)
+            .padding(.top, 84)
+        }
+        .onAppear {
+            query = ""
+            searchFocused = true
+        }
+        .onExitCommand(perform: dismiss)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: FXSpacing.sm) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(FXColors.fgTertiary)
+
+            TextField("Search actions", text: $query)
+                .textFieldStyle(.plain)
+                .font(FXTypography.body)
+                .foregroundStyle(FXColors.fg)
+                .focused($searchFocused)
+                .onSubmit {
+                    if let first = filteredActions.first {
+                        run(first)
+                    }
+                }
+
+            Button(action: dismiss) {
+                Text("Esc")
+                    .font(FXTypography.monoSmall)
+                    .foregroundStyle(FXColors.fgTertiary)
+                    .padding(.horizontal, FXSpacing.xs)
+                    .padding(.vertical, 2)
+                    .background(FXColors.bgSurface)
+                    .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, FXSpacing.lg)
+        .padding(.vertical, FXSpacing.md)
+    }
+
+    private var actionList: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: FXSpacing.xxs) {
+                if filteredActions.isEmpty {
+                    VStack(spacing: FXSpacing.sm) {
+                        Image(systemName: "sparkle.magnifyingglass")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(FXColors.fgTertiary)
+
+                        Text("No matching actions")
+                            .font(FXTypography.bodyMedium)
+                            .foregroundStyle(FXColors.fgSecondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, FXSpacing.xxxl)
+                } else {
+                    ForEach(filteredActions) { action in
+                        Button(action: { run(action) }) {
+                            HStack(spacing: FXSpacing.md) {
+                                Image(systemName: action.systemImage)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(FXColors.accent)
+                                    .frame(width: 20)
+
+                                VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
+                                    Text(action.title)
+                                        .font(FXTypography.bodyMedium)
+                                        .foregroundStyle(FXColors.fg)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                                    Text(action.subtitle)
+                                        .font(FXTypography.caption)
+                                        .foregroundStyle(FXColors.fgTertiary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                            .padding(.horizontal, FXSpacing.lg)
+                            .padding(.vertical, FXSpacing.md)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(FXColors.bgSurface.opacity(0.45))
+                            .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(FXSpacing.sm)
+        }
+        .frame(maxHeight: 440)
+    }
+
+    private var filteredActions: [PaletteAction] {
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedQuery.isEmpty else { return actions }
+
+        return actions.filter { action in
+            if action.title.lowercased().contains(normalizedQuery) || action.subtitle.lowercased().contains(normalizedQuery) {
+                return true
+            }
+            return action.keywords.contains { $0.contains(normalizedQuery) }
+        }
+    }
+
+    private var actions: [PaletteAction] {
+        var items: [PaletteAction] = [
+            PaletteAction(
+                title: "Add Repository",
+                subtitle: "Open a folder and add it to the sidebar",
+                systemImage: "folder.badge.plus",
+                keywords: ["repo", "project", "folder", "open"]
+            ) {
+                appState.openAddRepositoryPanel()
+            },
+            PaletteAction(
+                title: appState.sidebarVisible ? "Hide Sidebar" : "Show Sidebar",
+                subtitle: "Toggle the left project sidebar",
+                systemImage: "sidebar.left",
+                keywords: ["sidebar", "navigation", "left"]
+            ) {
+                withAnimation(FXAnimation.panel) {
+                    appState.sidebarVisible.toggle()
+                }
+            },
+            PaletteAction(
+                title: appState.rightPanelVisible ? "Hide Inspector" : "Show Inspector",
+                subtitle: "Toggle the right changes and files panel",
+                systemImage: "sidebar.right",
+                keywords: ["inspector", "changes", "files", "right panel"]
+            ) {
+                withAnimation(FXAnimation.panel) {
+                    appState.settingsVisible = false
+                    appState.rightPanelVisible.toggle()
+                }
+            },
+            PaletteAction(
+                title: appState.settingsVisible ? "Hide Settings" : "Show Settings",
+                subtitle: "Open the settings panel",
+                systemImage: "gearshape",
+                keywords: ["settings", "preferences", "config"]
+            ) {
+                withAnimation(FXAnimation.panel) {
+                    appState.rightPanelVisible = false
+                    appState.settingsVisible.toggle()
+                }
+            },
+        ]
+
+        if let agent = appState.activeAgent {
+            items.append(
+                PaletteAction(
+                    title: agent.workspace.terminalVisible ? "Hide Terminal" : "Show Terminal",
+                    subtitle: "Toggle the bottom terminal area",
+                    systemImage: "terminal",
+                    keywords: ["terminal", "console", "shell"]
+                ) {
+                    withAnimation(FXAnimation.panel) {
+                        agent.workspace.terminalVisible.toggle()
+                    }
+                }
+            )
+
+            items.append(
+                PaletteAction(
+                    title: (agent.workspace.splitOpen && agent.workspace.splitContent == .browser) ? "Close Browser Split" : "Open Browser Split",
+                    subtitle: "Toggle the browser in the split pane",
+                    systemImage: "globe",
+                    keywords: ["browser", "preview", "web"]
+                ) {
+                    withAnimation(FXAnimation.panel) {
+                        if agent.workspace.splitOpen && agent.workspace.splitContent == .browser {
+                            agent.workspace.splitOpen = false
+                        } else {
+                            agent.workspace.splitContent = .browser
+                            agent.workspace.splitOpen = true
+                        }
+                    }
+                }
+            )
+        }
+
+        if let project = appState.activeProject {
+            items.append(
+                PaletteAction(
+                    title: "New Agent",
+                    subtitle: "Create another agent in \(project.project.name)",
+                    systemImage: "plus.circle",
+                    keywords: ["agent", "create", "new"]
+                ) {
+                    _ = appState.addAgent(to: project)
+                }
+            )
+
+            items.append(
+                PaletteAction(
+                    title: "Show Changes",
+                    subtitle: "Focus the changes inspector tab",
+                    systemImage: "arrow.triangle.branch",
+                    keywords: ["changes", "git", "diff"]
+                ) {
+                    withAnimation(FXAnimation.panel) {
+                        appState.settingsVisible = false
+                        appState.rightPanelVisible = true
+                        appState.rightPanelTab = .changes
+                    }
+                }
+            )
+
+            items.append(
+                PaletteAction(
+                    title: "Show Files",
+                    subtitle: "Focus the repository files tab",
+                    systemImage: "doc.on.doc",
+                    keywords: ["files", "tree", "repository"]
+                ) {
+                    withAnimation(FXAnimation.panel) {
+                        appState.settingsVisible = false
+                        appState.rightPanelVisible = true
+                        appState.rightPanelTab = .files
+                    }
+                }
+            )
+
+            for agent in project.agents {
+                items.append(
+                    PaletteAction(
+                        title: "Switch to \(agent.title)",
+                        subtitle: "Focus this agent conversation",
+                        systemImage: "person.crop.circle",
+                        keywords: ["switch", "agent", agent.title.lowercased()]
+                    ) {
+                        appState.activeProjectID = project.id
+                        appState.activeAgentID = agent.id
+                    }
+                )
+            }
+        }
+
+        return items
+    }
+
+    private func run(_ action: PaletteAction) {
+        dismiss()
+        action.perform()
+    }
+
+    private func dismiss() {
+        withAnimation(FXAnimation.panel) {
+            appState.commandPaletteVisible = false
+        }
     }
 }

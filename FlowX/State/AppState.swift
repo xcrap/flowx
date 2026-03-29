@@ -395,6 +395,7 @@ final class AppState {
     var rightPanelTab: RightPanelTab = .changes
     var sidebarVisible = true
     var settingsVisible = false
+    var commandPaletteVisible = false
     var runtimeHealth: [String: BinaryHealth] = [:]
     var isBootstrapped = false
 
@@ -635,6 +636,26 @@ final class AppState {
     func dismissConversationError(for agent: AgentInfo) {
         agent.conversationState.dismissError()
         persistConversation(for: agent)
+    }
+
+    func respondToToolApproval(_ approvalID: UUID, approved: Bool, for agent: AgentInfo) {
+        guard let approval = agent.conversationState.removeToolApprovalRequest(approvalID) else { return }
+
+        let summary = approved ? "Approval granted" : "Approval denied"
+        let detail = approval.parameters["command"] ?? approval.toolName
+        agent.conversationState.recordRuntimeActivity(
+            kind: .note,
+            tone: approved ? .success : .warning,
+            summary: summary,
+            detail: detail,
+            state: approved ? "approved" : "denied",
+            turnID: agent.conversationState.activeTurnID
+        )
+        persistConversation(for: agent)
+
+        Task { @MainActor in
+            await conversationService.respondToToolApproval(approvalID, approved: approved, for: agent.id)
+        }
     }
 
     func selectInspectorPath(_ path: String, for project: ProjectState) {

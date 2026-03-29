@@ -38,6 +38,11 @@ private actor CodexSessionStore {
 }
 
 private actor CodexSession {
+    private enum ApprovalResponseID: Sendable {
+        case int(Int)
+        case string(String)
+    }
+
     private let initialResumeThreadID: String?
     private var workingDirectory: URL?
     private var developerInstructions: String?
@@ -59,6 +64,7 @@ private actor CodexSession {
     private var pendingInterrupt = false
     private var lastTurnStartRequestID: Int?
     private var didEmitTurnStarted = false
+    private var pendingApprovalResponseIDs: [UUID: ApprovalResponseID] = [:]
 
     init(
         resumeThreadID: String?,
@@ -324,6 +330,7 @@ private actor CodexSession {
         activeTurnID = nil
         lastTurnStartRequestID = nil
         didEmitTurnStarted = false
+        pendingApprovalResponseIDs.removeAll()
         threadReady = false
         writer = nil
         stderrPipe = nil
@@ -337,9 +344,17 @@ private actor CodexSession {
         }
 
         if let method = json["method"] as? String {
-            if let requestID = json["id"],
+            if let responseID = Self.approvalResponseID(from: json["id"]),
                method.contains("Approval") || method.contains("requestApproval") || method == "item/tool/call" {
-                respondApproved(to: requestID)
+                guard activeContinuation != nil else {
+                    respondToApproval(responseID, approved: true)
+                    return
+                }
+                if let approvalRequest = makeApprovalRequest(method: method, params: json["params"] as? [String: Any] ?? [:], responseID: responseID) {
+                    activeContinuation?.yield(.approvalRequest(approvalRequest))
+                } else {
+                    respondToApproval(responseID, approved: true)
+                }
                 return
             }
 
@@ -491,6 +506,7 @@ private actor CodexSession {
             pendingInterrupt = false
             lastTurnStartRequestID = nil
             didEmitTurnStarted = false
+            pendingApprovalResponseIDs.removeAll()
 
         default:
             break
@@ -585,19 +601,192 @@ private actor CodexSession {
         writeJSON("thread/start", id: 1, params: params)
     }
 
-    private func respondApproved(to requestID: Any) {
+    func respondToApproval(_ approvalID: UUID, approved: Bool) {
+        guard let responseID = pendingApprovalResponseIDs.removeValue(forKey: approvalID) else { return }
+        respondToApproval(responseID, approved: approved)
+    }
+
+    private func respondToApproval(_ requestID: ApprovalResponseID, approved: Bool) {
         guard let writer else { return }
+
+        let responseID: Any
+        switch requestID {
+        case .int(let value):
+            responseID = value
+        case .string(let value):
+            responseID = value
+        }
 
         let response: [String: Any] = [
             "jsonrpc": "2.0",
-            "id": requestID,
-            "result": ["approved": true],
+            "id": responseID,
+            "result": ["approved": approved],
         ]
 
         if let data = try? JSONSerialization.data(withJSONObject: response),
            let string = String(data: data, encoding: .utf8) {
             writer.write(Data((string + "\n").utf8))
         }
+    }
+
+    private func makeApprovalRequest(
+        method: String,
+        params: [String: Any],
+        responseID: ApprovalResponseID
+    ) -> ProviderApprovalRequest? {
+        let item = (params["item"] as? [String: Any])
+            ?? (params["toolCall"] as? [String: Any])
+            ?? (params["call"] as? [String: Any])
+            ?? params
+
+        let toolName = Self.firstNonEmptyString(
+            from: item,
+            keys: ["name", "toolName", "command", "title", "type"]
+        ) ?? Self.firstNonEmptyString(
+            from: params,
+            keys: ["name", "toolName", "command", "title", "type"]
+        ) ?? "Tool call"
+
+        let description = Self.firstNonEmptyString(
+            from: params,
+            keys: ["message", "reason", "description", "title"]
+        ) ?? Self.firstNonEmptyString(
+            from: item,
+            keys: ["description", "reason", "summary"]
+        ) ?? Self.defaultApprovalDescription(for: toolName, item: item)
+
+        let parameters = Self.approvalParameters(from: params, item: item)
+        let approvalID = UUID()
+        pendingApprovalResponseIDs[approvalID] = responseID
+
+        return ProviderApprovalRequest(
+            id: approvalID,
+            toolName: toolName,
+            description: description,
+            parameters: parameters,
+            riskLevel: Self.riskLevel(for: toolName, parameters: parameters)
+        )
+    }
+
+    private static func approvalResponseID(from rawValue: Any?) -> ApprovalResponseID? {
+        switch rawValue {
+        case let value as Int:
+            .int(value)
+        case let value as String:
+            .string(value)
+        default:
+            nil
+        }
+    }
+
+    private static func firstNonEmptyString(from payload: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            if let value = payload[key] as? String {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func defaultApprovalDescription(for toolName: String, item: [String: Any]) -> String {
+        if firstNonEmptyString(from: item, keys: ["command"]) != nil {
+            return "Codex wants to run a command in your workspace."
+        }
+
+        if toolName.lowercased().contains("command") || toolName.lowercased().contains("shell") {
+            return "Codex wants to execute a command that requires your approval."
+        }
+
+        return "Codex needs approval before continuing this tool action."
+    }
+
+    private static func approvalParameters(from params: [String: Any], item: [String: Any]) -> [String: String] {
+        var details: [String: String] = [:]
+
+        for (key, value) in [
+            ("command", item["command"] ?? params["command"]),
+            ("cwd", item["cwd"] ?? params["cwd"]),
+            ("tool", item["name"] ?? params["name"]),
+            ("reason", params["reason"] ?? item["reason"]),
+            ("path", item["path"] ?? params["path"]),
+            ("prompt", item["prompt"] ?? params["prompt"]),
+            ("sandbox", params["sandbox"]),
+        ] {
+            if let stringValue = stringValue(for: value) {
+                details[key] = stringValue
+            }
+        }
+
+        if let input = item["input"] ?? item["arguments"] ?? params["input"] ?? params["arguments"],
+           let stringValue = stringValue(for: input) {
+            details["input"] = stringValue
+        }
+
+        if details.isEmpty, let raw = stringValue(for: params) {
+            details["details"] = raw
+        }
+
+        return details
+    }
+
+    private static func stringValue(for rawValue: Any?) -> String? {
+        guard let rawValue else { return nil }
+
+        if let value = rawValue as? String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        if JSONSerialization.isValidJSONObject(rawValue),
+           let data = try? JSONSerialization.data(withJSONObject: rawValue, options: [.sortedKeys]),
+           let value = String(data: data, encoding: .utf8) {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        return String(describing: rawValue)
+    }
+
+    private static func riskLevel(for toolName: String, parameters: [String: String]) -> ToolRiskLevel {
+        let tool = toolName.lowercased()
+        let detail = parameters.values.joined(separator: " ").lowercased()
+
+        let dangerousHints = [
+            "rm ",
+            "rm -",
+            "git push",
+            "git reset",
+            "git clean",
+            "sudo ",
+            "chmod ",
+            "chown ",
+            "mv ",
+            "cp ",
+            "kill ",
+            "pkill",
+            "curl ",
+            "wget ",
+            "scp ",
+            "ssh ",
+            "kubectl delete",
+            "terraform apply",
+            "npm publish",
+            "cargo publish",
+        ]
+
+        if dangerousHints.contains(where: { detail.contains($0) || tool.contains($0.trimmingCharacters(in: .whitespaces)) }) {
+            return .dangerous
+        }
+
+        let moderateHints = ["command", "shell", "bash", "write", "edit", "patch", "exec"]
+        if moderateHints.contains(where: { tool.contains($0) || detail.contains($0) }) {
+            return .moderate
+        }
+
+        return .safe
     }
 
     private func writeJSON(_ method: String, id: Int, params: [String: Any]) {
@@ -721,8 +910,14 @@ public final class CodexProvider: AIProvider, Sendable {
             }
         }
 
-        return ProviderStreamHandle(stream: stream) {
-            await reference.get()?.interruptCurrentTurn()
-        }
+        return ProviderStreamHandle(
+            stream: stream,
+            cancel: {
+                await reference.get()?.interruptCurrentTurn()
+            },
+            respondToApproval: { approvalID, approved in
+                await reference.get()?.respondToApproval(approvalID, approved: approved)
+            }
+        )
     }
 }

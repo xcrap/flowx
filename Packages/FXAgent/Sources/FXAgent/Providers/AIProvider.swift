@@ -47,13 +47,38 @@ public enum ProviderLifecycleEvent: Sendable, Equatable {
 public struct ProviderStreamHandle: Sendable {
     public let stream: AsyncThrowingStream<StreamEvent, Error>
     public let cancel: @Sendable () async -> Void
+    public let respondToApproval: @Sendable (UUID, Bool) async -> Void
 
     public init(
         stream: AsyncThrowingStream<StreamEvent, Error>,
-        cancel: @escaping @Sendable () async -> Void
+        cancel: @escaping @Sendable () async -> Void,
+        respondToApproval: @escaping @Sendable (UUID, Bool) async -> Void = { _, _ in }
     ) {
         self.stream = stream
         self.cancel = cancel
+        self.respondToApproval = respondToApproval
+    }
+}
+
+public struct ProviderApprovalRequest: Identifiable, Sendable, Equatable {
+    public let id: UUID
+    public var toolName: String
+    public var description: String
+    public var parameters: [String: String]
+    public var riskLevel: ToolRiskLevel
+
+    public init(
+        id: UUID = UUID(),
+        toolName: String,
+        description: String,
+        parameters: [String: String] = [:],
+        riskLevel: ToolRiskLevel = .moderate
+    ) {
+        self.id = id
+        self.toolName = toolName
+        self.description = description
+        self.parameters = parameters
+        self.riskLevel = riskLevel
     }
 }
 
@@ -106,6 +131,7 @@ public enum StreamEvent: Sendable {
     case lifecycle(ProviderLifecycleEvent)
     case textDelta(String)
     case text(String)
+    case approvalRequest(ProviderApprovalRequest)
     case toolUse(id: String, name: String, input: String)
     case toolResult(id: String, content: String, isError: Bool)
     case usage(inputTokens: Int, outputTokens: Int, costUSD: Double?)

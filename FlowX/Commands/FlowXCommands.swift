@@ -6,6 +6,13 @@ struct FlowXCommands: Commands {
 
     var body: some Commands {
         CommandGroup(after: .sidebar) {
+            Button("Command Palette…") {
+                withAnimation(FXAnimation.panel) {
+                    appState.commandPaletteVisible = true
+                }
+            }
+            .keyboardShortcut("p", modifiers: [.command, .shift])
+
             Button("Toggle Sidebar") {
                 withAnimation(FXAnimation.panel) {
                     appState.sidebarVisible.toggle()
@@ -26,6 +33,14 @@ struct FlowXCommands: Commands {
                 }
             }
             .keyboardShortcut("`", modifiers: .command)
+
+            Button("Settings") {
+                withAnimation(FXAnimation.panel) {
+                    appState.rightPanelVisible = false
+                    appState.settingsVisible.toggle()
+                }
+            }
+            .keyboardShortcut(",", modifiers: .command)
         }
 
         CommandMenu("Agents") {
