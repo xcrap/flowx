@@ -11,12 +11,11 @@ private struct ParsedDiffLine: Identifiable, Sendable {
         case deletion
     }
 
-    let id = UUID()
+    let id: Int
     let kind: Kind
     let text: String
     let oldLine: Int?
     let newLine: Int?
-    let anchorPath: String?
 }
 
 private enum SplitDiffSideKind: Sendable {
@@ -33,7 +32,7 @@ private struct SplitDiffRow: Identifiable, Sendable {
         case content
     }
 
-    let id = UUID()
+    let id: Int
     let kind: Kind
     let oldLine: Int?
     let newLine: Int?
@@ -41,7 +40,6 @@ private struct SplitDiffRow: Identifiable, Sendable {
     let newText: String
     let oldSide: SplitDiffSideKind
     let newSide: SplitDiffSideKind
-    let anchorPath: String?
 }
 
 private struct DiffTaskKey: Hashable, Sendable {
@@ -58,7 +56,11 @@ private struct DiffSection: Identifiable, Sendable {
     let additions: Int
     let deletions: Int
     let parsedLines: [ParsedDiffLine]
-    let splitRows: [SplitDiffRow]
+}
+
+private struct SplitRowsTaskKey: Hashable {
+    let displayedDiffKey: DiffTaskKey?
+    let displayMode: InspectorDiffDisplayMode
 }
 
 private struct DiffWorkspaceLayout {
@@ -68,7 +70,7 @@ private struct DiffWorkspaceLayout {
 
 @MainActor
 private enum DiffSectionCache {
-    private static let maxEntries = 12
+    private static let maxEntries = 8
     private static var sectionsByKey: [DiffTaskKey: [DiffSection]] = [:]
     private static var orderedKeys: [DiffTaskKey] = []
 
@@ -97,6 +99,7 @@ struct DiffView: View {
     @State private var displayedDiffKey: DiffTaskKey?
     @State private var collapsedSectionIDs: Set<String> = []
     @State private var showsChangedFiles = true
+    @State private var splitRowsBySectionID: [String: [SplitDiffRow]] = [:]
     @State private var railDragStartWidth: CGFloat?
     @State private var liveChangedFilesRailWidth: CGFloat?
     @State private var changedFilesResizeHandleHovered = false
@@ -114,6 +117,9 @@ struct DiffView: View {
             .background(FXColors.panelBg)
             .task(id: diffTaskKey(for: project)) {
                 await loadProjectDiff(for: project)
+            }
+            .task(id: splitRowsTaskKey(for: project)) {
+                await precomputeSplitRowsIfNeeded(for: project)
             }
         } else {
             messageView(
@@ -354,7 +360,7 @@ struct DiffView: View {
     }
 
     private func splitDiffView(project: ProjectState, sections: [DiffSection], scrollTargetPath: String?) -> some View {
-        let allRows = sections.flatMap(\.splitRows)
+        let allRows = sections.flatMap(splitRows(for:))
         let maxOldLine = allRows.compactMap(\.oldLine).max() ?? 0
         let maxNewLine = allRows.compactMap(\.newLine).max() ?? 0
         let numberWidth = max(lineNumberWidth(maxLine: maxOldLine), lineNumberWidth(maxLine: maxNewLine))
@@ -447,7 +453,7 @@ struct DiffView: View {
             if !isCollapsed(section) {
                 ScrollView(.horizontal) {
                     VStack(spacing: 0) {
-                        ForEach(section.splitRows) { row in
+                        ForEach(splitRows(for: section)) { row in
                             splitRowView(row, numberWidth: numberWidth)
                         }
                     }
@@ -786,13 +792,27 @@ struct DiffView: View {
         var lines: [ParsedDiffLine] = []
         var oldLine: Int?
         var newLine: Int?
+        var nextID = 0
+
+        func appendLine(kind: ParsedDiffLine.Kind, text: String, oldLine: Int?, newLine: Int?) {
+            lines.append(
+                ParsedDiffLine(
+                    id: nextID,
+                    kind: kind,
+                    text: text,
+                    oldLine: oldLine,
+                    newLine: newLine
+                )
+            )
+            nextID += 1
+        }
 
         for rawLine in text.components(separatedBy: .newlines) {
             if rawLine.hasPrefix("@@") {
                 let hunkLines = Self.hunkLineNumbers(from: rawLine)
                 oldLine = hunkLines?.0
                 newLine = hunkLines?.1
-                lines.append(ParsedDiffLine(kind: .hunk, text: rawLine, oldLine: nil, newLine: nil, anchorPath: nil))
+                appendLine(kind: .hunk, text: rawLine, oldLine: nil, newLine: nil)
                 continue
             }
 
@@ -805,18 +825,18 @@ struct DiffView: View {
             }
 
             if rawLine.hasPrefix("+"), !rawLine.hasPrefix("+++") {
-                lines.append(ParsedDiffLine(kind: .addition, text: rawLine, oldLine: nil, newLine: newLine, anchorPath: nil))
+                appendLine(kind: .addition, text: rawLine, oldLine: nil, newLine: newLine)
                 newLine = newLine.map { $0 + 1 }
                 continue
             }
 
             if rawLine.hasPrefix("-"), !rawLine.hasPrefix("---") {
-                lines.append(ParsedDiffLine(kind: .deletion, text: rawLine, oldLine: oldLine, newLine: nil, anchorPath: nil))
+                appendLine(kind: .deletion, text: rawLine, oldLine: oldLine, newLine: nil)
                 oldLine = oldLine.map { $0 + 1 }
                 continue
             }
 
-            lines.append(ParsedDiffLine(kind: .context, text: rawLine, oldLine: oldLine, newLine: newLine, anchorPath: nil))
+            appendLine(kind: .context, text: rawLine, oldLine: oldLine, newLine: newLine)
             oldLine = oldLine.map { $0 + 1 }
             newLine = newLine.map { $0 + 1 }
         }
@@ -827,54 +847,70 @@ struct DiffView: View {
     nonisolated private static func splitRows(from parsedLines: [ParsedDiffLine]) -> [SplitDiffRow] {
         var rows: [SplitDiffRow] = []
         var index = 0
+        var nextID = 0
+
+        func appendRow(
+            kind: SplitDiffRow.Kind,
+            oldLine: Int?,
+            newLine: Int?,
+            oldText: String,
+            newText: String,
+            oldSide: SplitDiffSideKind,
+            newSide: SplitDiffSideKind
+        ) {
+            rows.append(
+                SplitDiffRow(
+                    id: nextID,
+                    kind: kind,
+                    oldLine: oldLine,
+                    newLine: newLine,
+                    oldText: oldText,
+                    newText: newText,
+                    oldSide: oldSide,
+                    newSide: newSide
+                )
+            )
+            nextID += 1
+        }
 
         while index < parsedLines.count {
             let line = parsedLines[index]
 
             switch line.kind {
             case .meta:
-                rows.append(
-                    SplitDiffRow(
-                        kind: .meta,
-                        oldLine: nil,
-                        newLine: nil,
-                        oldText: line.text,
-                        newText: "",
-                        oldSide: .context,
-                        newSide: .empty,
-                        anchorPath: line.anchorPath
-                    )
+                appendRow(
+                    kind: .meta,
+                    oldLine: nil,
+                    newLine: nil,
+                    oldText: line.text,
+                    newText: "",
+                    oldSide: .context,
+                    newSide: .empty
                 )
                 index += 1
 
             case .hunk:
-                rows.append(
-                    SplitDiffRow(
-                        kind: .hunk,
-                        oldLine: nil,
-                        newLine: nil,
-                        oldText: line.text,
-                        newText: "",
-                        oldSide: .context,
-                        newSide: .empty,
-                        anchorPath: nil
-                    )
+                appendRow(
+                    kind: .hunk,
+                    oldLine: nil,
+                    newLine: nil,
+                    oldText: line.text,
+                    newText: "",
+                    oldSide: .context,
+                    newSide: .empty
                 )
                 index += 1
 
             case .context:
                 let content = Self.splitDisplayText(for: line)
-                rows.append(
-                    SplitDiffRow(
-                        kind: .content,
-                        oldLine: line.oldLine,
-                        newLine: line.newLine,
-                        oldText: content,
-                        newText: content,
-                        oldSide: .context,
-                        newSide: .context,
-                        anchorPath: nil
-                    )
+                appendRow(
+                    kind: .content,
+                    oldLine: line.oldLine,
+                    newLine: line.newLine,
+                    oldText: content,
+                    newText: content,
+                    oldSide: .context,
+                    newSide: .context
                 )
                 index += 1
 
@@ -900,32 +936,26 @@ struct DiffView: View {
                 for offset in 0..<pairCount {
                     let deletion = offset < deletions.count ? deletions[offset] : nil
                     let addition = offset < additions.count ? additions[offset] : nil
-                    rows.append(
-                        SplitDiffRow(
-                            kind: .content,
-                            oldLine: deletion?.oldLine,
-                            newLine: addition?.newLine,
-                            oldText: deletion.map(Self.splitDisplayText(for:)) ?? "",
-                            newText: addition.map(Self.splitDisplayText(for:)) ?? "",
-                            oldSide: deletion == nil ? .empty : .deletion,
-                            newSide: addition == nil ? .empty : .addition,
-                            anchorPath: nil
-                        )
+                    appendRow(
+                        kind: .content,
+                        oldLine: deletion?.oldLine,
+                        newLine: addition?.newLine,
+                        oldText: deletion.map(Self.splitDisplayText(for:)) ?? "",
+                        newText: addition.map(Self.splitDisplayText(for:)) ?? "",
+                        oldSide: deletion == nil ? .empty : .deletion,
+                        newSide: addition == nil ? .empty : .addition
                     )
                 }
 
             case .addition:
-                rows.append(
-                    SplitDiffRow(
-                        kind: .content,
-                        oldLine: nil,
-                        newLine: line.newLine,
-                        oldText: "",
-                        newText: Self.splitDisplayText(for: line),
-                        oldSide: .empty,
-                        newSide: .addition,
-                        anchorPath: nil
-                    )
+                appendRow(
+                    kind: .content,
+                    oldLine: nil,
+                    newLine: line.newLine,
+                    oldText: "",
+                    newText: Self.splitDisplayText(for: line),
+                    oldSide: .empty,
+                    newSide: .addition
                 )
                 index += 1
             }
@@ -934,24 +964,34 @@ struct DiffView: View {
         return rows.isEmpty
             ? [
                 SplitDiffRow(
+                    id: 0,
                     kind: .meta,
                     oldLine: nil,
                     newLine: nil,
                     oldText: "No diff available.",
                     newText: "",
                     oldSide: .context,
-                    newSide: .empty,
-                    anchorPath: nil
+                    newSide: .empty
                 )
             ]
             : rows
+    }
+
+    nonisolated private static func splitRowsMap(from sections: [DiffSection]) -> [String: [SplitDiffRow]] {
+        var rowsBySectionID: [String: [SplitDiffRow]] = [:]
+        rowsBySectionID.reserveCapacity(sections.count)
+
+        for section in sections {
+            rowsBySectionID[section.id] = splitRows(from: section.parsedLines)
+        }
+
+        return rowsBySectionID
     }
 
     nonisolated private static func sections(from text: String) -> [DiffSection] {
         var sections: [DiffSection] = []
         var currentPath: String?
         var currentRawLines: [String] = []
-        var index = 0
 
         func flushSection() {
             guard let currentPath else {
@@ -972,7 +1012,6 @@ struct DiffView: View {
                 )
             )
             currentRawLines.removeAll(keepingCapacity: true)
-            index += 1
         }
 
         for rawLine in text.components(separatedBy: .newlines) {
@@ -1009,8 +1048,7 @@ struct DiffView: View {
             subtitle: subtitle,
             additions: additions,
             deletions: deletions,
-            parsedLines: lines,
-            splitRows: Self.splitRows(from: lines)
+            parsedLines: lines
         )
     }
 
@@ -1058,6 +1096,13 @@ struct DiffView: View {
         )
     }
 
+    private func splitRowsTaskKey(for project: ProjectState) -> SplitRowsTaskKey {
+        SplitRowsTaskKey(
+            displayedDiffKey: displayedDiffKey,
+            displayMode: project.inspectorDiffDisplayMode
+        )
+    }
+
     private func visibleDiffFiles(for project: ProjectState) -> [GitStatusService.FileStatus] {
         switch project.inspectorComparisonMode {
         case .unstaged:
@@ -1076,6 +1121,7 @@ struct DiffView: View {
 
         guard project.gitInfo.isGitRepo, !visibleFiles.isEmpty else {
             diffSections = []
+            splitRowsBySectionID = [:]
             displayedDiffKey = nil
             isLoadingDiff = false
             return
@@ -1083,6 +1129,7 @@ struct DiffView: View {
 
         if let cachedSections = DiffSectionCache.sections(for: snapshot) {
             diffSections = cachedSections
+            splitRowsBySectionID = [:]
             displayedDiffKey = snapshot
             isLoadingDiff = false
             return
@@ -1102,8 +1149,40 @@ struct DiffView: View {
         guard activeLoadKey == snapshot, diffTaskKey(for: project) == snapshot else { return }
         DiffSectionCache.store(sections, for: snapshot)
         diffSections = sections
+        splitRowsBySectionID = [:]
         displayedDiffKey = snapshot
         isLoadingDiff = false
+    }
+
+    private func precomputeSplitRowsIfNeeded(for project: ProjectState) async {
+        guard project.inspectorDiffDisplayMode == .split else {
+            if !splitRowsBySectionID.isEmpty {
+                splitRowsBySectionID = [:]
+            }
+            return
+        }
+
+        let snapshot = displayedDiffKey
+        let sections = diffSections
+        guard snapshot != nil, !sections.isEmpty else { return }
+
+        let missingSections = sections.filter { splitRowsBySectionID[$0.id] == nil }
+        guard !missingSections.isEmpty else { return }
+
+        let computedRows = await Task.detached(priority: .userInitiated) {
+            Self.splitRowsMap(from: missingSections)
+        }.value
+
+        guard displayedDiffKey == snapshot,
+              project.inspectorDiffDisplayMode == .split else {
+            return
+        }
+
+        splitRowsBySectionID.merge(computedRows) { current, _ in current }
+    }
+
+    private func splitRows(for section: DiffSection) -> [SplitDiffRow] {
+        splitRowsBySectionID[section.id] ?? Self.splitRows(from: section.parsedLines)
     }
 
     private func diffTitle(for fileCount: Int, mode: InspectorComparisonMode) -> String {

@@ -6,15 +6,6 @@ import FXDesign
 import FXTerminal
 import SwiftUI
 
-struct FileChangeInfo: Identifiable, Equatable {
-    var id: String { path }
-    var path: String
-    var additions: Int
-    var deletions: Int
-    var isStaged: Bool
-    var status: String
-}
-
 enum RightPanelTab: String, CaseIterable, Codable {
     case changes = "CHANGES"
     case files = "FILES"
@@ -59,8 +50,8 @@ final class WorkspaceState {
     var terminalHeight: CGFloat = 220 { didSet { onChange?() } }
     var terminalCount: Int = 1 { didSet { onChange?() } }
     var browserURLString: String = "" { didSet { onChange?() } }
-    var conversationScrollOffset: CGFloat = 0 { didSet { onChange?() } }
-    var conversationPinnedToBottom: Bool = true { didSet { onChange?() } }
+    var conversationScrollOffset: CGFloat = 0
+    var conversationPinnedToBottom: Bool = true
 
     var onChange: (() -> Void)?
 
@@ -92,7 +83,6 @@ final class AgentInfo: Identifiable {
     var branch: String = ""
     var additions: Int = 0
     var deletions: Int = 0
-    var fileChanges: [FileChangeInfo] = []
 
     var onChange: (() -> Void)?
     init(
@@ -115,10 +105,6 @@ final class AgentInfo: Identifiable {
         self.workspace.onChange = { [weak self] in
             self?.onChange?()
         }
-    }
-
-    var terminalSession: TerminalSession {
-        terminalSessions[0]
     }
 
     var terminalPaneCount: Int {
@@ -216,14 +202,6 @@ final class AgentInfo: Identifiable {
         conversationState.messages
     }
 
-    var activities: [ConversationRuntimeActivity] {
-        conversationState.runtimeActivities
-    }
-
-    var toolCallCount: Int {
-        conversationState.runtimeActivities.filter { $0.kind == .tool }.count
-    }
-
     var isStreaming: Bool {
         conversationState.isStreaming
     }
@@ -263,15 +241,6 @@ final class AgentInfo: Identifiable {
         branch = gitInfo.branch
         additions = gitInfo.additions
         deletions = gitInfo.deletions
-        fileChanges = gitInfo.files.map {
-            FileChangeInfo(
-                path: $0.path,
-                additions: $0.additions,
-                deletions: $0.deletions,
-                isStaged: $0.isStaged,
-                status: $0.status
-            )
-        }
     }
 
     func markConversationStarted() {
@@ -341,6 +310,8 @@ final class ProjectState: Identifiable {
     var isPerformingGitAction = false
     var gitActionMessage: String?
     var onChange: (() -> Void)?
+    private var refreshFilesTask: Task<Void, Never>?
+
     init(project: Project, agents: [AgentInfo], isExpanded: Bool = true) {
         id = project.id
         self.project = project
@@ -353,15 +324,30 @@ final class ProjectState: Identifiable {
     }
 
     func refreshFiles(limit: Int = 500) {
+        refreshFilesTask?.cancel()
         let rootURL = project.rootURL
+
+        refreshFilesTask = Task { [weak self] in
+            let files = await Task.detached(priority: .userInitiated) {
+                Self.enumeratedFiles(at: rootURL, limit: limit)
+            }.value
+
+            guard let self, !Task.isCancelled else { return }
+            self.repositoryFiles = files
+            if self.selectedInspectorPath == nil {
+                self.selectedInspectorPath = files.first
+            }
+        }
+    }
+
+    nonisolated private static func enumeratedFiles(at rootURL: URL, limit: Int) -> [String] {
         let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey]
         guard let enumerator = FileManager.default.enumerator(
             at: rootURL,
             includingPropertiesForKeys: keys,
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else {
-            repositoryFiles = []
-            return
+            return []
         }
 
         var files: [String] = []
@@ -384,13 +370,10 @@ final class ProjectState: Identifiable {
             }
         }
 
-        repositoryFiles = files.sorted()
-        if selectedInspectorPath == nil {
-            selectedInspectorPath = repositoryFiles.first
-        }
+        return files.sorted()
     }
 
-    private func shouldSkip(_ relativePath: String, isDirectory: Bool) -> Bool {
+    nonisolated private static func shouldSkip(_ relativePath: String, isDirectory _: Bool) -> Bool {
         guard let first = relativePath.split(separator: "/").first else { return false }
         let blocked = [".git", "node_modules", ".build", "build", "dist", "DerivedData"]
         if blocked.contains(String(first)) {
@@ -591,7 +574,6 @@ final class AppState {
     let gitStatusService = GitStatusService()
 
     private let runtimeDiscovery = RuntimeDiscovery()
-    private var gitMirrorTasks: [UUID: Task<Void, Never>] = [:]
     private var scheduledSaveTask: Task<Void, Never>?
 
     var activeProject: ProjectState? {
@@ -620,6 +602,9 @@ final class AppState {
     init(preferences: AppPreferences) {
         self.preferences = preferences
         conversationService = ConversationService(registry: providerRegistry)
+        gitStatusService.onInfoChange = { [weak self] projectID, gitInfo in
+            self?.applyGitInfo(gitInfo, to: projectID)
+        }
 
         Task { @MainActor in
             await bootstrap()
@@ -690,8 +675,6 @@ final class AppState {
 
     func removeProject(_ projectID: UUID) {
         gitStatusService.stopPolling(projectID: projectID)
-        gitMirrorTasks[projectID]?.cancel()
-        gitMirrorTasks.removeValue(forKey: projectID)
         projects.removeAll { $0.id == projectID }
 
         if activeProjectID == projectID {
@@ -803,6 +786,7 @@ final class AppState {
         activeProjectID = projectID
         activeAgentID = resolvedLastAgentID(for: project)
         synchronizeActiveProjectPanels()
+        persistStateIfBootstrapped()
     }
 
     func activateAgent(_ agentID: UUID, in projectID: UUID) {
@@ -817,6 +801,7 @@ final class AppState {
             project.lastSelectedAgentID = agentID
         }
         synchronizeActiveProjectPanels()
+        persistStateIfBootstrapped()
     }
 
     func cancelPrompt(for agent: AgentInfo) {
@@ -962,7 +947,6 @@ final class AppState {
         project.isPerformingGitAction = true
         let success = await gitStatusService.push(projectID: project.id)
         project.isPerformingGitAction = false
-        applyGitInfo(to: project.id)
         if !success {
             project.gitActionMessage = gitStatusService.lastFailureMessage[project.id] ?? "Push failed."
         }
@@ -993,7 +977,6 @@ final class AppState {
             includeUntracked: project.includeUntrackedInCommit
         )
         project.isPerformingGitAction = false
-        applyGitInfo(to: project.id)
         await refreshInspector(for: project)
 
         if success {
@@ -1118,20 +1101,14 @@ final class AppState {
         }
 
         gitStatusService.startPolling(projectID: project.id, rootPath: project.project.rootPath)
-        gitMirrorTasks[project.id]?.cancel()
-        gitMirrorTasks[project.id] = Task { @MainActor [weak self] in
-            while let self, !Task.isCancelled {
-                applyGitInfo(to: project.id)
-                try? await Task.sleep(for: .seconds(1))
-            }
-        }
     }
 
-    private func applyGitInfo(to projectID: UUID) {
-        guard let project = projects.first(where: { $0.id == projectID }),
-              let gitInfo = gitStatusService.info[projectID] else {
+    private func applyGitInfo(_ gitInfo: GitStatusService.GitInfo, to projectID: UUID) {
+        guard let project = projects.first(where: { $0.id == projectID }) else {
             return
         }
+
+        guard project.gitInfo != gitInfo else { return }
 
         project.gitInfo = gitInfo
         for agent in project.agents {

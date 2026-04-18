@@ -3,6 +3,21 @@ import Foundation
 @Observable
 @MainActor
 final class GitStatusService {
+    private struct ParsedStatusLine {
+        let path: String
+        let stagedStatus: String
+        let unstagedStatus: String
+    }
+
+    private struct ParsedStatusSnapshot {
+        var branch: String = ""
+        var upstreamBranch: String = ""
+        var hasCommits: Bool = true
+        var aheadCount: Int = 0
+        var behindCount: Int = 0
+        var files: [ParsedStatusLine] = []
+    }
+
     struct CommandResult {
         var succeeded: Bool
         var output: String
@@ -53,6 +68,7 @@ final class GitStatusService {
 
     private(set) var info: [UUID: GitInfo] = [:]
     private(set) var lastFailureMessage: [UUID: String] = [:]
+    var onInfoChange: ((UUID, GitInfo) -> Void)?
     private var pollingTasks: [UUID: Task<Void, Never>] = [:]
     private var rootPaths: [UUID: String] = [:]
 
@@ -201,69 +217,39 @@ final class GitStatusService {
     private func refresh(projectID: UUID, rootPath: String) async {
         rootPaths[projectID] = rootPath
 
-        let gitDir = await runGit(["rev-parse", "--git-dir"], in: rootPath)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
         var gitInfo = GitInfo()
-        gitInfo.isGitRepo = !gitDir.isEmpty
-
-        guard gitInfo.isGitRepo else {
-            info[projectID] = gitInfo
+        let statusResult = await runGitForResult(["status", "--porcelain", "--branch"], in: rootPath)
+        guard statusResult.succeeded else {
+            if info[projectID] != gitInfo {
+                info[projectID] = gitInfo
+                onInfoChange?(projectID, gitInfo)
+            }
             return
         }
+        gitInfo.isGitRepo = true
 
-        gitInfo.branch = await runGit(["rev-parse", "--abbrev-ref", "HEAD"], in: rootPath)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let parsedStatus = parseStatusOutput(statusResult.output)
+        gitInfo.branch = parsedStatus.branch
+        gitInfo.upstreamBranch = parsedStatus.upstreamBranch
+        gitInfo.hasCommits = parsedStatus.hasCommits
+        gitInfo.aheadCount = parsedStatus.aheadCount
+        gitInfo.behindCount = parsedStatus.behindCount
 
         let remoteOutput = await runGit(["remote"], in: rootPath)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        gitInfo.hasRemote = !remoteOutput.isEmpty
-
-        let commitCountOutput = await runGit(["rev-list", "--count", "HEAD"], in: rootPath)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        gitInfo.hasCommits = (Int(commitCountOutput) ?? 0) > 0
-
-        gitInfo.upstreamBranch = await runGit(
-            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-            in: rootPath
-        )
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if !gitInfo.upstreamBranch.isEmpty {
-            let aheadBehindOutput = await runGit(
-                ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
-                in: rootPath
-            )
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            let counts = aheadBehindOutput
-                .split(whereSeparator: \.isWhitespace)
-                .compactMap { Int($0) }
-            if counts.count >= 2 {
-                gitInfo.aheadCount = counts[0]
-                gitInfo.behindCount = counts[1]
-            }
-        }
+        gitInfo.hasRemote = !remoteOutput.isEmpty || !gitInfo.upstreamBranch.isEmpty
 
         let unstagedNumstatMap = parseNumstat(await runGit(["diff", "--numstat"], in: rootPath))
         let stagedNumstatMap = parseNumstat(await runGit(["diff", "--cached", "--numstat"], in: rootPath))
-
-        let statusOutput = await runGit(["status", "--porcelain"], in: rootPath)
-        let statusLines = statusOutput.components(separatedBy: "\n").filter { !$0.isEmpty }
-        gitInfo.files = statusLines.compactMap { line in
-            guard line.count >= 3 else { return nil }
-
-            let x = String(line.prefix(1))
-            let y = String(line.dropFirst(1).prefix(1))
-            let rawPath = String(line.dropFirst(3))
-            let path = rawPath.components(separatedBy: " -> ").last ?? rawPath
+        gitInfo.files = parsedStatus.files.map { line in
+            let path = line.path
             let unstagedCounts = unstagedNumstatMap[path] ?? (0, 0)
             let stagedCounts = stagedNumstatMap[path] ?? (0, 0)
 
             return FileStatus(
                 path: path,
-                stagedStatus: x,
-                unstagedStatus: y,
+                stagedStatus: line.stagedStatus,
+                unstagedStatus: line.unstagedStatus,
                 stagedAdditions: stagedCounts.0,
                 stagedDeletions: stagedCounts.1,
                 unstagedAdditions: unstagedCounts.0,
@@ -277,7 +263,9 @@ final class GitStatusService {
         gitInfo.additions = gitInfo.files.reduce(into: 0) { $0 += $1.additions }
         gitInfo.deletions = gitInfo.files.reduce(into: 0) { $0 += $1.deletions }
 
+        guard info[projectID] != gitInfo else { return }
         info[projectID] = gitInfo
+        onInfoChange?(projectID, gitInfo)
     }
 
     private func parseNumstat(_ output: String) -> [String: (Int, Int)] {
@@ -298,6 +286,70 @@ final class GitStatusService {
             in: directory
         )
         return result.output
+    }
+
+    private func parseStatusOutput(_ output: String) -> ParsedStatusSnapshot {
+        var snapshot = ParsedStatusSnapshot()
+
+        for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
+            let rawLine = String(line)
+            if rawLine.hasPrefix("## ") {
+                parseBranchHeader(String(rawLine.dropFirst(3)), into: &snapshot)
+                continue
+            }
+
+            guard rawLine.count >= 3 else { continue }
+            snapshot.files.append(
+                ParsedStatusLine(
+                    path: normalizedStatusPath(from: String(rawLine.dropFirst(3))),
+                    stagedStatus: String(rawLine.prefix(1)),
+                    unstagedStatus: String(rawLine.dropFirst(1).prefix(1))
+                )
+            )
+        }
+
+        return snapshot
+    }
+
+    private func parseBranchHeader(_ header: String, into snapshot: inout ParsedStatusSnapshot) {
+        let trimmed = header.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("No commits yet on ") {
+            snapshot.branch = String(trimmed.dropFirst("No commits yet on ".count))
+            snapshot.hasCommits = false
+            return
+        }
+        if trimmed.hasPrefix("Initial commit on ") {
+            snapshot.branch = String(trimmed.dropFirst("Initial commit on ".count))
+            snapshot.hasCommits = false
+            return
+        }
+
+        snapshot.hasCommits = true
+
+        let statusComponents = trimmed.components(separatedBy: " [")
+        let branchComponent = statusComponents[0]
+        if let upstreamRange = branchComponent.range(of: "...") {
+            snapshot.branch = String(branchComponent[..<upstreamRange.lowerBound])
+            snapshot.upstreamBranch = String(branchComponent[upstreamRange.upperBound...])
+        } else {
+            snapshot.branch = branchComponent
+        }
+
+        guard statusComponents.count > 1 else { return }
+        let summary = statusComponents[1].trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        for part in summary.components(separatedBy: ", ") {
+            if part.hasPrefix("ahead "),
+               let count = Int(part.dropFirst("ahead ".count)) {
+                snapshot.aheadCount = count
+            } else if part.hasPrefix("behind "),
+                      let count = Int(part.dropFirst("behind ".count)) {
+                snapshot.behindCount = count
+            }
+        }
+    }
+
+    private func normalizedStatusPath(from rawPath: String) -> String {
+        rawPath.components(separatedBy: " -> ").last ?? rawPath
     }
 
     private func runGit(_ args: [String], in directory: String) async -> String {

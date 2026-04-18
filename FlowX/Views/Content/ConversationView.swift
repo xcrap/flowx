@@ -12,6 +12,11 @@ struct ConversationView: View {
     @State private var initialScrollRestorePending = true
 
     private let maxContentWidth: CGFloat = 920
+    private static let exactTokenFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        return formatter
+    }()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -81,6 +86,11 @@ struct ConversationView: View {
             ChatInputBar(agent: agent)
         }
         .background(FXColors.contentBg)
+        .onDisappear {
+            if appState.isBootstrapped {
+                appState.scheduleSave()
+            }
+        }
     }
 
     private var bottomScrollID: String { "conversation-bottom" }
@@ -651,20 +661,7 @@ struct ConversationView: View {
     }
 
     private func formatExactTokenCount(_ count: Int) -> String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        return formatter.string(from: NSNumber(value: count)) ?? "\(count)"
-    }
-
-    private func simplifiedProviderName(for displayName: String) -> String {
-        displayName
-            .replacingOccurrences(of: " (via Claude Code)", with: "")
-            .replacingOccurrences(of: " (OpenAI)", with: "")
-    }
-
-    private func simplifiedModelName(for modelName: String) -> String {
-        modelName
-            .replacingOccurrences(of: " (latest)", with: "")
+        Self.exactTokenFormatter.string(from: NSNumber(value: count)) ?? "\(count)"
     }
 }
 
