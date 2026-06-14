@@ -1,21 +1,6 @@
 import Foundation
 
 extension BinarySpec {
-    public static let claude = BinarySpec(
-        id: "claude",
-        displayName: "Claude Code",
-        searchPaths: [
-            "\(NSHomeDirectory())/.local/bin/claude",
-            "/usr/local/bin/claude",
-            "/opt/homebrew/bin/claude",
-            "\(NSHomeDirectory())/.npm/bin/claude",
-            "\(NSHomeDirectory())/.nvm/versions/node/*/bin/claude",
-        ],
-        versionArgs: ["--version"],
-        shellFallbackName: "claude",
-        installHint: "npm install -g @anthropic-ai/claude-code"
-    )
-
     public static let codex = BinarySpec(
         id: "codex",
         displayName: "Codex",

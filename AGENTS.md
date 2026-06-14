@@ -83,16 +83,6 @@ Debug and release use separate app-support directories so local development does
 
 ## Providers
 
-### Claude Code
-
-- Spawns `claude -p` with `--output-format stream-json`
-- Uses `--include-partial-messages` for streaming updates
-- Supports `--resume <sessionID>`
-- Access mode maps to Claude permission flags:
-  - `fullAccess` -> `--dangerously-skip-permissions`
-  - `acceptEdits` -> `--permission-mode acceptEdits`
-  - `supervised` -> `--permission-mode default`
-
 ### Codex
 
 - Uses persistent `codex app-server` sessions over JSON-RPC

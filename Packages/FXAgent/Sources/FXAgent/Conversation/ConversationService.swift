@@ -3,6 +3,9 @@ import FXCore
 
 @MainActor
 public final class ConversationService {
+    nonisolated private static let streamFlushInterval: TimeInterval = 1.0 / 30.0
+    nonisolated private static let streamFlushCharacterThreshold = 512
+
     private struct PendingRequest {
         var prompt: String
         let attachments: [Attachment]
@@ -183,6 +186,26 @@ public final class ConversationService {
         let task = Task { [weak self] in
             var didReceiveCompletion = false
             var didReceiveError = false
+            var pendingStreamDelta = ""
+            var lastStreamFlushAt = Date.distantPast
+
+            @MainActor
+            func flushPendingStreamDelta() {
+                guard !pendingStreamDelta.isEmpty else { return }
+                conversationState.appendStreamDelta(pendingStreamDelta)
+                pendingStreamDelta = ""
+                lastStreamFlushAt = Date()
+            }
+
+            @MainActor
+            func enqueueStreamDelta(_ delta: String) {
+                pendingStreamDelta += delta
+                let now = Date()
+                if pendingStreamDelta.count >= Self.streamFlushCharacterThreshold
+                    || now.timeIntervalSince(lastStreamFlushAt) >= Self.streamFlushInterval {
+                    flushPendingStreamDelta()
+                }
+            }
 
             do {
                 for try await event in handle.stream {
@@ -224,10 +247,10 @@ public final class ConversationService {
                         }
 
                     case .textDelta(let delta):
-                        conversationState.appendStreamDelta(delta)
+                        enqueueStreamDelta(delta)
 
                     case .text(let text):
-                        conversationState.appendStreamDelta(text)
+                        enqueueStreamDelta(text)
 
                     case .approvalRequest(let request):
                         let approval = ToolApprovalRequest(
@@ -249,6 +272,7 @@ public final class ConversationService {
                         )
 
                     case .toolUse(let id, let name, let input):
+                        flushPendingStreamDelta()
                         conversationState.recordRuntimeActivity(
                             kind: .tool,
                             tone: .working,
@@ -343,11 +367,13 @@ public final class ConversationService {
 
                     case .done(let stopReason):
                         didReceiveCompletion = true
+                        flushPendingStreamDelta()
                         conversationState.clearToolApprovalRequests()
                         conversationState.finishStreaming(stopReason: stopReason)
 
                     case .error(let message):
                         didReceiveError = true
+                        pendingStreamDelta = ""
                         conversationState.clearToolApprovalRequests()
                         conversationState.setError(message)
                         conversationState.recordRuntimeActivity(
@@ -363,6 +389,7 @@ public final class ConversationService {
             } catch {
                 if !Task.isCancelled {
                     didReceiveError = true
+                    pendingStreamDelta = ""
                     conversationState.clearToolApprovalRequests()
                     conversationState.setError(error.localizedDescription)
                     conversationState.recordRuntimeActivity(
@@ -377,9 +404,11 @@ public final class ConversationService {
             }
 
             if Task.isCancelled {
+                flushPendingStreamDelta()
                 conversationState.clearToolApprovalRequests()
                 conversationState.finishStreaming(stopReason: "cancelled")
             } else if !didReceiveCompletion && !didReceiveError {
+                flushPendingStreamDelta()
                 conversationState.finishStreaming()
             }
 

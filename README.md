@@ -5,7 +5,7 @@ FlowX is a native macOS AI workspace for orchestrating conversations, browser pr
 ## Features
 
 - **Clean shell layout** instead of canvas nodes
-- **Multi-provider agent chat** with Claude Code and Codex
+- **GPT agent chat** through persistent Codex sessions
 - **Supervised approvals** for tool calls where supported
 - **Browser split** for previewing local and remote pages
 - **Up to 3 terminal panes** per agent
@@ -18,8 +18,7 @@ FlowX is a native macOS AI workspace for orchestrating conversations, browser pr
 - macOS 26 or later
 - Xcode 16+
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
-- [Claude Code](https://claude.ai/code) CLI installed as `claude`
-- [Codex](https://openai.com/codex) CLI installed as `codex` if you want OpenAI models
+- [Codex](https://openai.com/codex) CLI installed as `codex`
 
 ## Build And Run
 

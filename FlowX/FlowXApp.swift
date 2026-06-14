@@ -60,7 +60,9 @@ private final class TrafficLightGuard: NSView {
         for name in names {
             observations.append(
                 nc.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
-                    self?.repositionButtons()
+                    Task { @MainActor in
+                        self?.repositionButtons()
+                    }
                 }
             )
         }

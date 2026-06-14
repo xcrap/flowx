@@ -29,14 +29,6 @@ struct SettingsPanel: View {
                 VStack(alignment: .leading, spacing: FXSpacing.xxxl) {
                     // Defaults first — this is an AI app
                     settingsSection("Defaults") {
-                        settingsMenuRow("Provider", value: simplifiedProviderName(for: selectedProvider?.displayName ?? preferences.defaultProviderID), sections: [
-                            FXDropdownSection(items: providers.map { provider in
-                                FXDropdownItem(id: provider.id, title: simplifiedProviderName(for: provider.displayName), isSelected: preferences.defaultProviderID == provider.id) {
-                                    preferences.setDefaultProvider(provider.id, using: appState.providerRegistry)
-                                }
-                            })
-                        ])
-
                         settingsMenuRow("Model", value: simplifiedModelName(for: selectedModel?.name ?? preferences.defaultModelID), enabled: selectedProvider != nil, sections: [
                             FXDropdownSection(items: (selectedProvider?.availableModels ?? []).map { model in
                                 FXDropdownItem(id: model.id, title: simplifiedModelName(for: model.name), isSelected: preferences.defaultModelID == model.id) {
@@ -46,7 +38,7 @@ struct SettingsPanel: View {
                         ])
 
                         settingsMenuRow("Effort", value: effortLabel(for: preferences.defaultEffort), sections: [
-                            FXDropdownSection(items: ["low", "medium", "high", "max"].map { level in
+                            FXDropdownSection(items: ["none", "low", "medium", "high", "xhigh"].map { level in
                                 FXDropdownItem(id: level, title: effortLabel(for: level), isSelected: preferences.defaultEffort == level) {
                                     preferences.defaultEffort = level
                                 }
@@ -105,9 +97,8 @@ struct SettingsPanel: View {
                         ])
                     }
 
-                    // Providers
-                    settingsSection("Providers") {
-                        providerRow(title: "Claude Code", binaryID: "claude")
+                    // Runtime
+                    settingsSection("Runtime") {
                         providerRow(title: "Codex", binaryID: "codex")
                     }
 
@@ -233,8 +224,7 @@ struct SettingsPanel: View {
     }
 
     private func simplifiedProviderName(for name: String) -> String {
-        name.replacingOccurrences(of: "(via Claude Code)", with: "")
-            .replacingOccurrences(of: "(OpenAI)", with: "")
+        name.replacingOccurrences(of: "(OpenAI)", with: "")
             .replacingOccurrences(of: "  ", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -245,7 +235,14 @@ struct SettingsPanel: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func effortLabel(for effort: String) -> String { effort.capitalized }
+    private func effortLabel(for effort: String) -> String {
+        switch effort {
+        case "xhigh":
+            "XHigh"
+        default:
+            effort.capitalized
+        }
+    }
 
     private func modeLabel(_ mode: AgentMode) -> String {
         switch mode { case .auto: "Chat"; case .plan: "Plan" }

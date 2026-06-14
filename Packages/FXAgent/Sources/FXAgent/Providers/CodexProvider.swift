@@ -860,7 +860,11 @@ public final class CodexProvider: AIProvider, Sendable {
     public let id = "codex"
     public let displayName = "Codex (OpenAI)"
     public let availableModels: [AIModel] = [
-        AIModel(id: "gpt-5.4", name: "GPT-5.4", contextWindow: 200_000),
+        AIModel(id: "gpt-5.5", name: "GPT-5.5", contextWindow: 1_000_000, availableContextWindows: [400_000, 1_000_000]),
+        AIModel(id: "gpt-5.5-pro", name: "GPT-5.5 Pro", contextWindow: 1_000_000, availableContextWindows: [400_000, 1_000_000]),
+        AIModel(id: "gpt-5.4", name: "GPT-5.4", contextWindow: 1_000_000, availableContextWindows: [400_000, 1_000_000]),
+        AIModel(id: "gpt-5.4-mini", name: "GPT-5.4 Mini", contextWindow: 400_000),
+        AIModel(id: "gpt-5.4-nano", name: "GPT-5.4 Nano", contextWindow: 400_000),
     ]
 
     private let store = CodexSessionStore()

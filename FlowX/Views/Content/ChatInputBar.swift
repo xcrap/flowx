@@ -79,16 +79,16 @@ struct ChatInputBar: View {
                     inlineDivider
 
                     menuControl(
-                        text: providerAndModelLabel,
-                        panelWidth: 240,
+                        text: modelLabel,
+                        panelWidth: 180,
                         placement: .above,
-                        sections: providerSections
+                        sections: modelSections
                     )
 
                     inlineDivider
 
                     menuControl(
-                        text: agent.effort.capitalized,
+                        text: effortLabel(for: agent.effort),
                         panelWidth: 160,
                         placement: .above,
                         sections: effortSections
@@ -175,28 +175,27 @@ struct ChatInputBar: View {
         currentProvider?.availableModels.first(where: { $0.id == agent.modelID })
     }
 
-    private var providerSections: [FXDropdownSection] {
-        providers.map { provider in
+    private var modelSections: [FXDropdownSection] {
+        [
             FXDropdownSection(
-                title: simplifiedProviderName(for: provider.displayName),
-                items: provider.availableModels.map { model in
+                items: (currentProvider?.availableModels ?? []).map { model in
                     FXDropdownItem(
-                        id: "\(provider.id)-\(model.id)",
+                        id: model.id,
                         title: simplifiedModelName(for: model.name),
-                        isSelected: agent.providerID == provider.id && agent.modelID == model.id
+                        isSelected: agent.modelID == model.id
                     ) {
-                        agent.providerID = provider.id
+                        agent.providerID = "codex"
                         agent.modelID = model.id
                     }
                 }
             )
-        }
+        ]
     }
 
     private var effortSections: [FXDropdownSection] {
         [
             FXDropdownSection(
-                items: ["low", "medium", "high", "max"].map { level in
+                items: ["none", "low", "medium", "high", "xhigh"].map { level in
                     FXDropdownItem(
                         id: level,
                         title: effortLabel(for: level),
@@ -209,15 +208,8 @@ struct ChatInputBar: View {
         ]
     }
 
-    private var providerAndModelLabel: String {
-        let providerName = simplifiedProviderName(for: currentProvider?.displayName ?? agent.providerName)
-        let modelName = simplifiedModelName(for: currentModel?.name ?? agent.modelID)
-
-        if modelName.localizedCaseInsensitiveContains(providerName) {
-            return modelName
-        }
-
-        return "\(providerName) \(modelName)"
+    private var modelLabel: String {
+        simplifiedModelName(for: currentModel?.name ?? agent.modelID)
     }
 
     private var trimmedInput: String {
@@ -285,7 +277,7 @@ struct ChatInputBar: View {
 
     private var inlineDivider: some View {
         Rectangle()
-            .fill(Color.white.opacity(0.08))
+            .fill(FXColors.borderSubtle)
             .frame(width: 1, height: 14)
     }
 
@@ -353,7 +345,6 @@ struct ChatInputBar: View {
 
     private func simplifiedProviderName(for displayName: String) -> String {
         displayName
-            .replacingOccurrences(of: " (via Claude Code)", with: "")
             .replacingOccurrences(of: " (OpenAI)", with: "")
     }
 
@@ -370,8 +361,8 @@ struct ChatInputBar: View {
             "Medium"
         case "high":
             "High"
-        case "max":
-            "Max"
+        case "xhigh":
+            "XHigh"
         default:
             value.capitalized
         }

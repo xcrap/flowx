@@ -92,11 +92,15 @@ final class AgentInfo: Identifiable {
         workspace: WorkspaceState? = nil
     ) {
         id = agent.id
-        self.agent = agent
+        var normalizedAgent = agent
+        normalizedAgent.configuration.providerID = Self.normalizedProviderID(normalizedAgent.configuration.providerID)
+        normalizedAgent.configuration.modelID = Self.normalizedModelID(normalizedAgent.configuration.modelID)
+        normalizedAgent.configuration.effort = Self.normalizedEffort(normalizedAgent.configuration.effort)
+        self.agent = normalizedAgent
         self.projectRootPath = projectRootPath
         let resolvedConversation = conversationState ?? ConversationState(agentID: agent.id)
-        resolvedConversation.activeProviderID = agent.configuration.providerID
-        resolvedConversation.activeModelID = agent.configuration.modelID
+        resolvedConversation.activeProviderID = normalizedAgent.configuration.providerID
+        resolvedConversation.activeModelID = normalizedAgent.configuration.modelID
         resolvedConversation.configuredContextWindow = agent.configuration.contextWindowSize
         self.conversationState = resolvedConversation
         self.workspace = workspace ?? WorkspaceState()
@@ -124,28 +128,26 @@ final class AgentInfo: Identifiable {
     }
 
     var providerID: String {
-        get { agent.configuration.providerID ?? "claude" }
+        get { Self.normalizedProviderID(agent.configuration.providerID) }
         set {
-            agent.configuration.providerID = newValue
-            if agent.configuration.modelID == nil {
-                agent.configuration.modelID = defaultModelID(for: newValue)
-            }
+            agent.configuration.providerID = Self.normalizedProviderID(newValue)
+            agent.configuration.modelID = Self.normalizedModelID(agent.configuration.modelID)
             onChange?()
         }
     }
 
     var modelID: String {
-        get { agent.configuration.modelID ?? defaultModelID(for: providerID) }
+        get { Self.normalizedModelID(agent.configuration.modelID) }
         set {
-            agent.configuration.modelID = newValue
+            agent.configuration.modelID = Self.normalizedModelID(newValue)
             onChange?()
         }
     }
 
     var effort: String {
-        get { agent.configuration.effort ?? "high" }
+        get { Self.normalizedEffort(agent.configuration.effort) }
         set {
-            agent.configuration.effort = newValue
+            agent.configuration.effort = Self.normalizedEffort(newValue)
             onChange?()
         }
     }
@@ -176,8 +178,6 @@ final class AgentInfo: Identifiable {
 
     var providerName: String {
         switch providerID {
-        case "claude":
-            "Claude"
         case "codex":
             "Codex"
         default:
@@ -259,12 +259,35 @@ final class AgentInfo: Identifiable {
         }
     }
 
-    private func defaultModelID(for providerID: String) -> String {
-        switch providerID {
-        case "codex":
-            "gpt-5.4"
+    private static let defaultProviderID = "codex"
+    private static let defaultGPTModelID = "gpt-5.5"
+
+    static func normalizedProviderID(_: String?) -> String {
+        defaultProviderID
+    }
+
+    static func normalizedModelID(_ modelID: String?) -> String {
+        guard let modelID, modelID.hasPrefix("gpt-5") else { return defaultGPTModelID }
+        return modelID
+    }
+
+    static func normalizedDefaultModelID(_ modelID: String?) -> String {
+        if modelID == "gpt-5.4" {
+            return defaultGPTModelID
+        }
+        return normalizedModelID(modelID)
+    }
+
+    static func normalizedEffort(_ effort: String?) -> String {
+        guard let effort, !effort.isEmpty else { return "medium" }
+
+        switch effort.lowercased() {
+        case "none", "minimal", "low", "medium", "high", "xhigh":
+            return effort.lowercased()
+        case "max":
+            return "xhigh"
         default:
-            "sonnet"
+            return "medium"
         }
     }
 
@@ -455,9 +478,9 @@ final class AppPreferences {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        defaultProviderID = defaults.string(forKey: Keys.defaultProviderID) ?? "claude"
-        defaultModelID = defaults.string(forKey: Keys.defaultModelID) ?? "sonnet"
-        defaultEffort = defaults.string(forKey: Keys.defaultEffort) ?? "high"
+        defaultProviderID = AgentInfo.normalizedProviderID(defaults.string(forKey: Keys.defaultProviderID))
+        defaultModelID = AgentInfo.normalizedDefaultModelID(defaults.string(forKey: Keys.defaultModelID))
+        defaultEffort = AgentInfo.normalizedEffort(defaults.string(forKey: Keys.defaultEffort))
         defaultAccess = AgentAccess(rawValue: defaults.string(forKey: Keys.defaultAccess) ?? "") ?? .fullAccess
         defaultMode = AgentMode(rawValue: defaults.string(forKey: Keys.defaultMode) ?? "") ?? .auto
         appearanceMode = FXAppearanceMode(rawValue: defaults.string(forKey: Keys.appearanceMode) ?? "") ?? .dark
@@ -477,13 +500,17 @@ final class AppPreferences {
     }
 
     func setDefaultProvider(_ providerID: String, using registry: ProviderRegistry) {
-        defaultProviderID = providerID
+        defaultProviderID = AgentInfo.normalizedProviderID(providerID)
         normalizeProviderDefaults(using: registry)
     }
 
     func normalizeProviderDefaults(using registry: ProviderRegistry) {
+        defaultProviderID = AgentInfo.normalizedProviderID(defaultProviderID)
+        defaultModelID = AgentInfo.normalizedModelID(defaultModelID)
+        defaultEffort = AgentInfo.normalizedEffort(defaultEffort)
+
         if registry.provider(for: defaultProviderID) == nil {
-            defaultProviderID = registry.allProviders.sorted { $0.displayName < $1.displayName }.first?.id ?? "claude"
+            defaultProviderID = registry.allProviders.sorted { $0.displayName < $1.displayName }.first?.id ?? AgentInfo.normalizedProviderID(nil)
         }
 
         guard let provider = registry.provider(for: defaultProviderID) else {
@@ -497,10 +524,11 @@ final class AppPreferences {
     }
 
     func resolvedDefaultProviderID(using registry: ProviderRegistry) -> String {
-        if registry.provider(for: defaultProviderID) != nil {
-            return defaultProviderID
+        let providerID = AgentInfo.normalizedProviderID(defaultProviderID)
+        if registry.provider(for: providerID) != nil {
+            return providerID
         }
-        return registry.allProviders.sorted { $0.displayName < $1.displayName }.first?.id ?? "claude"
+        return registry.allProviders.sorted { $0.displayName < $1.displayName }.first?.id ?? AgentInfo.normalizedProviderID(nil)
     }
 
     func resolvedDefaultModelID(for providerID: String, using registry: ProviderRegistry) -> String {
@@ -527,9 +555,9 @@ final class AppPreferences {
     private static func fallbackModelID(for providerID: String) -> String {
         switch providerID {
         case "codex":
-            "gpt-5.4"
+            AgentInfo.normalizedModelID(nil)
         default:
-            "sonnet"
+            AgentInfo.normalizedModelID(nil)
         }
     }
 }
@@ -612,10 +640,8 @@ final class AppState {
     }
 
     func bootstrap() async {
-        await runtimeDiscovery.register(.claude)
         await runtimeDiscovery.register(.codex)
 
-        providerRegistry.register(ClaudeCodeProvider(discovery: runtimeDiscovery))
         providerRegistry.register(CodexProvider(discovery: runtimeDiscovery))
         preferences.normalizeProviderDefaults(using: providerRegistry)
         await refreshRuntimeHealth()
@@ -1094,6 +1120,9 @@ final class AppState {
         project.refreshFiles()
         if !project.agents.isEmpty {
             for agent in project.agents {
+                agent.providerID = AgentInfo.normalizedProviderID(agent.providerID)
+                agent.modelID = AgentInfo.normalizedModelID(agent.modelID)
+                agent.effort = AgentInfo.normalizedEffort(agent.effort)
                 configureAgent(agent)
                 agent.setTerminalLaunchDirectory(project.project.rootPath)
                 agent.syncExecutionStateFromConversation()
@@ -1257,22 +1286,10 @@ final class AppState {
         if providerRegistry.provider(for: configuredProviderID) != nil {
             return configuredProviderID
         }
-        if runtimeHealth["claude"]?.isUsable == true {
-            return "claude"
-        }
         if runtimeHealth["codex"]?.isUsable == true {
             return "codex"
         }
         return configuredProviderID
-    }
-
-    private func defaultModelID(for providerID: String) -> String {
-        switch providerID {
-        case "codex":
-            "gpt-5.4"
-        default:
-            "sonnet"
-        }
     }
 
     private func defaultAgentTitle(for index: Int) -> String {
