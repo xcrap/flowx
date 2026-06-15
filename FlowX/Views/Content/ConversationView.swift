@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import FXAgent
 import FXDesign
 import FXCore
 
@@ -11,7 +12,7 @@ struct ConversationView: View {
     @State private var editingQueuedPromptText = ""
     @State private var initialScrollRestorePending = true
 
-    private let maxContentWidth: CGFloat = 920
+    private let maxContentWidth: CGFloat = FXLayout.readableContentWidth
     private static let exactTokenFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
@@ -22,10 +23,10 @@ struct ConversationView: View {
         VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(agent.messages) { message in
-                        MessageBubble(message: message)
-                            .id(messageScrollID(for: message))
-                            .padding(.bottom, messageSpacing(for: message))
+                    ForEach(displayItems) { item in
+                        displayItemView(for: item)
+                            .id(item.scrollID)
+                            .padding(.bottom, displayItemSpacing(for: item))
                     }
 
                     if !agent.conversationState.streamingText.isEmpty {
@@ -97,10 +98,56 @@ struct ConversationView: View {
 
     private var contentVersion: Int {
         var version = agent.messages.count
-        version += agent.conversationState.streamingText.isEmpty ? 0 : 1
+        version = version &* 31 &+ agent.conversationState.streamingRevision
         version += agent.isStreaming ? 1 : 0
         version += agent.conversationState.error == nil ? 0 : 1
+        if let activeGoal = agent.conversationState.activeGoal {
+            version = version &* 31 &+ activeGoal.updatedAt
+            version = version &* 31 &+ activeGoal.status.rawValue.hashValue
+        }
         return version
+    }
+
+    private var displayItems: [ConversationDisplayItem] {
+        var items: [ConversationDisplayItem] = []
+        var toolGroup: [ConversationMessage] = []
+
+        func flushToolGroup() {
+            guard let first = toolGroup.first else { return }
+            items.append(.toolGroup(id: first.id, messages: toolGroup))
+            toolGroup.removeAll()
+        }
+
+        for message in agent.messages {
+            if isGroupedToolEventMessage(message) {
+                toolGroup.append(message)
+            } else {
+                flushToolGroup()
+                items.append(.message(message))
+            }
+        }
+
+        flushToolGroup()
+        return items
+    }
+
+    @ViewBuilder
+    private func displayItemView(for item: ConversationDisplayItem) -> some View {
+        switch item {
+        case .message(let message):
+            MessageBubble(message: message)
+        case .toolGroup(_, let messages):
+            ToolActivityGroup(messages: messages)
+        }
+    }
+
+    private func displayItemSpacing(for item: ConversationDisplayItem) -> CGFloat {
+        switch item {
+        case .message(let message):
+            return messageSpacing(for: message)
+        case .toolGroup:
+            return FXSpacing.sm
+        }
     }
 
     private func messageSpacing(for message: ConversationMessage) -> CGFloat {
@@ -118,12 +165,25 @@ struct ConversationView: View {
         }
     }
 
+    private func isGroupedToolEventMessage(_ message: ConversationMessage) -> Bool {
+        !message.content.isEmpty && message.content.allSatisfy { item in
+            switch item {
+            case .toolUse:
+                true
+            case .toolResult(_, _, let isError):
+                !isError
+            default:
+                false
+            }
+        }
+    }
+
     private var showsContextBar: Bool {
-        hasUsageData
-            || agent.conversationState.queuedPromptCount > 0
+        agent.conversationState.queuedPromptCount > 0
             || agent.conversationState.pendingToolApprovalCount > 0
+            || agent.conversationState.activeGoal != nil
             || agent.isStreaming
-            || agent.conversationState.sessionID != nil
+            || (usagePercent ?? 0) >= 70
     }
 
     private var hasUsageData: Bool {
@@ -465,12 +525,12 @@ struct ConversationView: View {
 
     private var contextBar: some View {
         VStack(alignment: .leading, spacing: FXSpacing.sm) {
+            if let activeGoal = agent.conversationState.activeGoal {
+                goalRow(activeGoal)
+            }
+
             HStack(spacing: FXSpacing.sm) {
                 statusPill
-
-                if let sessionID = agent.conversationState.sessionID, !sessionID.isEmpty {
-                    FXBadge(agent.conversationState.error == nil ? "Session ready" : "Resume available", tone: .neutral)
-                }
 
                 if agent.conversationState.queuedPromptCount > 0 {
                     let count = agent.conversationState.queuedPromptCount
@@ -482,14 +542,18 @@ struct ConversationView: View {
                     FXBadge(count == 1 ? "1 approval needed" : "\(count) approvals needed", tone: .warning)
                 }
 
+                if let usagePercentLabel, (usagePercent ?? 0) >= 70 {
+                    FXBadge("\(usagePercentLabel) context", tone: .warning)
+                }
+
                 Spacer()
             }
 
-            if let usageStatusText {
+            if agent.isStreaming, let usageStatusText {
                 Text(usageStatusText)
                     .font(FXTypography.monoSmall)
                     .foregroundStyle(FXColors.fgTertiary)
-            } else if hasUsageData {
+            } else if agent.isStreaming, hasUsageData {
                 Text(usageSummaryText)
                     .font(FXTypography.monoSmall)
                     .foregroundStyle(FXColors.fgTertiary)
@@ -501,7 +565,9 @@ struct ConversationView: View {
         }
         .padding(
             .top,
-            (agent.conversationState.queuedPromptCount > 0 || agent.conversationState.pendingToolApprovalCount > 0)
+            (agent.conversationState.queuedPromptCount > 0
+                || agent.conversationState.pendingToolApprovalCount > 0
+                || agent.conversationState.activeGoal != nil)
                 ? 0
                 : FXSpacing.md
         )
@@ -509,6 +575,65 @@ struct ConversationView: View {
         .frame(maxWidth: maxContentWidth, alignment: .leading)
         .frame(maxWidth: .infinity)
         .padding(.horizontal, FXSpacing.xxl)
+    }
+
+    private func goalRow(_ goal: ConversationGoal) -> some View {
+        HStack(spacing: FXSpacing.sm) {
+            Image(systemName: "target")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(FXColors.accent)
+                .frame(width: 18, height: 18)
+
+            Text("Goal")
+                .font(FXTypography.captionMedium)
+                .foregroundStyle(FXColors.fgSecondary)
+
+            Text(goal.objective)
+                .font(FXTypography.caption)
+                .foregroundStyle(FXColors.fg)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: FXSpacing.sm)
+
+            if let goalMetaText = goalMetaText(for: goal) {
+                Text(goalMetaText)
+                    .font(FXTypography.monoSmall)
+                    .foregroundStyle(FXColors.fgTertiary)
+                    .lineLimit(1)
+            }
+
+            FXBadge(goal.status.label, tone: goalBadgeTone(for: goal.status))
+        }
+        .padding(.horizontal, FXSpacing.sm)
+        .padding(.vertical, FXSpacing.xs)
+        .background(FXColors.bgSurface)
+        .clipShape(RoundedRectangle(cornerRadius: FXRadii.sm, style: .continuous))
+    }
+
+    private func goalMetaText(for goal: ConversationGoal) -> String? {
+        if let tokenBudget = goal.tokenBudget, tokenBudget > 0 {
+            return "\(formatTokenCount(goal.tokensUsed))/\(formatTokenCount(tokenBudget))"
+        }
+
+        if goal.tokensUsed > 0 {
+            return "\(formatTokenCount(goal.tokensUsed)) tokens"
+        }
+
+        return nil
+    }
+
+    private func goalBadgeTone(for status: ConversationGoalStatus) -> FXBadgeTone {
+        switch status {
+        case .active:
+            .success
+        case .paused:
+            .warning
+        case .blocked, .usageLimited, .budgetLimited:
+            .error
+        case .complete:
+            .info
+        }
     }
 
     private var statusPill: some View {
@@ -697,7 +822,11 @@ private struct ConversationScrollBridge: NSViewRepresentable {
         context.coordinator.attachIfNeeded(to: nsView)
         context.coordinator.prepareForRestore(restoreKey)
         if context.coordinator.hasCompletedInitialRestore {
-            context.coordinator.applyScrollPosition(desiredOffset: desiredOffset, stickToBottom: stickToBottom)
+            context.coordinator.updateScrollIntent(
+                desiredOffset: desiredOffset,
+                stickToBottom: stickToBottom,
+                contentVersion: contentVersion
+            )
         } else {
             context.coordinator.scheduleInitialRestore(
                 for: restoreKey,
@@ -706,7 +835,6 @@ private struct ConversationScrollBridge: NSViewRepresentable {
                 onInitialRestoreCompleted: onInitialRestoreCompleted
             )
         }
-        _ = contentVersion
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
@@ -719,10 +847,17 @@ private struct ConversationScrollBridge: NSViewRepresentable {
 
         private weak var scrollView: NSScrollView?
         private weak var clipView: NSClipView?
+        private weak var documentView: NSView?
         private var observingScrollBounds = false
+        private var observingDocumentFrame = false
         private var isApplyingProgrammaticScroll = false
         private var activeRestoreKey: UUID?
         private var pendingInitialRestore = false
+        private var pendingLayoutScroll = false
+        private var desiredOffset: CGFloat = 0
+        private var stickToBottom = true
+        private var lastContentVersion: Int?
+        private var lastClipHeight: CGFloat?
         fileprivate var hasCompletedInitialRestore = false
 
         init(onScrollChange: @escaping (CGFloat, CGFloat) -> Void) {
@@ -742,7 +877,9 @@ private struct ConversationScrollBridge: NSViewRepresentable {
 
             self.scrollView = scrollView
             clipView = scrollView.contentView
+            lastClipHeight = scrollView.contentView.bounds.height
             scrollView.contentView.postsBoundsChangedNotifications = true
+            attachDocumentObserverIfNeeded()
 
             NotificationCenter.default.addObserver(
                 self,
@@ -757,9 +894,29 @@ private struct ConversationScrollBridge: NSViewRepresentable {
             if observingScrollBounds {
                 NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification, object: clipView)
             }
+            if observingDocumentFrame {
+                NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: documentView)
+            }
             observingScrollBounds = false
+            observingDocumentFrame = false
             scrollView = nil
             clipView = nil
+            documentView = nil
+            lastClipHeight = nil
+        }
+
+        func updateScrollIntent(desiredOffset: CGFloat, stickToBottom: Bool, contentVersion: Int) {
+            self.desiredOffset = desiredOffset
+            let becamePinned = stickToBottom && !self.stickToBottom
+            self.stickToBottom = stickToBottom
+            attachDocumentObserverIfNeeded()
+
+            let didChangeContent = lastContentVersion != contentVersion
+            lastContentVersion = contentVersion
+
+            if stickToBottom, becamePinned || didChangeContent {
+                scheduleLayoutScroll()
+            }
         }
 
         func scheduleInitialRestore(
@@ -770,6 +927,8 @@ private struct ConversationScrollBridge: NSViewRepresentable {
         ) {
             guard activeRestoreKey == restoreKey, !pendingInitialRestore, !hasCompletedInitialRestore else { return }
             pendingInitialRestore = true
+            self.desiredOffset = desiredOffset
+            self.stickToBottom = stickToBottom
 
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.activeRestoreKey == restoreKey else { return }
@@ -788,6 +947,7 @@ private struct ConversationScrollBridge: NSViewRepresentable {
                     self.applyScrollPosition(desiredOffset: desiredOffset, stickToBottom: stickToBottom)
                     self.pendingInitialRestore = false
                     self.hasCompletedInitialRestore = true
+                    self.attachDocumentObserverIfNeeded()
                     onInitialRestoreCompleted()
                 }
             }
@@ -812,19 +972,80 @@ private struct ConversationScrollBridge: NSViewRepresentable {
 
         @objc
         private func handleScrollBoundsDidChange() {
+            guard !isApplyingProgrammaticScroll else { return }
+
+            let currentClipHeight = clipView?.bounds.height ?? 0
+            let didResizeViewport = lastClipHeight.map { abs($0 - currentClipHeight) > 0.5 } ?? false
+            lastClipHeight = currentClipHeight
+
+            if stickToBottom, didResizeViewport {
+                scheduleLayoutScroll()
+                return
+            }
+
             reportScrollPosition()
+        }
+
+        @objc
+        private func handleDocumentFrameDidChange() {
+            attachDocumentObserverIfNeeded()
+            if stickToBottom {
+                scheduleLayoutScroll()
+            } else {
+                reportScrollPosition()
+            }
+        }
+
+        private func scheduleLayoutScroll() {
+            guard !pendingLayoutScroll else { return }
+            pendingLayoutScroll = true
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.applyScrollPosition(desiredOffset: self.desiredOffset, stickToBottom: self.stickToBottom)
+
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.pendingLayoutScroll = false
+                    self.applyScrollPosition(desiredOffset: self.desiredOffset, stickToBottom: self.stickToBottom)
+                }
+            }
         }
 
         private func reportScrollPosition() {
             guard let scrollView, let clipView else { return }
             let maxOffset = maximumOffset(for: scrollView)
             let offset = max(0, min(clipView.bounds.origin.y, maxOffset))
+            lastClipHeight = clipView.bounds.height
             onScrollChange(offset, maxOffset)
         }
 
         private func maximumOffset(for scrollView: NSScrollView) -> CGFloat {
             guard let documentView = scrollView.documentView else { return 0 }
             return max(0, documentView.frame.height - scrollView.contentView.bounds.height)
+        }
+
+        private func attachDocumentObserverIfNeeded() {
+            guard let scrollView else { return }
+            let currentDocumentView = scrollView.documentView
+            guard documentView !== currentDocumentView else { return }
+
+            if observingDocumentFrame {
+                NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: documentView)
+                observingDocumentFrame = false
+            }
+
+            documentView = currentDocumentView
+
+            guard let currentDocumentView else { return }
+            currentDocumentView.postsFrameChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleDocumentFrameDidChange),
+                name: NSView.frameDidChangeNotification,
+                object: currentDocumentView
+            )
+            observingDocumentFrame = true
         }
 
         private func enclosingScrollView(from view: NSView) -> NSScrollView? {
@@ -837,5 +1058,120 @@ private struct ConversationScrollBridge: NSViewRepresentable {
             }
             return nil
         }
+    }
+}
+
+private enum ConversationDisplayItem: Identifiable {
+    case message(ConversationMessage)
+    case toolGroup(id: UUID, messages: [ConversationMessage])
+
+    var id: String {
+        switch self {
+        case .message(let message):
+            "message-\(message.id.uuidString)"
+        case .toolGroup(let id, _):
+            "tool-group-\(id.uuidString)"
+        }
+    }
+
+    var scrollID: String { id }
+}
+
+private struct ToolActivityGroup: View {
+    let messages: [ConversationMessage]
+
+    var body: some View {
+        HStack(spacing: FXSpacing.sm) {
+            Image(systemName: "terminal")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(FXColors.fgTertiary)
+                .frame(width: 14)
+
+            Text(title)
+                .font(FXTypography.captionMedium)
+                .foregroundStyle(FXColors.fgTertiary)
+
+            if let detail {
+                Text("·")
+                    .font(FXTypography.caption)
+                    .foregroundStyle(FXColors.fgQuaternary)
+
+                Text(detail)
+                    .font(FXTypography.caption)
+                    .foregroundStyle(FXColors.fgTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, FXSpacing.xxxs)
+        .opacity(0.68)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var title: String {
+        let count = toolSummaries.count
+        guard count > 0 else { return "Used tools" }
+        return count == 1 ? "Used \(toolSummaries[0].name)" : "Used \(count) tools"
+    }
+
+    private var detail: String? {
+        let parts = toolSummaries
+            .compactMap(\.detail)
+            .prefix(3)
+
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: ", ")
+    }
+
+    private var toolSummaries: [(name: String, detail: String?)] {
+        messages.flatMap { message in
+            message.content.compactMap { content -> (name: String, detail: String?)? in
+                guard case .toolUse(_, let name, let input) = content else { return nil }
+                return (name, summarizedToolInput(name: name, input: input))
+            }
+        }
+    }
+
+    private func summarizedToolInput(name: String, input: String) -> String? {
+        guard !input.isEmpty, input != "{}" else { return nil }
+        guard let data = input.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return summarizedSingleLine(input)
+        }
+
+        switch name {
+        case "Read", "Edit", "Write":
+            return (json["file_path"] as? String).map(shortPathForDisplay)
+        case "Grep":
+            return json["pattern"] as? String
+        case "Glob":
+            return json["pattern"] as? String
+        case "Bash", "Command", "Shell", "commandExecution":
+            return (json["command"] as? String).map { summarizedSingleLine($0, limit: 96) }
+        default:
+            return summarizedSingleLine(input)
+        }
+    }
+
+    private func summarizedSingleLine(_ text: String, limit: Int = 96) -> String {
+        let flattened = text
+            .components(separatedBy: .newlines)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? text
+
+        if flattened.count <= limit {
+            return flattened
+        }
+
+        return String(flattened.prefix(limit - 1)) + "..."
+    }
+
+    private func shortPathForDisplay(_ path: String) -> String {
+        let components = path.split(separator: "/")
+        let tail = components.suffix(2)
+        return tail.isEmpty ? path : tail.joined(separator: "/")
     }
 }

@@ -8,7 +8,7 @@ struct ChatInputBar: View {
     @Bindable var agent: AgentInfo
     @FocusState private var composerFocused: Bool
 
-    private let maxContentWidth: CGFloat = 920
+    private let maxContentWidth: CGFloat = FXLayout.readableContentWidth
 
     private enum ComposerAction {
         case send

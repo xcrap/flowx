@@ -14,6 +14,7 @@ struct PersistedConversation: Codable {
     var totalReasoningOutputTokens: Int
     var totalTokens: Int
     var reportedContextWindow: Int?
+    var activeGoal: ConversationGoal?
 }
 
 struct PersistedProjectConversations: Codable {
@@ -50,7 +51,8 @@ enum ConversationPersistence {
                     totalCachedInputTokens: state.totalCachedInputTokens,
                     totalReasoningOutputTokens: state.totalReasoningOutputTokens,
                     totalTokens: state.totalTokens,
-                    reportedContextWindow: state.reportedContextWindow
+                    reportedContextWindow: state.reportedContextWindow,
+                    activeGoal: state.activeGoal
                 )
             }
         )
@@ -83,6 +85,7 @@ enum ConversationPersistence {
             state.totalReasoningOutputTokens = conversation.totalReasoningOutputTokens
             state.totalTokens = conversation.totalTokens
             state.reportedContextWindow = conversation.reportedContextWindow
+            state.activeGoal = conversation.activeGoal
             result[conversation.agentID] = state
         }
         return result

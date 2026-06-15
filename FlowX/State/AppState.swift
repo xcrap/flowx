@@ -35,6 +35,46 @@ enum AgentStatus: String {
     case error
 }
 
+private enum FlowXSlashCommand {
+    case compact
+    case goalView
+    case goalSet(String)
+    case goalStatus(ConversationGoalStatus)
+    case goalClear
+
+    init?(_ rawPrompt: String) {
+        let trimmed = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/") else { return nil }
+
+        let pieces = trimmed.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        guard let command = pieces.first?.dropFirst().lowercased() else { return nil }
+        let argument = pieces.count > 1
+            ? String(pieces[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+            : ""
+
+        switch command {
+        case "compact":
+            self = .compact
+        case "goal":
+            let normalizedArgument = argument.lowercased()
+            switch normalizedArgument {
+            case "":
+                self = .goalView
+            case "pause":
+                self = .goalStatus(.paused)
+            case "resume":
+                self = .goalStatus(.active)
+            case "clear":
+                self = .goalClear
+            default:
+                self = .goalSet(argument)
+            }
+        default:
+            return nil
+        }
+    }
+}
+
 enum SplitContent: String, Codable {
     case diff
     case browser
@@ -804,6 +844,12 @@ final class AppState {
         let attachments = agent.conversationState.pendingAttachments
         agent.conversationState.inputText = ""
         agent.conversationState.clearAttachments()
+
+        if let slashCommand = FlowXSlashCommand(prompt) {
+            handleSlashCommand(slashCommand, attachments: attachments, for: agent)
+            return
+        }
+
         dispatchPrompt(prompt, attachments: attachments, for: agent)
     }
 
@@ -1272,6 +1318,110 @@ final class AppState {
         )
 
         scheduleSave()
+    }
+
+    private func handleSlashCommand(_ command: FlowXSlashCommand, attachments: [Attachment], for agent: AgentInfo) {
+        guard let project = project(for: agent.id) else { return }
+
+        Task { @MainActor in
+            do {
+                switch command {
+                case .compact:
+                    guard agent.conversationState.sessionID != nil else {
+                        agent.conversationState.recordRuntimeActivity(
+                            kind: .contextCompaction,
+                            tone: .warning,
+                            summary: "Nothing to compact",
+                            detail: "Start a Codex session first.",
+                            state: "skipped",
+                            turnID: agent.conversationState.activeTurnID
+                        )
+                        persistConversation(for: agent)
+                        return
+                    }
+
+                    try await conversationService.compactThread(
+                        for: agent.conversationState,
+                        providerID: agent.providerID,
+                        systemPrompt: agent.systemPrompt,
+                        agentMode: agent.agentMode,
+                        agentAccess: agent.agentAccess,
+                        workingDirectory: project.project.rootURL,
+                        resumeSessionID: agent.conversationState.sessionID
+                    )
+                    persistConversation(for: agent)
+
+                case .goalView:
+                    try await conversationService.refreshGoal(
+                        for: agent.conversationState,
+                        providerID: agent.providerID,
+                        systemPrompt: agent.systemPrompt,
+                        agentMode: agent.agentMode,
+                        agentAccess: agent.agentAccess,
+                        workingDirectory: project.project.rootURL,
+                        resumeSessionID: agent.conversationState.sessionID
+                    )
+                    persistConversation(for: agent)
+
+                case .goalSet(let objective):
+                    let trimmedObjective = objective.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmedObjective.isEmpty else { return }
+
+                    let goal = try await conversationService.setGoal(
+                        objective: trimmedObjective,
+                        status: .active,
+                        for: agent.conversationState,
+                        providerID: agent.providerID,
+                        systemPrompt: agent.systemPrompt,
+                        agentMode: agent.agentMode,
+                        agentAccess: agent.agentAccess,
+                        workingDirectory: project.project.rootURL,
+                        resumeSessionID: agent.conversationState.sessionID
+                    )
+                    persistConversation(for: agent)
+
+                    if !agent.conversationState.isStreaming {
+                        dispatchPrompt(trimmedObjective, attachments: attachments, for: agent, resumeSessionID: goal.threadID)
+                    }
+
+                case .goalStatus(let status):
+                    try await conversationService.setGoal(
+                        objective: nil,
+                        status: status,
+                        for: agent.conversationState,
+                        providerID: agent.providerID,
+                        systemPrompt: agent.systemPrompt,
+                        agentMode: agent.agentMode,
+                        agentAccess: agent.agentAccess,
+                        workingDirectory: project.project.rootURL,
+                        resumeSessionID: agent.conversationState.sessionID
+                    )
+                    persistConversation(for: agent)
+
+                case .goalClear:
+                    try await conversationService.clearGoal(
+                        for: agent.conversationState,
+                        providerID: agent.providerID,
+                        systemPrompt: agent.systemPrompt,
+                        agentMode: agent.agentMode,
+                        agentAccess: agent.agentAccess,
+                        workingDirectory: project.project.rootURL,
+                        resumeSessionID: agent.conversationState.sessionID
+                    )
+                    persistConversation(for: agent)
+                }
+            } catch {
+                agent.conversationState.recordRuntimeActivity(
+                    kind: .error,
+                    tone: .error,
+                    summary: "Slash command failed",
+                    detail: error.localizedDescription,
+                    state: "failed",
+                    turnID: agent.conversationState.activeTurnID
+                )
+                persistConversation(for: agent)
+            }
+        }
     }
 
     private func persistConversation(for agent: AgentInfo) {

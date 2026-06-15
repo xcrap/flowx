@@ -49,6 +49,7 @@ private actor CodexSession {
     private let discovery: RuntimeDiscovery
     private let approvalPolicy: String
     private let sandboxMode: String
+    private let agentMode: AgentMode
 
     private var process: Process?
     private var writer: FileHandle?
@@ -65,6 +66,8 @@ private actor CodexSession {
     private var lastTurnStartRequestID: Int?
     private var didEmitTurnStarted = false
     private var pendingApprovalResponseIDs: [UUID: ApprovalResponseID] = [:]
+    private var pendingGoalResponses: [Int: CheckedContinuation<ConversationGoal?, Error>] = [:]
+    private var pendingEmptyResponses: [Int: CheckedContinuation<Void, Error>] = [:]
     private var activeAttachmentPaths: [URL] = []
 
     init(
@@ -79,21 +82,13 @@ private actor CodexSession {
         threadID = resumeThreadID
         self.workingDirectory = workingDirectory
         self.discovery = discovery
+        self.agentMode = agentMode ?? .auto
 
         let params = CodexProvider.codexParams(for: agentAccess ?? .fullAccess)
         approvalPolicy = params.approvalPolicy
         sandboxMode = params.sandbox
 
-        var instructions = systemPrompt
-        if (agentMode ?? .auto) == .plan {
-            let planPrefix = "Before executing any actions, first create a detailed plan and present it for review. Do not execute commands or make changes until the plan is approved."
-            if let existing = instructions, !existing.isEmpty {
-                instructions = planPrefix + "\n\n" + existing
-            } else {
-                instructions = planPrefix
-            }
-        }
-        developerInstructions = instructions
+        developerInstructions = Self.developerInstructions(systemPrompt: systemPrompt, agentMode: self.agentMode)
     }
 
     func startTurn(
@@ -105,15 +100,7 @@ private actor CodexSession {
         systemPrompt: String?,
         continuation: AsyncThrowingStream<StreamEvent, Error>.Continuation
     ) async throws -> String {
-        if let workingDirectory {
-            self.workingDirectory = workingDirectory
-        }
-        if let systemPrompt, !systemPrompt.isEmpty {
-            developerInstructions = systemPrompt
-        }
-
-        try await ensureServerStarted()
-        let resolvedThreadID = try await ensureThreadReady()
+        let resolvedThreadID = try await ensureReady(workingDirectory: workingDirectory, systemPrompt: systemPrompt)
 
         activeContinuation = continuation
         activeTurnID = nil
@@ -155,6 +142,83 @@ private actor CodexSession {
         return resolvedThreadID
     }
 
+    func setGoal(
+        objective: String?,
+        status: ConversationGoalStatus?,
+        tokenBudget: Int?,
+        workingDirectory: URL?,
+        systemPrompt: String?
+    ) async throws -> ConversationGoal {
+        let threadID = try await ensureReady(workingDirectory: workingDirectory, systemPrompt: systemPrompt)
+        let requestID = nextRequestID()
+
+        var params: [String: Any] = ["threadId": threadID]
+        if let objective {
+            params["objective"] = objective
+        }
+        if let status {
+            params["status"] = status.rawValue
+        }
+        if let tokenBudget {
+            params["tokenBudget"] = tokenBudget
+        }
+
+        let goal = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ConversationGoal?, Error>) in
+            pendingGoalResponses[requestID] = continuation
+            writeJSON("thread/goal/set", id: requestID, params: params)
+        }
+
+        guard let goal else {
+            throw Self.makeError("Codex did not return a goal.")
+        }
+        return goal
+    }
+
+    func getGoal(
+        workingDirectory: URL?,
+        systemPrompt: String?
+    ) async throws -> (threadID: String, goal: ConversationGoal?) {
+        let threadID = try await ensureReady(workingDirectory: workingDirectory, systemPrompt: systemPrompt)
+        let requestID = nextRequestID()
+
+        let goal = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ConversationGoal?, Error>) in
+            pendingGoalResponses[requestID] = continuation
+            writeJSON("thread/goal/get", id: requestID, params: ["threadId": threadID])
+        }
+
+        return (threadID: threadID, goal: goal)
+    }
+
+    func clearGoal(
+        workingDirectory: URL?,
+        systemPrompt: String?
+    ) async throws -> String {
+        let threadID = try await ensureReady(workingDirectory: workingDirectory, systemPrompt: systemPrompt)
+        let requestID = nextRequestID()
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            pendingEmptyResponses[requestID] = continuation
+            writeJSON("thread/goal/clear", id: requestID, params: ["threadId": threadID])
+        }
+
+        return threadID
+    }
+
+    func compactThread(
+        workingDirectory: URL?,
+        systemPrompt: String?
+    ) async throws -> String {
+        let threadID = try await ensureReady(workingDirectory: workingDirectory, systemPrompt: systemPrompt)
+        let requestID = nextRequestID()
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            pendingEmptyResponses[requestID] = continuation
+            writeJSON("thread/compact/start", id: requestID, params: ["threadId": threadID])
+        }
+
+        return threadID
+    }
+
     func interruptCurrentTurn() {
         guard activeContinuation != nil else { return }
 
@@ -192,6 +256,16 @@ private actor CodexSession {
         throw NSError(domain: "CodexProvider", code: 1, userInfo: [
             NSLocalizedDescriptionKey: startupError ?? "Codex app-server failed to start.",
         ])
+    }
+
+    private func ensureReady(workingDirectory: URL?, systemPrompt: String?) async throws -> String {
+        if let workingDirectory {
+            self.workingDirectory = workingDirectory
+        }
+        developerInstructions = Self.developerInstructions(systemPrompt: systemPrompt, agentMode: agentMode)
+
+        try await ensureServerStarted()
+        return try await ensureThreadReady()
     }
 
     private func ensureThreadReady() async throws -> String {
@@ -336,6 +410,7 @@ private actor CodexSession {
         lastTurnStartRequestID = nil
         didEmitTurnStarted = false
         pendingApprovalResponseIDs.removeAll()
+        failPendingResponses(message: "Codex app-server exited.")
         clearActiveAttachments()
         threadReady = false
         writer = nil
@@ -377,6 +452,9 @@ private actor CodexSession {
     private func handleResponse(id: Int, payload: [String: Any]) {
         if let error = payload["error"] as? [String: Any] {
             let message = error["message"] as? String ?? "Unknown Codex error"
+            if failPendingResponse(id: id, message: message) {
+                return
+            }
             if id == 1 {
                 startupError = message
             } else {
@@ -390,6 +468,14 @@ private actor CodexSession {
                     clearActiveAttachments()
                 }
             }
+            return
+        }
+
+        if completePendingGoalResponse(id: id, payload: payload) {
+            return
+        }
+
+        if completePendingEmptyResponse(id: id) {
             return
         }
 
@@ -440,10 +526,20 @@ private actor CodexSession {
         case "item/started":
             if let item = params["item"] as? [String: Any] {
                 let type = item["type"] as? String ?? ""
-                if type == "toolCall" || type == "commandExecution" {
-                    let name = item["name"] as? String ?? item["command"] as? String ?? type
-                    activeContinuation?.yield(.toolUse(id: item["id"] as? String ?? "", name: name, input: ""))
+                if type == "contextCompaction" {
+                    activeContinuation?.yield(.lifecycle(.phaseChanged(.compacting)))
+                } else if type == "toolCall" || type == "commandExecution" {
+                    let command = item["command"] as? String
+                    let name = item["name"] as? String ?? (command == nil ? type : "Command")
+                    let input = Self.toolInput(from: item, command: command)
+                    activeContinuation?.yield(.toolUse(id: item["id"] as? String ?? "", name: name, input: input))
                 }
+            }
+
+        case "item/completed":
+            if let item = params["item"] as? [String: Any],
+               item["type"] as? String == "contextCompaction" {
+                activeContinuation?.yield(.lifecycle(.phaseChanged(.compacted)))
             }
 
         case "thread/tokenUsage/updated":
@@ -475,6 +571,14 @@ private actor CodexSession {
 
         case "thread/compacted":
             activeContinuation?.yield(.lifecycle(.phaseChanged(.compacted)))
+
+        case "thread/goal/updated":
+            if let goal = Self.goal(from: params["goal"] as? [String: Any]) {
+                activeContinuation?.yield(.goalUpdated(goal))
+            }
+
+        case "thread/goal/cleared":
+            activeContinuation?.yield(.goalUpdated(nil))
 
         case "thread/status/changed":
             let compactStatus = compactStatus(from: params)
@@ -519,6 +623,49 @@ private actor CodexSession {
         default:
             break
         }
+    }
+
+    private func completePendingGoalResponse(id: Int, payload: [String: Any]) -> Bool {
+        guard let continuation = pendingGoalResponses.removeValue(forKey: id) else { return false }
+
+        let result = payload["result"] as? [String: Any]
+        let goal = Self.goal(from: result?["goal"] as? [String: Any])
+        continuation.resume(returning: goal)
+        return true
+    }
+
+    private func completePendingEmptyResponse(id: Int) -> Bool {
+        guard let continuation = pendingEmptyResponses.removeValue(forKey: id) else { return false }
+        continuation.resume()
+        return true
+    }
+
+    @discardableResult
+    private func failPendingResponse(id: Int, message: String) -> Bool {
+        if let continuation = pendingGoalResponses.removeValue(forKey: id) {
+            continuation.resume(throwing: Self.makeError(message))
+            return true
+        }
+
+        if let continuation = pendingEmptyResponses.removeValue(forKey: id) {
+            continuation.resume(throwing: Self.makeError(message))
+            return true
+        }
+
+        return false
+    }
+
+    private func failPendingResponses(message: String) {
+        let error = Self.makeError(message)
+        for continuation in pendingGoalResponses.values {
+            continuation.resume(throwing: error)
+        }
+        pendingGoalResponses.removeAll()
+
+        for continuation in pendingEmptyResponses.values {
+            continuation.resume(throwing: error)
+        }
+        pendingEmptyResponses.removeAll()
     }
 
     private func emitTurnStartedIfNeeded(turnID: String?) {
@@ -571,6 +718,82 @@ private actor CodexSession {
         return nil
     }
 
+    private static func developerInstructions(systemPrompt: String?, agentMode: AgentMode) -> String {
+        var sections = [
+            """
+            Keep user-visible chat concise and outcome-focused. Do not narrate routine tool use, file reads, searches, or build commands unless that context materially helps the user understand the result. Let FlowX surface tool activity separately. Prefer short paragraphs and compact final summaries with only the verification or next-step details that matter.
+            """,
+        ]
+
+        if agentMode == .plan {
+            sections.append("Before executing any actions, first create a detailed plan and present it for review. Do not execute commands or make changes until the plan is approved.")
+        }
+
+        if let systemPrompt = systemPrompt?.trimmingCharacters(in: .whitespacesAndNewlines), !systemPrompt.isEmpty {
+            sections.append(systemPrompt)
+        }
+
+        return sections.joined(separator: "\n\n")
+    }
+
+    private static func threadConfig() -> [String: Any] {
+        [
+            "model_verbosity": "low",
+        ]
+    }
+
+    private static func goal(from payload: [String: Any]?) -> ConversationGoal? {
+        guard let payload,
+              let threadID = payload["threadId"] as? String,
+              let objective = payload["objective"] as? String,
+              let statusRaw = payload["status"] as? String else {
+            return nil
+        }
+
+        return ConversationGoal(
+            threadID: threadID,
+            objective: objective,
+            status: ConversationGoalStatus(rawValue: statusRaw) ?? .active,
+            tokensUsed: intValue(for: payload["tokensUsed"]) ?? 0,
+            tokenBudget: intValue(for: payload["tokenBudget"]),
+            timeUsedSeconds: intValue(for: payload["timeUsedSeconds"]) ?? 0,
+            createdAt: intValue(for: payload["createdAt"]) ?? 0,
+            updatedAt: intValue(for: payload["updatedAt"]) ?? 0
+        )
+    }
+
+    private static func intValue(for rawValue: Any?) -> Int? {
+        switch rawValue {
+        case let value as Int:
+            value
+        case let value as NSNumber:
+            value.intValue
+        default:
+            nil
+        }
+    }
+
+    private static func makeError(_ message: String) -> NSError {
+        NSError(domain: "CodexProvider", code: 10, userInfo: [
+            NSLocalizedDescriptionKey: message,
+        ])
+    }
+
+    private static func toolInput(from item: [String: Any], command: String?) -> String {
+        if let input = item["input"] ?? item["arguments"],
+           let inputString = stringValue(for: input) {
+            return inputString
+        }
+
+        guard let command, !command.isEmpty else { return "" }
+        let payload = ["command": command]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              let input = String(data: data, encoding: .utf8) else {
+            return command
+        }
+        return input
+    }
+
     private func startOrResumeThread() {
         let threadToResume = threadID ?? initialResumeThreadID
 
@@ -579,6 +802,7 @@ private actor CodexSession {
                 "threadId": threadToResume,
                 "approvalPolicy": approvalPolicy,
                 "sandbox": sandboxMode,
+                "config": Self.threadConfig(),
             ]
 
             if let developerInstructions, !developerInstructions.isEmpty {
@@ -596,6 +820,7 @@ private actor CodexSession {
         var params: [String: Any] = [
             "approvalPolicy": approvalPolicy,
             "sandbox": sandboxMode,
+            "config": Self.threadConfig(),
         ]
 
         if let developerInstructions, !developerInstructions.isEmpty {
@@ -856,7 +1081,7 @@ private actor CodexSessionReference {
     }
 }
 
-public final class CodexProvider: AIProvider, Sendable {
+public final class CodexProvider: AIProviderThreadControls, Sendable {
     public let id = "codex"
     public let displayName = "Codex (OpenAI)"
     public let availableModels: [AIModel] = [
@@ -944,5 +1169,94 @@ public final class CodexProvider: AIProvider, Sendable {
                 await reference.get()?.respondToApproval(approvalID, approved: approved)
             }
         )
+    }
+
+    public func setThreadGoal(
+        objective: String?,
+        status: ConversationGoalStatus?,
+        tokenBudget: Int?,
+        systemPrompt: String?,
+        agentMode: AgentMode?,
+        agentAccess: AgentAccess?,
+        workingDirectory: URL?,
+        resumeSessionID: String?
+    ) async throws -> ConversationGoal {
+        let session = await store.session(
+            for: resumeSessionID,
+            workingDirectory: workingDirectory,
+            systemPrompt: systemPrompt,
+            agentMode: agentMode,
+            agentAccess: agentAccess,
+            discovery: discovery
+        )
+        let goal = try await session.setGoal(
+            objective: objective,
+            status: status,
+            tokenBudget: tokenBudget,
+            workingDirectory: workingDirectory,
+            systemPrompt: systemPrompt
+        )
+        await store.register(session, for: goal.threadID)
+        return goal
+    }
+
+    public func getThreadGoal(
+        systemPrompt: String?,
+        agentMode: AgentMode?,
+        agentAccess: AgentAccess?,
+        workingDirectory: URL?,
+        resumeSessionID: String?
+    ) async throws -> (threadID: String, goal: ConversationGoal?) {
+        let session = await store.session(
+            for: resumeSessionID,
+            workingDirectory: workingDirectory,
+            systemPrompt: systemPrompt,
+            agentMode: agentMode,
+            agentAccess: agentAccess,
+            discovery: discovery
+        )
+        let result = try await session.getGoal(workingDirectory: workingDirectory, systemPrompt: systemPrompt)
+        await store.register(session, for: result.threadID)
+        return result
+    }
+
+    public func clearThreadGoal(
+        systemPrompt: String?,
+        agentMode: AgentMode?,
+        agentAccess: AgentAccess?,
+        workingDirectory: URL?,
+        resumeSessionID: String?
+    ) async throws -> String {
+        let session = await store.session(
+            for: resumeSessionID,
+            workingDirectory: workingDirectory,
+            systemPrompt: systemPrompt,
+            agentMode: agentMode,
+            agentAccess: agentAccess,
+            discovery: discovery
+        )
+        let threadID = try await session.clearGoal(workingDirectory: workingDirectory, systemPrompt: systemPrompt)
+        await store.register(session, for: threadID)
+        return threadID
+    }
+
+    public func compactThread(
+        systemPrompt: String?,
+        agentMode: AgentMode?,
+        agentAccess: AgentAccess?,
+        workingDirectory: URL?,
+        resumeSessionID: String?
+    ) async throws -> String {
+        let session = await store.session(
+            for: resumeSessionID,
+            workingDirectory: workingDirectory,
+            systemPrompt: systemPrompt,
+            agentMode: agentMode,
+            agentAccess: agentAccess,
+            discovery: discovery
+        )
+        let threadID = try await session.compactThread(workingDirectory: workingDirectory, systemPrompt: systemPrompt)
+        await store.register(session, for: threadID)
+        return threadID
     }
 }

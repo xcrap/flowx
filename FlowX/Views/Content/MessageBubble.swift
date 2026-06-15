@@ -46,7 +46,7 @@ struct MessageBubble: View {
                 }
             }
             .padding(.horizontal, isUser ? FXSpacing.xl : 0)
-            .padding(.vertical, isUser ? FXSpacing.lg : FXSpacing.xs)
+            .padding(.vertical, isUser ? FXSpacing.md : FXSpacing.xs)
             .background(isUser ? FXColors.accent.opacity(0.12) : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: isUser ? FXRadii.xl : 0))
             .overlay(
@@ -75,7 +75,7 @@ struct MessageBubble: View {
                 .font(FXTypography.body)
                 .foregroundStyle(FXColors.fg)
                 .textSelection(.enabled)
-                .lineSpacing(8)
+                .lineSpacing(6)
                 .fixedSize(horizontal: false, vertical: true)
 
         case .toolUse(_, let name, let input):
@@ -210,7 +210,7 @@ struct MessageBubble: View {
             }()
         case "Glob":
             summary = json["pattern"] as? String
-        case "Bash":
+        case "Bash", "Command", "Shell", "commandExecution":
             summary = (json["command"] as? String).map { summarizedSingleLine($0) }
         default:
             summary = nil

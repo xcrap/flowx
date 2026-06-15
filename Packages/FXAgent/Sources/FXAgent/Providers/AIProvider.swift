@@ -60,6 +60,63 @@ public struct ProviderStreamHandle: Sendable {
     }
 }
 
+public enum ConversationGoalStatus: String, Codable, Sendable, Equatable {
+    case active
+    case paused
+    case blocked
+    case usageLimited
+    case budgetLimited
+    case complete
+
+    public var label: String {
+        switch self {
+        case .active:
+            "Active"
+        case .paused:
+            "Paused"
+        case .blocked:
+            "Blocked"
+        case .usageLimited:
+            "Usage limited"
+        case .budgetLimited:
+            "Budget limited"
+        case .complete:
+            "Complete"
+        }
+    }
+}
+
+public struct ConversationGoal: Codable, Sendable, Equatable {
+    public var threadID: String
+    public var objective: String
+    public var status: ConversationGoalStatus
+    public var tokensUsed: Int
+    public var tokenBudget: Int?
+    public var timeUsedSeconds: Int
+    public var createdAt: Int
+    public var updatedAt: Int
+
+    public init(
+        threadID: String,
+        objective: String,
+        status: ConversationGoalStatus,
+        tokensUsed: Int,
+        tokenBudget: Int?,
+        timeUsedSeconds: Int,
+        createdAt: Int,
+        updatedAt: Int
+    ) {
+        self.threadID = threadID
+        self.objective = objective
+        self.status = status
+        self.tokensUsed = tokensUsed
+        self.tokenBudget = tokenBudget
+        self.timeUsedSeconds = timeUsedSeconds
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
 public struct ProviderApprovalRequest: Identifiable, Sendable, Equatable {
     public let id: UUID
     public var toolName: String
@@ -99,6 +156,43 @@ public protocol AIProvider: Sendable {
         workingDirectory: URL?,
         resumeSessionID: String?
     ) -> ProviderStreamHandle
+}
+
+public protocol AIProviderThreadControls: AIProvider {
+    func setThreadGoal(
+        objective: String?,
+        status: ConversationGoalStatus?,
+        tokenBudget: Int?,
+        systemPrompt: String?,
+        agentMode: AgentMode?,
+        agentAccess: AgentAccess?,
+        workingDirectory: URL?,
+        resumeSessionID: String?
+    ) async throws -> ConversationGoal
+
+    func getThreadGoal(
+        systemPrompt: String?,
+        agentMode: AgentMode?,
+        agentAccess: AgentAccess?,
+        workingDirectory: URL?,
+        resumeSessionID: String?
+    ) async throws -> (threadID: String, goal: ConversationGoal?)
+
+    func clearThreadGoal(
+        systemPrompt: String?,
+        agentMode: AgentMode?,
+        agentAccess: AgentAccess?,
+        workingDirectory: URL?,
+        resumeSessionID: String?
+    ) async throws -> String
+
+    func compactThread(
+        systemPrompt: String?,
+        agentMode: AgentMode?,
+        agentAccess: AgentAccess?,
+        workingDirectory: URL?,
+        resumeSessionID: String?
+    ) async throws -> String
 }
 
 public struct AIModel: Identifiable, Codable, Sendable, Equatable {
@@ -151,6 +245,7 @@ public enum StreamEvent: Sendable {
         totalTokens: Int,
         contextWindow: Int?
     )
+    case goalUpdated(ConversationGoal?)
     case done(stopReason: String)
     case error(String)
 }

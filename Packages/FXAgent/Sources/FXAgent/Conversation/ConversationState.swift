@@ -13,6 +13,7 @@ public final class ConversationState {
     public var runtimeActivities: [ConversationRuntimeActivity] = []
     public var runtimePhase: ProviderSessionPhase = .idle
     public var streamingText: String = ""
+    public var streamingRevision: Int = 0
     public var inputText: String = ""
     public var error: String?
     public var sessionID: String?
@@ -30,6 +31,7 @@ public final class ConversationState {
     public var reportedContextWindow: Int?
     public var configuredContextWindow: Int?
     public var currentContextTokens: Int?
+    public var activeGoal: ConversationGoal?
     public var queuedPromptCount: Int = 0
     public var queuedPromptPreviews: [String] = []
     public var pendingToolApprovals: [ToolApprovalRequest] = []
@@ -123,6 +125,7 @@ public final class ConversationState {
     public func startStreaming(providerID: String? = nil, modelID: String? = nil) {
         runtimePhase = .preparing
         streamingText = ""
+        streamingRevision &+= 1
         error = nil
         currentContextTokens = nil
         activeTurnID = nil
@@ -172,6 +175,7 @@ public final class ConversationState {
         }
         lastRuntimeEventAt = Date()
         streamingText += delta
+        streamingRevision &+= 1
     }
 
     public func finishStreaming(stopReason: String? = nil) {
@@ -179,6 +183,7 @@ public final class ConversationState {
             appendMessage(ConversationMessage(role: .assistant, content: [.text(streamingText)]))
         }
         streamingText = ""
+        streamingRevision &+= 1
 
         if stopReason == "tool_use" {
             if runtimePhase != .cancelling {
@@ -198,6 +203,7 @@ public final class ConversationState {
     public func setError(_ errorMessage: String) {
         error = errorMessage
         streamingText = ""
+        streamingRevision &+= 1
         runtimePhase = .failed
         activeTurnID = nil
         lastRuntimeEventAt = Date()
@@ -305,10 +311,21 @@ public final class ConversationState {
         pendingToolApprovals.removeAll()
     }
 
+    public func updateGoal(_ goal: ConversationGoal) {
+        activeGoal = goal
+        lastRuntimeEventAt = Date()
+    }
+
+    public func clearGoal() {
+        activeGoal = nil
+        lastRuntimeEventAt = Date()
+    }
+
     public func resetConversation() {
         messages.removeAll()
         runtimePhase = .idle
         streamingText = ""
+        streamingRevision &+= 1
         inputText = ""
         error = nil
         sessionID = nil
@@ -325,6 +342,7 @@ public final class ConversationState {
         totalTokens = 0
         reportedContextWindow = nil
         currentContextTokens = nil
+        activeGoal = nil
         queuedPromptCount = 0
         queuedPromptPreviews.removeAll()
         pendingToolApprovals.removeAll()

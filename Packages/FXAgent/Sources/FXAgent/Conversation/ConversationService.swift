@@ -136,6 +136,164 @@ public final class ConversationService {
         await activeRequest.respondToApproval(approvalID, approved)
     }
 
+    @discardableResult
+    public func setGoal(
+        objective: String?,
+        status: ConversationGoalStatus?,
+        tokenBudget: Int? = nil,
+        for conversationState: ConversationState,
+        providerID: String,
+        systemPrompt: String? = nil,
+        agentMode: AgentMode? = nil,
+        agentAccess: AgentAccess? = nil,
+        workingDirectory: URL? = nil,
+        resumeSessionID: String? = nil
+    ) async throws -> ConversationGoal {
+        let controls = try threadControls(for: providerID)
+        let goal = try await controls.setThreadGoal(
+            objective: objective,
+            status: status,
+            tokenBudget: tokenBudget,
+            systemPrompt: systemPrompt,
+            agentMode: agentMode,
+            agentAccess: agentAccess,
+            workingDirectory: workingDirectory,
+            resumeSessionID: resumeSessionID ?? conversationState.sessionID
+        )
+
+        conversationState.registerSession(goal.threadID, modelID: conversationState.activeModelID)
+        conversationState.updateGoal(goal)
+        conversationState.recordRuntimeActivity(
+            kind: .note,
+            tone: goal.status == .active ? .success : .info,
+            summary: Self.goalActivitySummary(for: goal),
+            detail: Self.summarizedRuntimeText(goal.objective),
+            state: goal.status.rawValue,
+            turnID: conversationState.activeTurnID
+        )
+        return goal
+    }
+
+    @discardableResult
+    public func refreshGoal(
+        for conversationState: ConversationState,
+        providerID: String,
+        systemPrompt: String? = nil,
+        agentMode: AgentMode? = nil,
+        agentAccess: AgentAccess? = nil,
+        workingDirectory: URL? = nil,
+        resumeSessionID: String? = nil
+    ) async throws -> ConversationGoal? {
+        let controls = try threadControls(for: providerID)
+        let result = try await controls.getThreadGoal(
+            systemPrompt: systemPrompt,
+            agentMode: agentMode,
+            agentAccess: agentAccess,
+            workingDirectory: workingDirectory,
+            resumeSessionID: resumeSessionID ?? conversationState.sessionID
+        )
+
+        conversationState.registerSession(result.threadID, modelID: conversationState.activeModelID)
+        if let goal = result.goal {
+            conversationState.updateGoal(goal)
+            conversationState.recordRuntimeActivity(
+                kind: .note,
+                tone: .info,
+                summary: "Goal status",
+                detail: "\(goal.status.label) • \(Self.summarizedRuntimeText(goal.objective) ?? goal.objective)",
+                state: goal.status.rawValue,
+                turnID: conversationState.activeTurnID
+            )
+        } else {
+            conversationState.clearGoal()
+            conversationState.recordRuntimeActivity(
+                kind: .note,
+                tone: .info,
+                summary: "No active goal",
+                state: "empty",
+                turnID: conversationState.activeTurnID
+            )
+        }
+        return result.goal
+    }
+
+    public func clearGoal(
+        for conversationState: ConversationState,
+        providerID: String,
+        systemPrompt: String? = nil,
+        agentMode: AgentMode? = nil,
+        agentAccess: AgentAccess? = nil,
+        workingDirectory: URL? = nil,
+        resumeSessionID: String? = nil
+    ) async throws {
+        let controls = try threadControls(for: providerID)
+        let threadID = try await controls.clearThreadGoal(
+            systemPrompt: systemPrompt,
+            agentMode: agentMode,
+            agentAccess: agentAccess,
+            workingDirectory: workingDirectory,
+            resumeSessionID: resumeSessionID ?? conversationState.sessionID
+        )
+
+        conversationState.registerSession(threadID, modelID: conversationState.activeModelID)
+        conversationState.clearGoal()
+        conversationState.recordRuntimeActivity(
+            kind: .note,
+            tone: .info,
+            summary: "Goal cleared",
+            state: "cleared",
+            turnID: conversationState.activeTurnID
+        )
+    }
+
+    public func compactThread(
+        for conversationState: ConversationState,
+        providerID: String,
+        systemPrompt: String? = nil,
+        agentMode: AgentMode? = nil,
+        agentAccess: AgentAccess? = nil,
+        workingDirectory: URL? = nil,
+        resumeSessionID: String? = nil
+    ) async throws {
+        guard activeRequests[conversationState.agentID] == nil else {
+            throw Self.makeError("Wait for the current turn to finish before compacting context.")
+        }
+
+        let controls = try threadControls(for: providerID)
+        conversationState.applyLifecyclePhase(.compacting)
+        conversationState.recordRuntimeActivity(
+            kind: .contextCompaction,
+            tone: .working,
+            summary: "Context compacting",
+            detail: Self.usageDetail(for: conversationState),
+            state: "compacting",
+            turnID: conversationState.activeTurnID
+        )
+
+        do {
+            let threadID = try await controls.compactThread(
+                systemPrompt: systemPrompt,
+                agentMode: agentMode,
+                agentAccess: agentAccess,
+                workingDirectory: workingDirectory,
+                resumeSessionID: resumeSessionID ?? conversationState.sessionID
+            )
+            conversationState.registerSession(threadID, modelID: conversationState.activeModelID)
+            conversationState.applyLifecyclePhase(.idle)
+            conversationState.recordRuntimeActivity(
+                kind: .contextCompaction,
+                tone: .success,
+                summary: "Context compact requested",
+                detail: Self.usageDetail(for: conversationState),
+                state: "requested",
+                turnID: conversationState.activeTurnID
+            )
+        } catch {
+            conversationState.applyLifecyclePhase(.idle)
+            throw error
+        }
+    }
+
     private func start(_ request: PendingRequest, for conversationState: ConversationState) {
         if request.queued {
             conversationState.beginQueuedPrompt()
@@ -306,12 +464,14 @@ public final class ConversationService {
                             state: isError ? "failed" : "completed",
                             turnID: conversationState.activeTurnID
                         )
-                        conversationState.appendMessage(
-                            ConversationMessage(
-                                role: .tool,
-                                content: [.toolResult(id: id, content: content, isError: isError)]
+                        if isError {
+                            conversationState.appendMessage(
+                                ConversationMessage(
+                                    role: .tool,
+                                    content: [.toolResult(id: id, content: content, isError: true)]
+                                )
                             )
-                        )
+                        }
 
                     case .usage(let inputTokens, let outputTokens, let costUSD):
                         conversationState.updateUsage(
@@ -364,6 +524,28 @@ public final class ConversationService {
                             totalTokens: totalTokens,
                             contextWindow: contextWindow
                         )
+
+                    case .goalUpdated(let goal):
+                        if let goal {
+                            conversationState.updateGoal(goal)
+                            conversationState.recordRuntimeActivity(
+                                kind: .note,
+                                tone: goal.status == .active ? .success : .info,
+                                summary: Self.goalActivitySummary(for: goal),
+                                detail: Self.summarizedRuntimeText(goal.objective),
+                                state: goal.status.rawValue,
+                                turnID: conversationState.activeTurnID
+                            )
+                        } else {
+                            conversationState.clearGoal()
+                            conversationState.recordRuntimeActivity(
+                                kind: .note,
+                                tone: .info,
+                                summary: "Goal cleared",
+                                state: "cleared",
+                                turnID: conversationState.activeTurnID
+                            )
+                        }
 
                     case .done(let stopReason):
                         didReceiveCompletion = true
@@ -530,5 +712,40 @@ public final class ConversationService {
         default:
             return "\(count)"
         }
+    }
+
+    private func threadControls(for providerID: String) throws -> any AIProviderThreadControls {
+        guard let provider = registry.provider(for: providerID) else {
+            throw Self.makeError("Provider '\(providerID)' not found. Configure it in Settings.")
+        }
+
+        guard let controls = provider as? any AIProviderThreadControls else {
+            throw Self.makeError("\(provider.displayName) does not support Codex thread controls.")
+        }
+
+        return controls
+    }
+
+    private static func goalActivitySummary(for goal: ConversationGoal) -> String {
+        switch goal.status {
+        case .active:
+            "Goal active"
+        case .paused:
+            "Goal paused"
+        case .blocked:
+            "Goal blocked"
+        case .usageLimited:
+            "Goal usage limited"
+        case .budgetLimited:
+            "Goal budget limited"
+        case .complete:
+            "Goal complete"
+        }
+    }
+
+    private static func makeError(_ message: String) -> NSError {
+        NSError(domain: "ConversationService", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: message,
+        ])
     }
 }
