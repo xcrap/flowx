@@ -25,7 +25,7 @@ struct ProjectRow: View {
         let remainingThreadCount = max(0, matchingAgents.count - visibleAgents.count)
         let matchingArchivedBindings = filteredArchivedBindings
 
-        VStack(alignment: .leading, spacing: FXSpacing.xs) {
+        VStack(alignment: .leading, spacing: 0) {
             // Project header
             HStack(spacing: FXSpacing.xs) {
                 Button(action: { withAnimation(FXAnimation.snappy) { project.isExpanded.toggle() } }) {
@@ -76,8 +76,8 @@ struct ProjectRow: View {
                 }
                 .help("New provider thread")
             }
-            .padding(.horizontal, FXSpacing.md)
-            .padding(.vertical, FXSpacing.xs)
+            .padding(.leading, FXSpacing.md)
+            .padding(.vertical, FXSpacing.xxxs)
             .contextMenu {
                 Button(action: createDefaultThread) {
                     Label("New Thread", systemImage: "plus.bubble")

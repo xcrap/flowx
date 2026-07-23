@@ -110,13 +110,10 @@ struct ThreadRow: View {
         .padding(.vertical, FXSpacing.sm)
         .background(
             RoundedRectangle(cornerRadius: FXRadii.md)
-                .fill(isSelected ? FXColors.bgSelected : (isHovered ? FXColors.bgHover : .clear))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: FXRadii.md)
-                .strokeBorder(
-                    isFocused ? FXColors.accent : (isSelected ? FXColors.border : .clear),
-                    lineWidth: isFocused ? 1 : 0.5
+                .fill(
+                    isSelected
+                        ? FXColors.bgSelected
+                        : ((isHovered || isFocused) ? FXColors.bgHover : .clear)
                 )
         )
         .contentShape(Rectangle())
