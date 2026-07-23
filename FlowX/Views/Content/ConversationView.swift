@@ -1,4 +1,4 @@
-import AppKit
+import Foundation
 import SwiftUI
 import FXAgent
 import FXDesign
@@ -99,8 +99,11 @@ struct ConversationView: View {
     @State private var initialScrollRestorePending = true
     @State private var transcriptPrepared = false
     @State private var renderedItems: [ConversationDisplayItem] = []
+    @State private var scrollPosition = ScrollPosition(idType: String.self)
+    @State private var userScrollInProgress = false
 
     private let maxContentWidth: CGFloat = FXLayout.readableContentWidth
+    private let restoresAtBottom: Bool
     private static let renderExecutor = BoundedTaskExecutor(maxConcurrentTasks: 2)
     private static let renderCache = ConversationRenderCache(
         maximumEntryCount: 6,
@@ -114,6 +117,7 @@ struct ConversationView: View {
 
     init(agent: AgentInfo) {
         self.agent = agent
+        restoresAtBottom = agent.workspace.conversationPinnedToBottom
 
         let key = MessageRenderKey(
             agentID: agent.id,
@@ -200,7 +204,6 @@ struct ConversationView: View {
     private func installRenderedItems(_ items: [ConversationDisplayItem]) {
         renderedItems = items
         if !transcriptPrepared {
-            initialScrollRestorePending = true
             transcriptPrepared = true
         }
     }
@@ -208,58 +211,88 @@ struct ConversationView: View {
     @ViewBuilder
     private var transcriptViewport: some View {
         if transcriptPrepared {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(renderedItems) { item in
-                        displayItemView(for: item)
-                            .id(item.scrollID)
-                            .padding(.bottom, displayItemSpacing(for: item))
-                    }
+            ScrollViewReader { scrollProxy in
+                let transcriptScrollView = ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(renderedItems) { item in
+                            displayItemView(for: item)
+                                .id(item.scrollID)
+                                .padding(.bottom, displayItemSpacing(for: item))
+                        }
 
-                    if !agent.conversationState.streamingText.isEmpty {
-                        MessageBubble(streamingText: agent.conversationState.streamingText)
-                            .id("streaming-message")
-                            .padding(.bottom, FXSpacing.xl)
-                    } else if agent.isTranscriptRunning {
-                        streamingIndicator
-                            .id("streaming-indicator")
-                            .padding(.bottom, FXSpacing.xl)
-                    }
+                        if !agent.conversationState.streamingText.isEmpty {
+                            MessageBubble(streamingText: agent.conversationState.streamingText)
+                                .id("streaming-message")
+                                .padding(.bottom, FXSpacing.xl)
+                        } else if agent.isTranscriptRunning {
+                            streamingIndicator
+                                .id("streaming-indicator")
+                                .padding(.bottom, FXSpacing.xl)
+                        }
 
-                    if let error = agent.conversationState.error {
-                        errorCard(error)
-                            .id("conversation-error")
-                            .padding(.bottom, FXSpacing.xl)
-                    }
+                        if let error = agent.conversationState.error {
+                            errorCard(error)
+                                .id("conversation-error")
+                                .padding(.bottom, FXSpacing.xl)
+                        }
 
-                    Color.clear
-                        .frame(height: 1)
-                        .id(bottomScrollID)
+                        Color.clear
+                            .frame(height: FXSpacing.md + 1)
+                            .id(bottomScrollID)
+                    }
+                    .frame(maxWidth: maxContentWidth)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, FXSpacing.xxl)
+                    .padding(.top, FXSpacing.xxl)
                 }
-                .scrollTargetLayout()
-                .frame(maxWidth: maxContentWidth)
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, FXSpacing.xxl)
-                .padding(.top, FXSpacing.xxl)
-                .padding(.bottom, FXSpacing.md)
-                .background(
-                    ConversationScrollBridge(
-                        restoreKey: agent.id,
-                        desiredOffset: agent.workspace.conversationScrollOffset,
-                        stickToBottom: agent.workspace.conversationPinnedToBottom,
-                        contentVersion: contentVersion
-                    ) { offset, maxOffset in
-                        updateScrollState(offset: offset, maxOffset: maxOffset)
-                    } onInitialRestoreCompleted: {
-                        initialScrollRestorePending = false
+                .scrollContentBackground(.hidden)
+
+                configuredScrollView(transcriptScrollView)
+                .opacity(initialScrollRestorePending ? 0 : 1)
+                .allowsHitTesting(!initialScrollRestorePending)
+                .onScrollPhaseChange { _, newPhase, context in
+                    handleScrollPhaseChange(newPhase, geometry: context.geometry)
+                }
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    ConversationScrollPolicy.metrics(
+                        contentOffsetY: geometry.contentOffset.y,
+                        contentHeight: geometry.contentSize.height,
+                        topInset: geometry.contentInsets.top,
+                        bottomInset: geometry.contentInsets.bottom,
+                        containerHeight: geometry.containerSize.height
+                    ).maxOffset
+                } action: { oldMaxOffset, newMaxOffset in
+                    guard
+                        agent.workspace.conversationPinnedToBottom,
+                        newMaxOffset > oldMaxOffset + 1
+                    else {
+                        return
                     }
-                )
+                    scrollProxy.scrollTo(bottomScrollID, anchor: .bottom)
+                }
+                .onChange(of: contentVersion) { _, _ in
+                    guard agent.workspace.conversationPinnedToBottom else { return }
+                    scrollProxy.scrollTo(bottomScrollID, anchor: .bottom)
+                }
+                .task {
+                    if restoresAtBottom {
+                        await restorePinnedScrollPosition(using: scrollProxy)
+                    } else {
+                        await restoreSavedScrollPosition()
+                    }
+                }
             }
-            .scrollContentBackground(.hidden)
-            .opacity(initialScrollRestorePending ? 0 : 1)
-            .allowsHitTesting(!initialScrollRestorePending)
         } else {
             transcriptLoadingView
+        }
+    }
+
+    @ViewBuilder
+    private func configuredScrollView<Content: View>(_ content: Content) -> some View {
+        if restoresAtBottom {
+            content
+        } else {
+            content.scrollPosition($scrollPosition)
         }
     }
 
@@ -1192,7 +1225,12 @@ struct ConversationView: View {
 
     private func updateScrollState(offset: CGFloat, maxOffset: CGFloat) {
         let normalizedOffset = max(0, min(offset, maxOffset))
-        let pinnedToBottom = maxOffset <= 1 || normalizedOffset >= maxOffset - 24
+        let pinnedToBottom = ConversationScrollPolicy.isPinnedToBottom(
+            ConversationScrollMetrics(
+                offset: normalizedOffset,
+                maxOffset: maxOffset
+            )
+        )
 
         if abs(agent.workspace.conversationScrollOffset - normalizedOffset) > 12 {
             agent.workspace.conversationScrollOffset = normalizedOffset
@@ -1201,6 +1239,84 @@ struct ConversationView: View {
         if agent.workspace.conversationPinnedToBottom != pinnedToBottom {
             agent.workspace.conversationPinnedToBottom = pinnedToBottom
         }
+    }
+
+    private func handleScrollPhaseChange(
+        _ phase: ScrollPhase,
+        geometry: ScrollGeometry
+    ) {
+        switch phase {
+        case .tracking, .interacting, .decelerating:
+            userScrollInProgress = true
+        case .idle:
+            let shouldPersist = ConversationScrollPolicy.shouldPersistUserScroll(
+                initialRestorePending: initialScrollRestorePending,
+                userScrollInProgress: userScrollInProgress
+            )
+            userScrollInProgress = false
+            guard shouldPersist else { return }
+            let metrics = ConversationScrollPolicy.metrics(
+                contentOffsetY: geometry.contentOffset.y,
+                contentHeight: geometry.contentSize.height,
+                topInset: geometry.contentInsets.top,
+                bottomInset: geometry.contentInsets.bottom,
+                containerHeight: geometry.containerSize.height
+            )
+            updateScrollState(offset: metrics.offset, maxOffset: metrics.maxOffset)
+        case .animating:
+            break
+        }
+    }
+
+    private func restorePinnedScrollPosition(using scrollProxy: ScrollViewProxy) async {
+        await Task.yield()
+        guard !Task.isCancelled else { return }
+
+        scrollProxy.scrollTo(bottomScrollID, anchor: .bottom)
+        do {
+            try await Task.sleep(for: .milliseconds(32))
+        } catch {
+            return
+        }
+        guard !Task.isCancelled else { return }
+
+        scrollProxy.scrollTo(bottomScrollID, anchor: .bottom)
+        initialScrollRestorePending = false
+
+        do {
+            try await Task.sleep(for: .milliseconds(120))
+        } catch {
+            return
+        }
+        guard
+            !Task.isCancelled,
+            agent.workspace.conversationPinnedToBottom
+        else {
+            return
+        }
+        scrollProxy.scrollTo(bottomScrollID, anchor: .bottom)
+    }
+
+    private func restoreSavedScrollPosition() async {
+        let desiredOffset = max(0, agent.workspace.conversationScrollOffset)
+
+        await Task.yield()
+        guard !Task.isCancelled else { return }
+
+        scrollPosition.scrollTo(y: desiredOffset)
+        do {
+            try await Task.sleep(for: .milliseconds(32))
+        } catch {
+            return
+        }
+        guard !Task.isCancelled else { return }
+
+        scrollPosition.scrollTo(y: desiredOffset)
+        initialScrollRestorePending = false
+        await Task.yield()
+        guard !Task.isCancelled else { return }
+
+        scrollPosition = ScrollPosition(idType: String.self)
     }
 
     private func formatTokenCount(_ count: Int) -> String {
@@ -1218,387 +1334,6 @@ struct ConversationView: View {
 
     private func formatExactTokenCount(_ count: Int) -> String {
         Self.exactTokenFormatter.string(from: NSNumber(value: count)) ?? "\(count)"
-    }
-}
-
-private struct ConversationScrollBridge: NSViewRepresentable {
-    var restoreKey: UUID
-    var desiredOffset: CGFloat
-    var stickToBottom: Bool
-    var contentVersion: Int
-    var onScrollChange: (CGFloat, CGFloat) -> Void
-    var onInitialRestoreCompleted: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onScrollChange: onScrollChange)
-    }
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        DispatchQueue.main.async {
-            context.coordinator.attachIfNeeded(to: view)
-            context.coordinator.prepareForRestore(restoreKey)
-            context.coordinator.scheduleInitialRestore(
-                for: restoreKey,
-                desiredOffset: desiredOffset,
-                stickToBottom: stickToBottom,
-                onInitialRestoreCompleted: onInitialRestoreCompleted
-            )
-        }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        context.coordinator.onScrollChange = onScrollChange
-        context.coordinator.attachIfNeeded(to: nsView)
-        context.coordinator.prepareForRestore(restoreKey)
-        if context.coordinator.hasCompletedInitialRestore {
-            context.coordinator.updateScrollIntent(
-                desiredOffset: desiredOffset,
-                stickToBottom: stickToBottom,
-                contentVersion: contentVersion
-            )
-        } else {
-            context.coordinator.scheduleInitialRestore(
-                for: restoreKey,
-                desiredOffset: desiredOffset,
-                stickToBottom: stickToBottom,
-                onInitialRestoreCompleted: onInitialRestoreCompleted
-            )
-        }
-    }
-
-    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        coordinator.detach()
-    }
-
-    @MainActor
-    final class Coordinator: NSObject {
-        var onScrollChange: (CGFloat, CGFloat) -> Void
-
-        private weak var scrollView: NSScrollView?
-        private weak var clipView: NSClipView?
-        private weak var documentView: NSView?
-        private weak var anchorView: NSView?
-        private var observingScrollBounds = false
-        private var observingDocumentFrame = false
-        private var documentPostedFrameChangesBeforeObservation = false
-        private var isApplyingProgrammaticScroll = false
-        private var activeRestoreKey: UUID?
-        private var pendingInitialRestore = false
-        private var pendingLayoutScroll = false
-        private var scrollReportTask: Task<Void, Never>?
-        private var viewportResizeTask: Task<Void, Never>?
-        private var documentReflowTask: Task<Void, Never>?
-        private var initialRestoreTask: Task<Void, Never>?
-        private var desiredOffset: CGFloat = 0
-        private var stickToBottom = true
-        private var lastContentVersion: Int?
-        private var lastClipHeight: CGFloat?
-        private var lastDocumentHeight: CGFloat?
-        fileprivate var hasCompletedInitialRestore = false
-
-        init(onScrollChange: @escaping (CGFloat, CGFloat) -> Void) {
-            self.onScrollChange = onScrollChange
-        }
-
-        func prepareForRestore(_ restoreKey: UUID) {
-            guard activeRestoreKey != restoreKey else { return }
-            activeRestoreKey = restoreKey
-            documentReflowTask?.cancel()
-            initialRestoreTask?.cancel()
-            pendingInitialRestore = false
-            hasCompletedInitialRestore = false
-            lastContentVersion = nil
-            lastDocumentHeight = documentView?.frame.height
-        }
-
-        func attachIfNeeded(to view: NSView) {
-            anchorView = view
-            guard let enclosingScrollView = enclosingScrollView(from: view) else { return }
-            if let scrollView {
-                if scrollView === enclosingScrollView {
-                    attachDocumentFrameObserverIfNeeded(to: scrollView.documentView)
-                    return
-                }
-                detach()
-                anchorView = view
-            }
-
-            self.scrollView = enclosingScrollView
-            clipView = enclosingScrollView.contentView
-            lastClipHeight = enclosingScrollView.contentView.bounds.height
-            enclosingScrollView.contentView.postsBoundsChangedNotifications = true
-
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(handleScrollBoundsDidChange),
-                name: NSView.boundsDidChangeNotification,
-                object: enclosingScrollView.contentView
-            )
-            observingScrollBounds = true
-            attachDocumentFrameObserverIfNeeded(to: enclosingScrollView.documentView)
-        }
-
-        func detach() {
-            if observingScrollBounds {
-                NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification, object: clipView)
-            }
-            detachDocumentFrameObserver()
-            scrollReportTask?.cancel()
-            viewportResizeTask?.cancel()
-            documentReflowTask?.cancel()
-            initialRestoreTask?.cancel()
-            observingScrollBounds = false
-            scrollView = nil
-            clipView = nil
-            anchorView = nil
-            lastClipHeight = nil
-        }
-
-        func updateScrollIntent(desiredOffset: CGFloat, stickToBottom: Bool, contentVersion: Int) {
-            self.desiredOffset = desiredOffset
-            let becamePinned = stickToBottom && !self.stickToBottom
-            self.stickToBottom = stickToBottom
-
-            let didChangeContent = lastContentVersion != contentVersion
-            lastContentVersion = contentVersion
-
-            if stickToBottom, becamePinned || didChangeContent {
-                scheduleLayoutScroll()
-            }
-        }
-
-        func scheduleInitialRestore(
-            for restoreKey: UUID,
-            desiredOffset: CGFloat,
-            stickToBottom: Bool,
-            onInitialRestoreCompleted: @escaping () -> Void
-        ) {
-            guard activeRestoreKey == restoreKey, !pendingInitialRestore, !hasCompletedInitialRestore else { return }
-            pendingInitialRestore = true
-            self.desiredOffset = desiredOffset
-            self.stickToBottom = stickToBottom
-
-            initialRestoreTask?.cancel()
-            initialRestoreTask = Task { @MainActor [weak self] in
-                guard let self else { return }
-
-                for _ in 0..<12 {
-                    guard !Task.isCancelled, self.activeRestoreKey == restoreKey else { return }
-                    if let anchorView = self.anchorView {
-                        self.attachIfNeeded(to: anchorView)
-                    }
-
-                    if self.scrollView != nil, self.clipView != nil {
-                        self.applyScrollPosition(
-                            desiredOffset: desiredOffset,
-                            stickToBottom: stickToBottom
-                        )
-                        await Task.yield()
-                        guard !Task.isCancelled, self.activeRestoreKey == restoreKey else { return }
-                        self.applyScrollPosition(
-                            desiredOffset: desiredOffset,
-                            stickToBottom: stickToBottom
-                        )
-                        self.finishInitialRestore(onInitialRestoreCompleted)
-                        return
-                    }
-
-                    do {
-                        try await Task.sleep(for: .milliseconds(10))
-                    } catch {
-                        return
-                    }
-                }
-
-                // Never leave the task invisible because AppKit attachment lagged.
-                // A later content/layout update still applies the pinned scroll intent.
-                self.finishInitialRestore(onInitialRestoreCompleted)
-            }
-        }
-
-        private func finishInitialRestore(_ onInitialRestoreCompleted: @escaping () -> Void) {
-            guard !hasCompletedInitialRestore else { return }
-            pendingInitialRestore = false
-            hasCompletedInitialRestore = true
-            onInitialRestoreCompleted()
-        }
-
-        func applyScrollPosition(desiredOffset: CGFloat, stickToBottom: Bool) {
-            guard let scrollView, let clipView else { return }
-            let maxOffset = maximumOffset(for: scrollView)
-            let targetOffset = stickToBottom ? maxOffset : max(0, min(desiredOffset, maxOffset))
-
-            guard abs(clipView.bounds.origin.y - targetOffset) > 1 else { return }
-
-            isApplyingProgrammaticScroll = true
-            clipView.setBoundsOrigin(NSPoint(x: 0, y: targetOffset))
-            scrollView.reflectScrolledClipView(clipView)
-            isApplyingProgrammaticScroll = false
-        }
-
-        @objc
-        private func handleScrollBoundsDidChange() {
-            guard !isApplyingProgrammaticScroll else { return }
-
-            let currentClipHeight = clipView?.bounds.height ?? 0
-            let didResizeViewport = lastClipHeight.map { abs($0 - currentClipHeight) > 0.5 } ?? false
-            lastClipHeight = currentClipHeight
-
-            if didResizeViewport {
-                if stickToBottom {
-                    scheduleViewportResizeAdjustment()
-                } else {
-                    scheduleScrollReport()
-                }
-                return
-            }
-
-            scheduleScrollReport()
-        }
-
-        @objc
-        private func handleDocumentFrameDidChange() {
-            guard let documentView else { return }
-            let documentHeight = documentView.frame.height
-            defer { lastDocumentHeight = documentHeight }
-
-            guard lastDocumentHeight.map({ abs($0 - documentHeight) > 0.5 }) ?? true else { return }
-            guard stickToBottom || pendingInitialRestore || !hasCompletedInitialRestore else { return }
-            scheduleDocumentReflowAdjustment()
-        }
-
-        private func scheduleLayoutScroll() {
-            guard !pendingLayoutScroll else { return }
-            pendingLayoutScroll = true
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.applyScrollPosition(desiredOffset: self.desiredOffset, stickToBottom: self.stickToBottom)
-
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.pendingLayoutScroll = false
-                    self.applyScrollPosition(desiredOffset: self.desiredOffset, stickToBottom: self.stickToBottom)
-                }
-            }
-        }
-
-        private func scheduleViewportResizeAdjustment() {
-            guard stickToBottom else { return }
-            viewportResizeTask?.cancel()
-            viewportResizeTask = Task { @MainActor [weak self] in
-                do {
-                    try await Task.sleep(for: .milliseconds(90))
-                } catch {
-                    return
-                }
-                guard let self else { return }
-                self.applyScrollPosition(
-                    desiredOffset: self.desiredOffset,
-                    stickToBottom: self.stickToBottom
-                )
-            }
-        }
-
-        private func scheduleDocumentReflowAdjustment() {
-            let restoreKey = activeRestoreKey
-            documentReflowTask?.cancel()
-            documentReflowTask = Task { @MainActor [weak self] in
-                do {
-                    try await Task.sleep(for: .milliseconds(75))
-                } catch {
-                    return
-                }
-                guard let self, self.activeRestoreKey == restoreKey else { return }
-                guard self.stickToBottom || self.pendingInitialRestore || !self.hasCompletedInitialRestore else {
-                    return
-                }
-                self.applyScrollPosition(
-                    desiredOffset: self.desiredOffset,
-                    stickToBottom: self.stickToBottom
-                )
-            }
-        }
-
-        private func scheduleScrollReport() {
-            scrollReportTask?.cancel()
-            scrollReportTask = Task { @MainActor [weak self] in
-                do {
-                    try await Task.sleep(for: .milliseconds(140))
-                } catch {
-                    return
-                }
-                self?.reportScrollPosition()
-            }
-        }
-
-        private func reportScrollPosition() {
-            guard let scrollView, let clipView else { return }
-            let maxOffset = maximumOffset(for: scrollView)
-            let offset = max(0, min(clipView.bounds.origin.y, maxOffset))
-            lastClipHeight = clipView.bounds.height
-            onScrollChange(offset, maxOffset)
-        }
-
-        private func attachDocumentFrameObserverIfNeeded(to candidate: NSView?) {
-            guard let candidate else {
-                detachDocumentFrameObserver()
-                return
-            }
-            if let documentView, documentView === candidate {
-                return
-            }
-
-            detachDocumentFrameObserver()
-            documentView = candidate
-            lastDocumentHeight = candidate.frame.height
-            documentPostedFrameChangesBeforeObservation = candidate.postsFrameChangedNotifications
-            candidate.postsFrameChangedNotifications = true
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(handleDocumentFrameDidChange),
-                name: NSView.frameDidChangeNotification,
-                object: candidate
-            )
-            observingDocumentFrame = true
-        }
-
-        private func detachDocumentFrameObserver() {
-            guard observingDocumentFrame else {
-                documentView = nil
-                lastDocumentHeight = nil
-                return
-            }
-            if let documentView {
-                NotificationCenter.default.removeObserver(
-                    self,
-                    name: NSView.frameDidChangeNotification,
-                    object: documentView
-                )
-                documentView.postsFrameChangedNotifications = documentPostedFrameChangesBeforeObservation
-            }
-            observingDocumentFrame = false
-            documentView = nil
-            lastDocumentHeight = nil
-        }
-
-        private func maximumOffset(for scrollView: NSScrollView) -> CGFloat {
-            guard let documentView = scrollView.documentView else { return 0 }
-            return max(0, documentView.frame.height - scrollView.contentView.bounds.height)
-        }
-
-        private func enclosingScrollView(from view: NSView) -> NSScrollView? {
-            var current: NSView? = view
-            while let candidate = current {
-                if let scrollView = candidate.enclosingScrollView {
-                    return scrollView
-                }
-                current = candidate.superview
-            }
-            return nil
-        }
     }
 }
 
