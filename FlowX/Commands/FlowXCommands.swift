@@ -1,10 +1,26 @@
+import AppKit
 import SwiftUI
 import FXDesign
+import FXTerminal
 
 struct FlowXCommands: Commands {
     let appState: AppState
 
     var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("Add Project…") {
+                appState.openAddProjectPanel()
+            }
+            .keyboardShortcut("o", modifiers: .command)
+
+            Button("New Thread") {
+                guard let project = appState.activeProject, hasUsableProvider else { return }
+                _ = appState.addAgent(to: project, title: "New Thread")
+            }
+            .keyboardShortcut("n", modifiers: .command)
+            .disabled(appState.activeProject == nil || !hasUsableProvider)
+        }
+
         CommandGroup(after: .sidebar) {
             Button("Command Palette…") {
                 withAnimation(FXAnimation.panel) {
@@ -24,6 +40,7 @@ struct FlowXCommands: Commands {
                 appState.toggleGitPanel()
             }
             .keyboardShortcut("g", modifiers: .command)
+            .disabled(!appState.activeProjectCanShowGitPanel)
 
             Button("Toggle Terminal") {
                 withAnimation(FXAnimation.panel) {
@@ -31,32 +48,146 @@ struct FlowXCommands: Commands {
                 }
             }
             .keyboardShortcut("t", modifiers: .command)
+            .disabled(appState.activeAgent == nil)
 
             Button("Toggle Browser Preview") {
                 appState.toggleBrowserPreview()
             }
             .keyboardShortcut("p", modifiers: .command)
+            .disabled(appState.activeAgent == nil)
 
             Button("Settings") {
                 withAnimation(FXAnimation.panel) {
-                    appState.settingsVisible.toggle()
+                    appState.settingsVisible = true
                 }
             }
             .keyboardShortcut(",", modifiers: .command)
         }
 
-        CommandMenu("Agents") {
+        CommandMenu("Conversation") {
+            Button(activeAgent?.isStreaming == true ? "Queue Prompt" : "Send Prompt") {
+                guard let agent = activeAgent else { return }
+                appState.sendPrompt(for: agent)
+            }
+            .keyboardShortcut(.return, modifiers: .command)
+            .disabled(!hasSendableDraft)
+
+            Button("Attach Images…") {
+                guard let agent = activeAgent else { return }
+                appState.attachFiles(to: agent)
+            }
+            .keyboardShortcut("a", modifiers: [.command, .shift])
+            .disabled(activeAgent == nil || !activeModelSupportsVision)
+
+            if activeAgent?.isStreaming == true {
+                Divider()
+
+                Button("Stop Current Run") {
+                    guard let agent = activeAgent else { return }
+                    appState.cancelPrompt(for: agent)
+                }
+                .keyboardShortcut(".", modifiers: .command)
+            }
+
+            Divider()
+
+            Button("Reset Conversation") {
+                guard let agent = activeAgent else { return }
+                appState.resetConversation(for: agent)
+            }
+            .disabled(activeAgent == nil || activeAgent?.isStreaming == true)
+        }
+
+        CommandMenu("Terminal") {
+            Button("Add Terminal Split") {
+                activeAgent?.addTerminalPane()
+            }
+            .keyboardShortcut("t", modifiers: [.command, .shift])
+            .disabled(activeAgent == nil || (activeAgent?.terminalPaneCount ?? 3) >= 3)
+
+            Button("Clear All Terminals") {
+                for session in activeAgent?.visibleTerminalSessions ?? [] where session.isRunning {
+                    session.clearScreen()
+                }
+            }
+            .disabled(runningTerminalSessions.isEmpty)
+
+            Button("Interrupt Running Terminals") {
+                for session in runningTerminalSessions {
+                    session.interrupt()
+                }
+            }
+            .disabled(runningTerminalSessions.isEmpty)
+
+            Button("Restart Exited Terminals") {
+                for session in activeAgent?.visibleTerminalSessions ?? [] where !session.isRunning && session.lastExitCode != nil {
+                    session.restart()
+                }
+            }
+            .disabled(exitedTerminalSessions.isEmpty)
+        }
+
+        CommandMenu("Threads") {
             if let project = appState.activeProject, !project.agents.isEmpty {
                 ForEach(Array(project.agents.prefix(9).enumerated()), id: \.element.id) { index, agent in
-                    Button("Select \(agent.title)") {
+                    Button("Open \(agent.title)") {
                         appState.activateAgent(agent.id, in: project.id)
                     }
                     .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
                 }
             } else {
-                Button("No Agents Available") {}
+                Button("No Threads Available") {}
                     .disabled(true)
             }
+        }
+
+        CommandGroup(after: .saveItem) {
+            if let project = appState.activeProject {
+                Button("Show Project in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([project.project.rootURL])
+                }
+
+                Button("Copy Project Path") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(project.project.rootPath, forType: .string)
+                }
+            }
+        }
+    }
+
+    private var activeAgent: AgentInfo? {
+        appState.activeAgent
+    }
+
+    private var hasSendableDraft: Bool {
+        guard let activeAgent else { return false }
+        return !activeAgent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !activeAgent.conversationState.pendingAttachments.isEmpty
+    }
+
+    private var activeModelSupportsVision: Bool {
+        guard let activeAgent,
+              let provider = appState.providerRegistry.provider(for: activeAgent.providerID) else {
+            return false
+        }
+        guard let selectedModelID = activeAgent.explicitModelID ?? activeAgent.nativeModelID,
+              let model = provider.availableModels.first(where: { $0.id == selectedModelID }) else {
+            return provider.capabilities.supportedAttachments.contains(.image)
+        }
+        return model.supportsVision
+    }
+
+    private var runningTerminalSessions: [TerminalSession] {
+        activeAgent?.visibleTerminalSessions.filter(\.isRunning) ?? []
+    }
+
+    private var exitedTerminalSessions: [TerminalSession] {
+        activeAgent?.visibleTerminalSessions.filter { !$0.isRunning && $0.lastExitCode != nil } ?? []
+    }
+
+    private var hasUsableProvider: Bool {
+        appState.providerRegistry.allProviders.contains { provider in
+            appState.runtimeHealth[provider.id]?.isUsable == true && !provider.availableModels.isEmpty
         }
     }
 }

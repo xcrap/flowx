@@ -162,7 +162,7 @@ struct MainLayout: View {
 
     private func rightPanelWidthBounds(in totalWidth: CGFloat) -> ClosedRange<CGFloat> {
         let reservedSidebarWidth: CGFloat = appState.sidebarVisible ? 260 : 0
-        let minimumContentWidth: CGFloat = 300
+        let minimumContentWidth: CGFloat = 420
         let maximumVisibleWidth = min(
             FlowXLayoutDefaults.maxRightPanelWidth,
             max(0, totalWidth - reservedSidebarWidth - minimumContentWidth)
@@ -175,7 +175,7 @@ struct MainLayout: View {
         ZStack {
             DragHandle()
 
-            // Center: project / agent / branch — truly centered
+            // Center: project / provider thread / branch — truly centered
             if let agent = appState.activeAgent, let project = appState.activeProject {
                 HStack(spacing: FXSpacing.sm) {
                     Text(project.project.name)
@@ -186,7 +186,7 @@ struct MainLayout: View {
                         metadataSeparator
 
                         Image(systemName: "arrow.triangle.branch")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(FXTypography.icon(.small))
                             .foregroundStyle(FXColors.fgSecondary)
 
                         Text(agent.branch)
@@ -196,13 +196,19 @@ struct MainLayout: View {
 
                     metadataSeparator
 
-                    Image(systemName: "person.crop.circle")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(FXColors.fgSecondary)
+                    FXBadge(
+                        agent.providerName.uppercased(),
+                        tone: agent.providerID == "claude" ? .accentSecondary : .accent
+                    )
 
-                    Text(agent.title)
+                    Text(agent.nativeThreadBinding?.title ?? agent.title)
                         .font(FXTypography.bodyMedium)
                         .foregroundStyle(FXColors.fg)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 260)
+                        .help(agent.nativeThreadBinding?.title ?? agent.title)
+                        .accessibilityLabel("Thread: \(agent.nativeThreadBinding?.title ?? agent.title)")
 
                     if agent.additions > 0 || agent.deletions > 0 {
                         metadataSeparator
@@ -301,7 +307,7 @@ struct MainLayout: View {
     private func headerButton(icon: String, label: String, active: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 13, weight: .medium))
+                .font(FXTypography.icon(.control))
                 .foregroundStyle(active ? FXColors.accent : FXColors.fgTertiary)
                 .frame(width: 40, height: 40)
                 .contentShape(Rectangle())
@@ -317,19 +323,39 @@ private struct CommandPaletteView: View {
 
     @FocusState private var searchFocused: Bool
     @State private var query = ""
+    @State private var selectedActionID: String?
 
     private struct PaletteAction: Identifiable {
-        let id = UUID()
+        let id: String
         let title: String
         let subtitle: String
         let systemImage: String
         let keywords: [String]
+        let shortcut: String?
         let perform: () -> Void
+
+        init(
+            id: String? = nil,
+            title: String,
+            subtitle: String,
+            systemImage: String,
+            keywords: [String],
+            shortcut: String? = nil,
+            perform: @escaping () -> Void
+        ) {
+            self.id = id ?? "action:\(title)|\(systemImage)"
+            self.title = title
+            self.subtitle = subtitle
+            self.systemImage = systemImage
+            self.keywords = keywords
+            self.shortcut = shortcut
+            self.perform = perform
+        }
     }
 
     var body: some View {
         ZStack(alignment: .top) {
-            Color.black.opacity(0.34)
+            FXColors.overlay
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
                 .onTapGesture(perform: dismiss)
@@ -346,20 +372,25 @@ private struct CommandPaletteView: View {
                 RoundedRectangle(cornerRadius: FXRadii.xxl)
                     .strokeBorder(FXColors.borderMedium, lineWidth: 0.5)
             )
-            .shadow(color: .black.opacity(0.35), radius: 28, y: 16)
+            .shadow(color: FXColors.overlay, radius: 28, y: 16)
             .padding(.top, 84)
         }
         .onAppear {
             query = ""
+            selectedActionID = actions.first?.id
             searchFocused = true
         }
+        .onChange(of: query) { _, _ in
+            selectedActionID = filteredActions.first?.id
+        }
+        .onMoveCommand(perform: moveSelection)
         .onExitCommand(perform: dismiss)
     }
 
     private var searchField: some View {
         HStack(spacing: FXSpacing.sm) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .medium))
+                .font(FXTypography.icon(.medium))
                 .foregroundStyle(FXColors.fgTertiary)
 
             TextField("Search actions", text: $query)
@@ -369,8 +400,8 @@ private struct CommandPaletteView: View {
                 .focused($searchFocused)
                 .accessibilityLabel("Command palette search")
                 .onSubmit {
-                    if let first = filteredActions.first {
-                        run(first)
+                    if let selected = selectedAction {
+                        run(selected)
                     }
                 }
 
@@ -392,11 +423,11 @@ private struct CommandPaletteView: View {
 
     private var actionList: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: FXSpacing.xxs) {
+            LazyVStack(alignment: .leading, spacing: FXSpacing.xxs) {
                 if filteredActions.isEmpty {
                     VStack(spacing: FXSpacing.sm) {
                         Image(systemName: "sparkle.magnifyingglass")
-                            .font(.system(size: 18, weight: .medium))
+                            .font(FXTypography.icon(.large))
                             .foregroundStyle(FXColors.fgTertiary)
 
                         Text("No matching actions")
@@ -410,7 +441,7 @@ private struct CommandPaletteView: View {
                         Button(action: { run(action) }) {
                             HStack(spacing: FXSpacing.md) {
                                 Image(systemName: action.systemImage)
-                                    .font(.system(size: 13, weight: .medium))
+                                    .font(FXTypography.icon(.control))
                                     .foregroundStyle(FXColors.accent)
                                     .frame(width: 20)
 
@@ -425,14 +456,28 @@ private struct CommandPaletteView: View {
                                         .foregroundStyle(FXColors.fgTertiary)
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                 }
+
+                                if let shortcut = action.shortcut {
+                                    Text(shortcut)
+                                        .font(FXTypography.monoSmall)
+                                        .foregroundStyle(FXColors.fgTertiary)
+                                        .padding(.horizontal, FXSpacing.xs)
+                                        .padding(.vertical, FXSpacing.xxxs)
+                                        .background(FXColors.bgElevated)
+                                        .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
+                                }
                             }
                             .padding(.horizontal, FXSpacing.lg)
                             .padding(.vertical, FXSpacing.md)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(FXColors.bgSurface.opacity(0.45))
+                            .background(selectedActionID == action.id ? FXColors.bgSelected : FXColors.bgSurface.opacity(0.45))
                             .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
                         }
                         .buttonStyle(.plain)
+                        .onHover { hovering in
+                            if hovering { selectedActionID = action.id }
+                        }
+                        .accessibilityValue(selectedActionID == action.id ? "Selected" : "")
                     }
                 }
             }
@@ -453,13 +498,18 @@ private struct CommandPaletteView: View {
         }
     }
 
+    private var selectedAction: PaletteAction? {
+        filteredActions.first(where: { $0.id == selectedActionID }) ?? filteredActions.first
+    }
+
     private var actions: [PaletteAction] {
         var items: [PaletteAction] = [
             PaletteAction(
                 title: "Add Project",
                 subtitle: "Open a folder and add it to the sidebar",
                 systemImage: "folder.badge.plus",
-                keywords: ["repo", "project", "folder", "open"]
+                keywords: ["repo", "project", "folder", "open"],
+                shortcut: "⌘O"
             ) {
                 appState.openAddProjectPanel()
             },
@@ -467,7 +517,8 @@ private struct CommandPaletteView: View {
                 title: appState.sidebarVisible ? "Hide Sidebar" : "Show Sidebar",
                 subtitle: "Toggle the left project sidebar",
                 systemImage: "sidebar.left",
-                keywords: ["sidebar", "navigation", "left"]
+                keywords: ["sidebar", "navigation", "left"],
+                shortcut: "⌘B"
             ) {
                 withAnimation(FXAnimation.panel) {
                     appState.sidebarVisible.toggle()
@@ -477,7 +528,8 @@ private struct CommandPaletteView: View {
                 title: appState.rightPanelVisible ? "Hide Git Panel" : "Show Git Panel",
                 subtitle: "Toggle the right git panel",
                 systemImage: "sidebar.right",
-                keywords: ["git", "changes", "diff", "right panel"]
+                keywords: ["git", "changes", "diff", "right panel"],
+                shortcut: "⌘G"
             ) {
                 appState.toggleGitPanel()
             },
@@ -485,7 +537,8 @@ private struct CommandPaletteView: View {
                 title: appState.settingsVisible ? "Hide Settings" : "Show Settings",
                 subtitle: "Open the settings panel",
                 systemImage: "gearshape",
-                keywords: ["settings", "preferences", "config"]
+                keywords: ["settings", "preferences", "config"],
+                shortcut: "⌘,"
             ) {
                 withAnimation(FXAnimation.panel) {
                     appState.settingsVisible.toggle()
@@ -494,12 +547,82 @@ private struct CommandPaletteView: View {
         ]
 
         if let agent = appState.activeAgent {
+            let hasDraft = !agent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !agent.conversationState.pendingAttachments.isEmpty
+            let selectedModelID = agent.explicitModelID ?? agent.nativeModelID
+            let currentModel = selectedModelID.flatMap { modelID in
+                appState.providerRegistry
+                    .provider(for: agent.providerID)?
+                    .availableModels
+                    .first(where: { $0.id == modelID })
+            }
+
+            if hasDraft {
+                items.append(
+                    PaletteAction(
+                        title: agent.isStreaming ? "Queue Prompt" : "Send Prompt",
+                        subtitle: agent.isStreaming ? "Add the current draft after this run" : "Run the current composer draft",
+                        systemImage: agent.isStreaming ? "plus.circle.fill" : "arrow.up.circle.fill",
+                        keywords: ["send", "queue", "prompt", "run"],
+                        shortcut: "⌘↩"
+                    ) {
+                        appState.sendPrompt(for: agent)
+                    }
+                )
+            }
+
+            if agent.isStreaming {
+                items.append(
+                    PaletteAction(
+                        title: "Stop Current Run",
+                        subtitle: "Interrupt the active provider turn",
+                        systemImage: "stop.circle.fill",
+                        keywords: ["stop", "cancel", "interrupt"],
+                        shortcut: "⌘."
+                    ) {
+                        appState.cancelPrompt(for: agent)
+                    }
+                )
+            } else {
+                items.append(
+                    PaletteAction(
+                        title: "Reset Conversation",
+                        subtitle: "Clear messages and start a new provider session",
+                        systemImage: "arrow.counterclockwise",
+                        keywords: ["reset", "clear", "conversation", "session"]
+                    ) {
+                        appState.resetConversation(for: agent)
+                    }
+                )
+            }
+
+            let supportsImages = currentModel?.supportsVision
+                ?? appState.providerRegistry
+                    .provider(for: agent.providerID)?
+                    .capabilities.supportedAttachments.contains(.image)
+                ?? false
+
+            if supportsImages {
+                items.append(
+                    PaletteAction(
+                        title: "Attach Images",
+                        subtitle: "Choose images for the current prompt",
+                        systemImage: "paperclip",
+                        keywords: ["attach", "image", "photo", "vision"],
+                        shortcut: "⇧⌘A"
+                    ) {
+                        appState.attachFiles(to: agent)
+                    }
+                )
+            }
+
             items.append(
                 PaletteAction(
                     title: agent.workspace.terminalVisible ? "Hide Terminal" : "Show Terminal",
                     subtitle: "Toggle the bottom terminal area",
                     systemImage: "terminal",
-                    keywords: ["terminal", "console", "shell"]
+                    keywords: ["terminal", "console", "shell"],
+                    shortcut: "⌘T"
                 ) {
                     withAnimation(FXAnimation.panel) {
                         agent.workspace.terminalVisible.toggle()
@@ -512,47 +635,82 @@ private struct CommandPaletteView: View {
                     title: (agent.workspace.splitOpen && agent.workspace.splitContent == .browser) ? "Close Browser Split" : "Open Browser Split",
                     subtitle: "Toggle the browser in the split pane",
                     systemImage: "globe",
-                    keywords: ["browser", "preview", "web"]
+                    keywords: ["browser", "preview", "web"],
+                    shortcut: "⌘P"
                 ) {
                     appState.toggleBrowserPreview()
                 }
             )
-        }
 
-        if let project = appState.activeProject {
-            items.append(
-                PaletteAction(
-                    title: "New Agent",
-                    subtitle: "Create another agent in \(project.project.name)",
-                    systemImage: "plus.circle",
-                    keywords: ["agent", "create", "new"]
-                ) {
-                    _ = appState.addAgent(to: project)
-                }
-            )
-
-            if appState.activeProjectCanShowGitPanel {
+            if agent.terminalPaneCount < 3 {
                 items.append(
                     PaletteAction(
-                        title: "Show Git Panel",
-                        subtitle: "Inspect current git changes",
-                        systemImage: "arrow.triangle.branch",
-                    keywords: ["changes", "git", "diff", "inspector"]
+                        title: "Add Terminal Split",
+                        subtitle: "Open another terminal pane in this workspace",
+                        systemImage: "rectangle.split.3x1",
+                        keywords: ["terminal", "split", "shell"],
+                        shortcut: "⇧⌘T"
                     ) {
-                        if !appState.rightPanelVisible {
-                            appState.toggleGitPanel()
+                        agent.addTerminalPane()
+                    }
+                )
+            }
+
+            if agent.visibleTerminalSessions.contains(where: \.isRunning) {
+                items.append(
+                    PaletteAction(
+                        title: "Clear All Terminals",
+                        subtitle: "Clear every running terminal pane",
+                        systemImage: "eraser",
+                        keywords: ["terminal", "clear", "shell"]
+                    ) {
+                        for session in agent.visibleTerminalSessions where session.isRunning {
+                            session.clearScreen()
                         }
                     }
                 )
             }
 
-            for agent in project.agents {
+            if agent.visibleTerminalSessions.contains(where: { !$0.isRunning }) {
                 items.append(
                     PaletteAction(
-                        title: "Switch to \(agent.title)",
-                        subtitle: "Focus this agent conversation",
+                        title: "Restart Stopped Terminals",
+                        subtitle: "Restart every stopped terminal pane",
+                        systemImage: "arrow.clockwise",
+                        keywords: ["terminal", "restart", "shell"]
+                    ) {
+                        for session in agent.visibleTerminalSessions where !session.isRunning {
+                            session.restart()
+                        }
+                    }
+                )
+            }
+        }
+
+        if let project = appState.activeProject {
+            if hasUsableProvider {
+                items.append(
+                    PaletteAction(
+                        title: "New Thread",
+                        subtitle: "Start a provider-native thread in \(project.project.name)",
+                        systemImage: "plus.circle",
+                        keywords: ["thread", "conversation", "provider", "create", "new"],
+                        shortcut: "⌘N"
+                    ) {
+                        _ = appState.addAgent(to: project, title: "New Thread")
+                    }
+                )
+            }
+
+            for agent in project.agents {
+                let threadTitle = agent.nativeThreadBinding?.title ?? agent.title
+                items.append(
+                    PaletteAction(
+                        id: threadPaletteActionID(for: agent),
+                        title: "Open \(threadTitle)",
+                        subtitle: "Focus this provider thread",
                         systemImage: "person.crop.circle",
-                        keywords: ["switch", "agent", agent.title.lowercased()]
+                        keywords: ["switch", "thread", "provider", agent.providerID, threadTitle.lowercased()]
                     ) {
                         appState.activateAgent(agent.id, in: project.id)
                     }
@@ -563,9 +721,37 @@ private struct CommandPaletteView: View {
         return items
     }
 
+    private var hasUsableProvider: Bool {
+        appState.providerRegistry.allProviders.contains { provider in
+            appState.runtimeHealth[provider.id]?.isUsable == true
+                && !provider.availableModels.isEmpty
+        }
+    }
+
     private func run(_ action: PaletteAction) {
         dismiss()
         action.perform()
+    }
+
+    private func threadPaletteActionID(for agent: AgentInfo) -> String {
+        if let identity = agent.nativeThreadBinding?.identity {
+            return "thread:\(identity.providerID):\(identity.providerSource):\(identity.sessionID)"
+        }
+        return "thread:draft:\(agent.id.uuidString)"
+    }
+
+    private func moveSelection(_ direction: MoveCommandDirection) {
+        guard !filteredActions.isEmpty else { return }
+        let currentIndex = filteredActions.firstIndex(where: { $0.id == selectedActionID }) ?? 0
+
+        switch direction {
+        case .down:
+            selectedActionID = filteredActions[min(currentIndex + 1, filteredActions.count - 1)].id
+        case .up:
+            selectedActionID = filteredActions[max(currentIndex - 1, 0)].id
+        default:
+            break
+        }
     }
 
     private func dismiss() {

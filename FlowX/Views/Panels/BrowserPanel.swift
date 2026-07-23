@@ -9,6 +9,7 @@ final class BrowserViewModel: NSObject, ObservableObject {
     @Published var canGoBack = false
     @Published var canGoForward = false
     @Published var isLoading = false
+    @Published var errorMessage: String?
 
     private weak var webView: WKWebView?
     private var attachedWebViewID: ObjectIdentifier?
@@ -68,7 +69,12 @@ final class BrowserViewModel: NSObject, ObservableObject {
     }
 
     func reload() {
+        errorMessage = nil
         webView?.reload()
+    }
+
+    func dismissError() {
+        errorMessage = nil
     }
 
     func clearPage(propagateChange: Bool = true) {
@@ -77,6 +83,7 @@ final class BrowserViewModel: NSObject, ObservableObject {
         canGoBack = false
         canGoForward = false
         isLoading = false
+        errorMessage = nil
         lastCommittedURLString = ""
         pendingURLString = nil
 
@@ -111,9 +118,13 @@ final class BrowserViewModel: NSObject, ObservableObject {
             return
         }
 
-        guard let url = normalizedURL(from: trimmed) else { return }
+        guard let url = normalizedURL(from: trimmed) else {
+            errorMessage = "Enter a valid HTTP or HTTPS address."
+            return
+        }
 
         let normalized = url.absoluteString
+        errorMessage = nil
         urlText = normalized
         pendingURLString = normalized
 
@@ -128,7 +139,13 @@ final class BrowserViewModel: NSObject, ObservableObject {
     }
 
     private func normalizedURL(from rawValue: String) -> URL? {
-        URL(string: normalizedURLString(from: rawValue))
+        guard let url = URL(string: normalizedURLString(from: rawValue)),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host?.isEmpty == false else {
+            return nil
+        }
+        return url
     }
 
     private func normalizedURLString(from rawValue: String) -> String {
@@ -139,7 +156,14 @@ final class BrowserViewModel: NSObject, ObservableObject {
             return trimmed
         }
 
-        if trimmed.hasPrefix("localhost") || trimmed.hasPrefix("127.0.0.1") {
+        if trimmed.hasPrefix("::1") {
+            return "http://[::1]\(trimmed.dropFirst(3))"
+        }
+
+        if trimmed.hasPrefix("localhost")
+            || trimmed.hasPrefix("127.0.0.1")
+            || trimmed.hasPrefix("0.0.0.0")
+            || trimmed.hasPrefix("[::1]") {
             return "http://\(trimmed)"
         }
 
@@ -164,12 +188,45 @@ final class BrowserViewModel: NSObject, ObservableObject {
             lastCommittedURLString = ""
         }
     }
+
+    private func presentNavigationError(_ error: Error) {
+        let nsError = error as NSError
+        guard nsError.code != NSURLErrorCancelled else { return }
+
+        let detail: String
+        switch nsError.code {
+        case NSURLErrorCannotConnectToHost:
+            detail = "The preview server is not accepting connections."
+        case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
+            detail = "The host could not be found."
+        case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost:
+            detail = "Check the network connection and try again."
+        case NSURLErrorServerCertificateUntrusted,
+             NSURLErrorServerCertificateHasBadDate,
+             NSURLErrorServerCertificateHasUnknownRoot:
+            detail = "The server certificate could not be verified."
+        case NSURLErrorTimedOut:
+            detail = "The server took too long to respond."
+        default:
+            detail = nsError.localizedDescription
+        }
+
+        errorMessage = detail
+    }
 }
 
 extension BrowserViewModel: WKNavigationDelegate {
     nonisolated func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         Task { @MainActor in
             isLoading = true
+            errorMessage = nil
+            syncNavigationState()
+        }
+    }
+
+    nonisolated func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        Task { @MainActor in
+            errorMessage = nil
             syncNavigationState()
         }
     }
@@ -177,6 +234,7 @@ extension BrowserViewModel: WKNavigationDelegate {
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Task { @MainActor in
             isLoading = false
+            errorMessage = nil
             syncNavigationState()
         }
     }
@@ -184,6 +242,7 @@ extension BrowserViewModel: WKNavigationDelegate {
     nonisolated func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         Task { @MainActor in
             isLoading = false
+            presentNavigationError(error)
             syncNavigationState()
         }
     }
@@ -191,6 +250,7 @@ extension BrowserViewModel: WKNavigationDelegate {
     nonisolated func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         Task { @MainActor in
             isLoading = false
+            presentNavigationError(error)
             syncNavigationState()
         }
     }
@@ -204,6 +264,7 @@ struct BrowserWebView: NSViewRepresentable {
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.underPageBackgroundColor = .clear
         model.attach(webView: webView)
         return webView
     }
@@ -221,6 +282,11 @@ struct BrowserPanel: View {
             toolbar
 
             FXDivider()
+
+            if let errorMessage = browser.errorMessage {
+                browserErrorBanner(errorMessage)
+                FXDivider()
+            }
 
             ZStack(alignment: .topTrailing) {
                 BrowserWebView(model: browser)
@@ -251,7 +317,7 @@ struct BrowserPanel: View {
             HStack(spacing: FXSpacing.xs) {
                 toolbarButton("chevron.left", label: "Go back", enabled: browser.canGoBack, action: browser.goBack)
                 toolbarButton("chevron.right", label: "Go forward", enabled: browser.canGoForward, action: browser.goForward)
-                toolbarButton("arrow.clockwise", label: "Reload page", enabled: true, action: browser.reload)
+                toolbarButton("arrow.clockwise", label: "Reload page", enabled: browser.hasPage, action: browser.reload)
             }
 
             TextField("Enter a URL", text: $browser.urlText)
@@ -275,16 +341,36 @@ struct BrowserPanel: View {
     }
 
     private func toolbarButton(_ icon: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(enabled ? FXColors.fgSecondary : FXColors.fgTertiary.opacity(0.45))
-                .frame(width: 24, height: 24)
-                .background(enabled ? FXColors.bgSurface.opacity(0.6) : FXColors.bgSurface.opacity(0.3))
-                .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
-        }
-        .buttonStyle(.plain)
+        FXIconButton(icon: icon, label: label, size: 24, action: action)
         .disabled(!enabled)
-        .accessibilityLabel(label)
+    }
+
+    private func browserErrorBanner(_ message: String) -> some View {
+        HStack(spacing: FXSpacing.sm) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(FXTypography.icon(.small))
+                .foregroundStyle(FXColors.warning)
+
+            Text(message)
+                .font(FXTypography.caption)
+                .foregroundStyle(FXColors.fgSecondary)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button("Retry") {
+                browser.loadCurrentInput()
+            }
+            .buttonStyle(.plain)
+            .font(FXTypography.captionMedium)
+            .foregroundStyle(FXColors.accent)
+
+            FXIconButton(icon: "xmark", label: "Dismiss browser error", size: 24) {
+                browser.dismissError()
+            }
+        }
+        .padding(.horizontal, FXSpacing.md)
+        .padding(.vertical, FXSpacing.sm)
+        .background(FXColors.warning.opacity(0.08))
+        .accessibilityElement(children: .contain)
     }
 }

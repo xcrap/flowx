@@ -29,16 +29,31 @@ struct SettingsPanel: View {
                 VStack(alignment: .leading, spacing: FXSpacing.xxxl) {
                     // Defaults first — this is an AI app
                     settingsSection("Defaults") {
+                        settingsMenuRow("Provider", value: selectedProvider.map { simplifiedProviderName(for: $0.displayName) } ?? "Unavailable", enabled: !providers.isEmpty, sections: [
+                            FXDropdownSection(items: providers.map { provider in
+                                FXDropdownItem(
+                                    id: provider.id,
+                                    title: simplifiedProviderName(for: provider.displayName),
+                                    subtitle: provider.availableModels.isEmpty
+                                        ? "No models available"
+                                        : "\(provider.availableModels.count) \(provider.availableModels.count == 1 ? "model" : "models")",
+                                    isSelected: preferences.defaultProviderID == provider.id
+                                ) {
+                                    selectDefaultProvider(provider)
+                                }
+                            })
+                        ])
+
                         settingsMenuRow("Model", value: simplifiedModelName(for: selectedModel?.name ?? preferences.defaultModelID), enabled: selectedProvider != nil, sections: [
                             FXDropdownSection(items: (selectedProvider?.availableModels ?? []).map { model in
                                 FXDropdownItem(id: model.id, title: simplifiedModelName(for: model.name), isSelected: preferences.defaultModelID == model.id) {
-                                    preferences.defaultModelID = model.id
+                                    selectDefaultModel(model)
                                 }
                             })
                         ])
 
                         settingsMenuRow("Effort", value: effortLabel(for: preferences.defaultEffort), sections: [
-                            FXDropdownSection(items: ["none", "low", "medium", "high", "xhigh"].map { level in
+                            FXDropdownSection(items: defaultSupportedEfforts.map { level in
                                 FXDropdownItem(id: level, title: effortLabel(for: level), isSelected: preferences.defaultEffort == level) {
                                     preferences.defaultEffort = level
                                 }
@@ -47,7 +62,12 @@ struct SettingsPanel: View {
 
                         settingsMenuRow("Access", value: accessLabel(preferences.defaultAccess), sections: [
                             FXDropdownSection(items: AgentAccess.allCases.map { access in
-                                FXDropdownItem(id: access.rawValue, title: accessLabel(access), isSelected: preferences.defaultAccess == access) {
+                                FXDropdownItem(
+                                    id: access.rawValue,
+                                    title: accessLabel(access),
+                                    subtitle: accessDescription(access),
+                                    isSelected: preferences.defaultAccess == access
+                                ) {
                                     preferences.defaultAccess = access
                                 }
                             })
@@ -99,7 +119,25 @@ struct SettingsPanel: View {
 
                     // Runtime
                     settingsSection("Runtime") {
-                        providerRow(title: "Codex", binaryID: "codex")
+                        ForEach(providers, id: \.id) { provider in
+                            providerRow(
+                                title: simplifiedProviderName(for: provider.displayName),
+                                binaryID: provider.id,
+                                modelCount: provider.availableModels.count
+                            )
+                        }
+
+                        Button {
+                            Task { @MainActor in
+                                await appState.refreshRuntimeHealth()
+                            }
+                        } label: {
+                            Label("Check runtimes again", systemImage: "arrow.clockwise")
+                                .font(FXTypography.captionMedium)
+                                .foregroundStyle(FXColors.fgSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Refresh provider command availability and versions")
                     }
 
                     // Shortcuts
@@ -157,7 +195,7 @@ struct SettingsPanel: View {
                         .font(FXTypography.body)
                         .foregroundStyle(enabled ? FXColors.fg : FXColors.fgTertiary)
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(FXTypography.icon(.micro))
                         .foregroundStyle(enabled ? (isExpanded ? FXColors.accent : FXColors.fgTertiary) : FXColors.fgQuaternary)
                         .rotationEffect(.degrees(isExpanded ? 180 : 0))
                 }
@@ -182,7 +220,7 @@ struct SettingsPanel: View {
         }
     }
 
-    private func providerRow(title: String, binaryID: String) -> some View {
+    private func providerRow(title: String, binaryID: String, modelCount: Int) -> some View {
         let health = appState.runtimeHealth[binaryID]
         let isAvailable = health?.isUsable == true
 
@@ -194,6 +232,9 @@ struct SettingsPanel: View {
                 Text(title)
                     .font(FXTypography.body)
                     .foregroundStyle(FXColors.fgSecondary)
+                Text(modelCount == 1 ? "1 model" : "\(modelCount) models")
+                    .font(FXTypography.caption)
+                    .foregroundStyle(FXColors.fgTertiary)
                 Spacer()
                 Text(health?.statusLabel ?? "Checking…")
                     .font(FXTypography.monoSmall)
@@ -223,6 +264,29 @@ struct SettingsPanel: View {
             ?? selectedProvider?.availableModels.first
     }
 
+    private var defaultSupportedEfforts: [String] {
+        let advertised = selectedModel?.supportedReasoningEfforts ?? []
+        return advertised.isEmpty ? ["none", "low", "medium", "high", "xhigh"] : advertised
+    }
+
+    private func selectDefaultProvider(_ provider: any AIProvider) {
+        preferences.setDefaultProvider(provider.id, using: appState.providerRegistry)
+        guard let model = provider.availableModels.first(where: { $0.id == preferences.defaultModelID })
+                ?? provider.availableModels.first else { return }
+        normalizeDefaultEffort(for: model)
+    }
+
+    private func selectDefaultModel(_ model: AIModel) {
+        preferences.defaultModelID = model.id
+        normalizeDefaultEffort(for: model)
+    }
+
+    private func normalizeDefaultEffort(for model: AIModel) {
+        guard !model.supportedReasoningEfforts.isEmpty,
+              !model.supportedReasoningEfforts.contains(preferences.defaultEffort) else { return }
+        preferences.defaultEffort = model.defaultReasoningEffort ?? model.supportedReasoningEfforts[0]
+    }
+
     private func simplifiedProviderName(for name: String) -> String {
         name.replacingOccurrences(of: "(OpenAI)", with: "")
             .replacingOccurrences(of: "  ", with: " ")
@@ -250,6 +314,17 @@ struct SettingsPanel: View {
 
     private func accessLabel(_ access: AgentAccess) -> String {
         switch access { case .supervised: "Supervised"; case .acceptEdits: "Accept Edits"; case .fullAccess: "Full Access" }
+    }
+
+    private func accessDescription(_ access: AgentAccess) -> String {
+        switch access {
+        case .supervised:
+            "Ask before commands and edits"
+        case .acceptEdits:
+            "Allow edits and review other actions"
+        case .fullAccess:
+            "Auto-approve tools; questions still appear"
+        }
     }
 
     private func textSizeLabel(_ preset: FXTextSizePreset) -> String {

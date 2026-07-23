@@ -1,174 +1,288 @@
+import AppKit
 import SwiftUI
+import FXCore
 import FXDesign
 
-struct AgentRow: View {
+/// A provider-native conversation row. `AgentInfo` remains the internal
+/// workspace controller, while the sidebar presents the Codex/Claude thread
+/// that it is bound to.
+struct ThreadRow: View {
     @Environment(AppState.self) private var appState
     @Bindable var agent: AgentInfo
     let projectName: String
 
     @State private var isHovered = false
-    @State private var isRenaming = false
-    @State private var draftTitle = ""
-    @FocusState private var renameFieldFocused: Bool
 
     private var isSelected: Bool {
         appState.activeAgentID == agent.id
     }
 
     var body: some View {
-        Group {
-            if isRenaming {
-                renameContent
-            } else {
-                Button(action: selectAgent) {
-                    rowContent
-                }
-                .buttonStyle(.plain)
-            }
+        Button(action: selectThread) {
+            rowContent
         }
+        .buttonStyle(.plain)
         .onHover { isHovered = $0 }
         .contextMenu {
-            Button(action: beginRename) {
-                Label("Rename", systemImage: "pencil")
+            if let sessionID = agent.conversationState.sessionID, !sessionID.isEmpty {
+                Button(action: { copyThreadID(sessionID) }) {
+                    Label("Copy Provider Thread ID", systemImage: "doc.on.doc")
+                }
+                Divider()
             }
-            Button(action: { appState.resetConversation(for: agent) }) {
-                Label("Reset Conversation", systemImage: "arrow.counterclockwise")
-            }
-            Divider()
-            Button(role: .destructive, action: deleteAgent) {
-                Label("Delete Agent", systemImage: "trash")
+
+            if !agent.isProviderNativeThread {
+                Button(role: .destructive, action: removeFromFlowX) {
+                    Label("Remove Draft", systemImage: "trash")
+                }
             }
         }
+        .accessibilityLabel("\(agent.providerName) thread, \(displayTitle)")
+        .accessibilityHint("Open this thread in \(projectName)")
     }
 
     private var rowContent: some View {
-        HStack(spacing: FXSpacing.md) {
-            statusDot
+        VStack(alignment: .leading, spacing: FXSpacing.xs) {
+            HStack(spacing: FXSpacing.sm) {
+                providerBadge
 
-            VStack(alignment: .leading, spacing: FXSpacing.xs) {
-                Text(agent.title)
-                    .font(FXTypography.body)
+                Text(displayTitle)
+                    .font(FXTypography.bodyMedium)
                     .foregroundStyle(isSelected ? FXColors.fg : FXColors.fgSecondary)
                     .lineLimit(1)
 
-                if agent.additions > 0 || agent.deletions > 0 {
-                    changesLine
-                }
+                Spacer(minLength: 0)
+
+                statusIndicator
             }
 
-            Spacer(minLength: 0)
+            HStack(alignment: .firstTextBaseline, spacing: FXSpacing.sm) {
+                Text(providerSourceLabel)
+                    .font(FXTypography.overline)
+                    .foregroundStyle(FXColors.fgQuaternary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 72, alignment: .leading)
+
+                Text(threadPreview)
+                    .font(FXTypography.caption)
+                    .foregroundStyle(FXColors.fgTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Text(activityLabel)
+                    .font(FXTypography.monoSmall)
+                    .foregroundStyle(activityColor)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+
+            if agent.additions > 0 || agent.deletions > 0 {
+                changesLine
+            }
         }
-        .padding(.horizontal, FXSpacing.lg)
-        .padding(.vertical, FXSpacing.md)
+        .padding(.horizontal, FXSpacing.md)
+        .padding(.vertical, FXSpacing.sm)
         .background(
             RoundedRectangle(cornerRadius: FXRadii.md)
                 .fill(isSelected ? FXColors.bgSelected : (isHovered ? FXColors.bgHover : .clear))
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: FXRadii.md)
+                .strokeBorder(isSelected ? FXColors.border : .clear, lineWidth: 0.5)
+        )
         .contentShape(Rectangle())
     }
 
-    private var renameContent: some View {
-        HStack(spacing: FXSpacing.md) {
-            statusDot
+    private var providerBadge: some View {
+        FXBadge(providerShortLabel, tone: providerBadgeTone)
+            .accessibilityLabel("Source: \(agent.providerName)")
+    }
 
-            VStack(alignment: .leading, spacing: FXSpacing.xs) {
-                TextField("Agent name", text: $draftTitle)
-                    .textFieldStyle(.plain)
-                    .font(FXTypography.body)
-                    .foregroundStyle(FXColors.fg)
-                    .focused($renameFieldFocused)
-                    .onSubmit(commitRename)
-
-                if agent.additions > 0 || agent.deletions > 0 {
-                    changesLine
-                }
-            }
-
-            Spacer(minLength: 0)
+    @ViewBuilder
+    private var statusIndicator: some View {
+        if !agent.conversationState.pendingUserInputRequests.isEmpty {
+            Image(systemName: "questionmark.bubble.fill")
+                .font(FXTypography.icon(.small))
+                .foregroundStyle(FXColors.accent)
+                .accessibilityLabel("Waiting for your input")
+        } else if agent.isLoadingNativeTranscript {
+            ProgressView()
+                .controlSize(.mini)
+                .accessibilityLabel("Loading provider transcript")
+        } else if agent.nativeTranscriptError != nil {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(FXTypography.icon(.small))
+                .foregroundStyle(FXColors.warning)
+                .accessibilityLabel("Provider transcript unavailable")
+        } else {
+            statusIcon
         }
-        .padding(.horizontal, FXSpacing.lg)
-        .padding(.vertical, FXSpacing.md)
-        .background(
-            RoundedRectangle(cornerRadius: FXRadii.md)
-                .fill(FXColors.bgSelected)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: FXRadii.md)
-                .strokeBorder(FXColors.border, lineWidth: 0.5)
-        )
-        .onAppear {
-            if draftTitle.isEmpty {
-                draftTitle = agent.title
-            }
-            Task { @MainActor in
-                renameFieldFocused = true
-            }
-        }
-        .onChange(of: renameFieldFocused) { _, focused in
-            if !focused && isRenaming {
-                commitRename()
-            }
+    }
+
+    @ViewBuilder
+    private var statusIcon: some View {
+        switch agent.status {
+        case .running:
+            PulsingDot(color: FXColors.success)
+                .accessibilityLabel("Running")
+        case .completed:
+            Image(systemName: "checkmark.circle.fill")
+                .font(FXTypography.icon(.small))
+                .foregroundStyle(FXColors.success)
+                .accessibilityLabel("Completed")
+        case .error:
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(FXTypography.icon(.small))
+                .foregroundStyle(FXColors.error)
+                .accessibilityLabel("Needs attention")
+        case .idle:
+            Circle()
+                .fill(FXColors.fgQuaternary)
+                .frame(width: 7, height: 7)
+                .accessibilityLabel("Idle")
         }
     }
 
     private var changesLine: some View {
         HStack(spacing: FXSpacing.sm) {
-            Text("+\(agent.additions)")
-                .font(FXTypography.monoSmall)
-                .foregroundStyle(FXColors.success)
+            Image(systemName: "arrow.triangle.branch")
+                .font(FXTypography.icon(.micro))
+                .foregroundStyle(FXColors.fgQuaternary)
+
+            if agent.additions > 0 {
+                Text("+\(agent.additions)")
+                    .font(FXTypography.monoSmall)
+                    .foregroundStyle(FXColors.diffAddedFg)
+            }
             if agent.deletions > 0 {
                 Text("-\(agent.deletions)")
                     .font(FXTypography.monoSmall)
-                    .foregroundStyle(FXColors.error)
+                    .foregroundStyle(FXColors.diffRemovedFg)
             }
         }
     }
 
-    @ViewBuilder
-    private var statusDot: some View {
-        switch agent.status {
+    private var providerShortLabel: String {
+        switch agent.providerID {
+        case "codex":
+            "CODEX"
+        case "claude":
+            "CLAUDE"
+        default:
+            agent.providerName.uppercased()
+        }
+    }
+
+    private var providerSourceLabel: String {
+        guard let source = agent.nativeThreadBinding?.identity.providerSource,
+              !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "DRAFT"
+        }
+
+        return source
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .uppercased()
+    }
+
+    private var displayTitle: String {
+        let nativeTitle = agent.nativeThreadBinding?.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let nativeTitle, !nativeTitle.isEmpty {
+            return nativeTitle
+        }
+        return agent.title
+    }
+
+    private var providerBadgeTone: FXBadgeTone {
+        switch agent.providerID {
+        case "claude":
+            .accentSecondary
+        default:
+            .accent
+        }
+    }
+
+    private var threadPreview: String {
+        if let nativePreview = agent.nativePreview {
+            return flattenedPreview(nativePreview)
+        }
+
+        guard let latestText = agent.messages.reversed().lazy
+            .map(\.textContent)
+            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+            return agent.conversationState.sessionID == nil ? "Draft · not started" : "Provider thread"
+        }
+
+        return flattenedPreview(latestText)
+    }
+
+    private func flattenedPreview(_ text: String) -> String {
+        let flattened = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        return flattened.isEmpty ? "Provider thread" : flattened
+    }
+
+    private var activityLabel: String {
+        if !agent.conversationState.pendingUserInputRequests.isEmpty {
+            return "INPUT"
+        }
+        if agent.isLoadingNativeTranscript {
+            return "LOADING"
+        }
+        if agent.nativeTranscriptError != nil {
+            return "RETRY"
+        }
+        if agent.status == .running {
+            return "LIVE"
+        }
+
+        guard let timestamp = agent.nativeUpdatedAt ?? agent.messages.last?.timestamp else {
+            return agent.conversationState.sessionID == nil ? "DRAFT" : "SYNCED"
+        }
+
+        return timestamp.formatted(.relative(presentation: .numeric, unitsStyle: .abbreviated))
+    }
+
+    private var activityColor: Color {
+        if !agent.conversationState.pendingUserInputRequests.isEmpty {
+            return FXColors.accent
+        }
+        if agent.nativeTranscriptError != nil {
+            return FXColors.warning
+        }
+        return switch agent.status {
         case .running:
-            PulsingDot(color: FXColors.success)
-        case .completed:
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 12))
-                .foregroundStyle(FXColors.success)
+            FXColors.success
         case .error:
-            Image(systemName: "exclamationmark.circle.fill")
-                .font(.system(size: 12))
-                .foregroundStyle(FXColors.error)
-        case .idle:
-            Circle()
-                .fill(FXColors.fgTertiary.opacity(0.3))
-                .frame(width: 8, height: 8)
+            FXColors.error
+        default:
+            FXColors.fgQuaternary
         }
     }
 
-    private func beginRename() {
-        draftTitle = agent.title
-        isRenaming = true
-    }
-
-    private func commitRename() {
-        let trimmed = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            agent.title = trimmed
-        }
-        draftTitle = agent.title
-        isRenaming = false
-    }
-
-    private func selectAgent() {
+    private func selectThread() {
         withAnimation(FXAnimation.snappy) {
-            if let project = appState.projects.first(where: { p in p.agents.contains(where: { $0.id == agent.id }) }) {
+            if let project = appState.projects.first(where: { project in
+                project.agents.contains(where: { $0.id == agent.id })
+            }) {
                 appState.activateAgent(agent.id, in: project.id)
             }
         }
     }
 
-    private func deleteAgent() {
+    private func copyThreadID(_ sessionID: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(sessionID, forType: .string)
+    }
+
+    private func removeFromFlowX() {
         withAnimation(FXAnimation.snappy) {
             appState.removeAgent(agent.id)
         }
     }
+
 }

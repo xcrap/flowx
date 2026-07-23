@@ -8,7 +8,7 @@ struct FilesPanel: View {
 
     var body: some View {
         if let project = appState.activeProject {
-            let tree = buildTree(from: project.repositoryFiles)
+            let tree = RepositoryFileTreeCache.tree(for: project.id, paths: project.repositoryFiles)
             let visibleTree = filteredTree(tree, query: searchQuery)
 
             VStack(spacing: 0) {
@@ -20,10 +20,10 @@ struct FilesPanel: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: FXSpacing.xxs) {
-                            ForEach(visibleTree) { node in
+                            ForEach(flattenedRows(visibleTree, forceExpanded: !searchQuery.isEmpty)) { row in
                                 FilesTreeRow(
-                                    node: node,
-                                    depth: 0,
+                                    node: row.node,
+                                    depth: row.depth,
                                     selectedPath: project.selectedInspectorPath,
                                     forceExpanded: !searchQuery.isEmpty,
                                     expandedPaths: $expandedPaths
@@ -56,7 +56,7 @@ struct FilesPanel: View {
     private var searchBar: some View {
         HStack(spacing: FXSpacing.sm) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 11, weight: .medium))
+                .font(FXTypography.icon(.small))
                 .foregroundStyle(FXColors.fgTertiary)
 
             TextField("Search files", text: $searchText)
@@ -69,7 +69,7 @@ struct FilesPanel: View {
             if !searchText.isEmpty {
                 Button(action: { searchText = "" }) {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
+                        .font(FXTypography.icon(.regular))
                         .foregroundStyle(FXColors.fgQuaternary)
                 }
                 .buttonStyle(.plain)
@@ -100,7 +100,7 @@ struct FilesPanel: View {
     private func emptyState(title: String, body: String) -> some View {
         VStack(spacing: FXSpacing.md) {
             Image(systemName: "folder")
-                .font(.system(size: 22, weight: .regular))
+                .font(FXTypography.icon(.illustration))
                 .foregroundStyle(FXColors.fgTertiary)
 
             VStack(spacing: FXSpacing.xs) {
@@ -119,34 +119,6 @@ struct FilesPanel: View {
         .background(FXColors.panelBg)
     }
 
-    private func buildTree(from paths: [String], prefix: String = "") -> [FileTreeNode] {
-        let grouped = Dictionary(grouping: paths) { path -> String in
-            let parts = path.split(separator: "/", maxSplits: 1)
-            return parts.first.map(String.init) ?? path
-        }
-
-        return grouped.map { name, groupedPaths in
-            let childPaths = groupedPaths.compactMap { path -> String? in
-                let parts = path.split(separator: "/", maxSplits: 1)
-                guard parts.count == 2 else { return nil }
-                return String(parts[1])
-            }
-
-            let fullPath = prefix.isEmpty ? name : "\(prefix)/\(name)"
-            return FileTreeNode(
-                name: name,
-                path: fullPath,
-                children: buildTree(from: childPaths, prefix: fullPath)
-            )
-        }
-        .sorted { lhs, rhs in
-            if lhs.isDirectory != rhs.isDirectory {
-                return lhs.isDirectory && !rhs.isDirectory
-            }
-            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-        }
-    }
-
     private func filteredTree(_ nodes: [FileTreeNode], query: String) -> [FileTreeNode] {
         guard !query.isEmpty else { return nodes }
 
@@ -163,6 +135,22 @@ struct FilesPanel: View {
 
             return node.path.localizedCaseInsensitiveContains(query) ? node : nil
         }
+    }
+
+    private func flattenedRows(_ nodes: [FileTreeNode], forceExpanded: Bool) -> [VisibleFileTreeRow] {
+        var rows: [VisibleFileTreeRow] = []
+
+        func append(_ children: [FileTreeNode], depth: Int) {
+            for node in children {
+                rows.append(VisibleFileTreeRow(node: node, depth: depth))
+                if node.isDirectory, forceExpanded || expandedPaths.contains(node.path) {
+                    append(node.children, depth: depth + 1)
+                }
+            }
+        }
+
+        append(nodes, depth: 0)
+        return rows
     }
 
     private func seedExpandedPaths(from nodes: [FileTreeNode], selectedPath: String?) {
@@ -201,6 +189,75 @@ private struct FileTreeNode: Identifiable, Hashable {
     var isDirectory: Bool { !children.isEmpty }
 }
 
+private struct VisibleFileTreeRow: Identifiable {
+    var id: String { node.path }
+    let node: FileTreeNode
+    let depth: Int
+}
+
+@MainActor
+private enum RepositoryFileTreeCache {
+    private struct Key: Hashable {
+        let projectID: UUID
+        let pathCount: Int
+        let pathHash: Int
+    }
+
+    private static let maximumEntries = 4
+    private static var trees: [Key: [FileTreeNode]] = [:]
+    private static var orderedKeys: [Key] = []
+
+    static func tree(for projectID: UUID, paths: [String]) -> [FileTreeNode] {
+        var hasher = Hasher()
+        for path in paths {
+            hasher.combine(path)
+        }
+        let key = Key(projectID: projectID, pathCount: paths.count, pathHash: hasher.finalize())
+
+        if let cached = trees[key] {
+            orderedKeys.removeAll { $0 == key }
+            orderedKeys.append(key)
+            return cached
+        }
+
+        let tree = buildFileTree(from: paths)
+        trees[key] = tree
+        orderedKeys.append(key)
+        while orderedKeys.count > maximumEntries {
+            trees.removeValue(forKey: orderedKeys.removeFirst())
+        }
+        return tree
+    }
+
+    private static func buildFileTree(from paths: [String], prefix: String = "") -> [FileTreeNode] {
+        let grouped = Dictionary(grouping: paths) { path -> String in
+            let parts = path.split(separator: "/", maxSplits: 1)
+            return parts.first.map(String.init) ?? path
+        }
+
+        return grouped.map { name, groupedPaths in
+            let childPaths = groupedPaths.compactMap { path -> String? in
+                let parts = path.split(separator: "/", maxSplits: 1)
+                guard parts.count == 2 else { return nil }
+                return String(parts[1])
+            }
+
+            let fullPath = prefix.isEmpty ? name : "\(prefix)/\(name)"
+            return FileTreeNode(
+                name: name,
+                path: fullPath,
+                children: buildFileTree(from: childPaths, prefix: fullPath)
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.isDirectory != rhs.isDirectory {
+                return lhs.isDirectory && !rhs.isDirectory
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+}
+
 private struct FilesTreeRow: View {
     let node: FileTreeNode
     let depth: Int
@@ -228,12 +285,12 @@ private struct FilesTreeRow: View {
                 Button(action: toggleExpansion) {
                     HStack(spacing: FXSpacing.sm) {
                         Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(FXTypography.icon(.micro))
                             .foregroundStyle(FXColors.fgQuaternary)
                             .frame(width: 10)
 
                         Image(systemName: "folder")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(FXTypography.icon(.small))
                             .foregroundStyle(FXColors.fgTertiary)
 
                         Text(node.name)
@@ -257,18 +314,6 @@ private struct FilesTreeRow: View {
                 .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
                 .accessibilityHint("Show or hide nested files.")
 
-                if isExpanded {
-                    ForEach(node.children) { child in
-                        FilesTreeRow(
-                            node: child,
-                            depth: depth + 1,
-                            selectedPath: selectedPath,
-                            forceExpanded: forceExpanded,
-                            expandedPaths: $expandedPaths,
-                            onSelect: onSelect
-                        )
-                    }
-                }
             } else {
                 Button(action: { onSelect(node.path) }) {
                     HStack(spacing: FXSpacing.sm) {
@@ -276,7 +321,7 @@ private struct FilesTreeRow: View {
                             .frame(width: 10)
 
                         Image(systemName: "doc")
-                            .font(.system(size: 11))
+                            .font(FXTypography.icon(.small))
                             .foregroundStyle(isSelected ? FXColors.info : FXColors.fgQuaternary)
 
                         Text(node.name)

@@ -32,9 +32,10 @@ public struct Attachment: Identifiable, Codable, Sendable, Equatable {
         "public.bmp",
     ]
 
-    public static let supportedTypes: Set<String> = supportedImageTypes.union([
-        "com.adobe.pdf",
-    ])
+    // Provider turn protocols currently accept images only. Keep PDF MIME
+    // detection for future file support, but do not advertise a type that would
+    // be silently dropped before reaching the model.
+    public static let supportedTypes: Set<String> = supportedImageTypes
 
     public static func mimeType(for utType: String) -> String {
         switch utType {
@@ -72,10 +73,36 @@ public enum MessageRole: String, Codable, Sendable {
     case tool
 }
 
+public struct ConversationImageAssetReference: Codable, Sendable, Equatable, Hashable {
+    public let projectID: UUID
+    public let agentID: UUID
+    public let messageID: UUID
+    public let contentIndex: Int
+    public let mimeType: String
+    public let byteCount: Int
+
+    public init(
+        projectID: UUID,
+        agentID: UUID,
+        messageID: UUID,
+        contentIndex: Int,
+        mimeType: String,
+        byteCount: Int
+    ) {
+        self.projectID = projectID
+        self.agentID = agentID
+        self.messageID = messageID
+        self.contentIndex = contentIndex
+        self.mimeType = mimeType
+        self.byteCount = byteCount
+    }
+}
+
 public enum MessageContent: Codable, Sendable, Equatable {
     case text(String)
     case code(language: String, code: String)
     case image(data: Data, mimeType: String)
+    case imageAsset(ConversationImageAssetReference)
     case toolUse(id: String, name: String, input: String)
     case toolResult(id: String, content: String, isError: Bool)
 
@@ -91,6 +118,11 @@ public enum MessageContent: Codable, Sendable, Equatable {
         case input
         case content
         case isError
+        case projectID
+        case agentID
+        case messageID
+        case contentIndex
+        case byteCount
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -107,6 +139,14 @@ public enum MessageContent: Codable, Sendable, Equatable {
             try container.encode("image", forKey: .type)
             try container.encode(data, forKey: .data)
             try container.encode(mimeType, forKey: .mimeType)
+        case .imageAsset(let reference):
+            try container.encode("imageAsset", forKey: .type)
+            try container.encode(reference.projectID, forKey: .projectID)
+            try container.encode(reference.agentID, forKey: .agentID)
+            try container.encode(reference.messageID, forKey: .messageID)
+            try container.encode(reference.contentIndex, forKey: .contentIndex)
+            try container.encode(reference.mimeType, forKey: .mimeType)
+            try container.encode(reference.byteCount, forKey: .byteCount)
         case .toolUse(let id, let name, let input):
             try container.encode("toolUse", forKey: .type)
             try container.encode(id, forKey: .id)
@@ -134,6 +174,17 @@ public enum MessageContent: Codable, Sendable, Equatable {
             self = .image(
                 data: try container.decode(Data.self, forKey: .data),
                 mimeType: try container.decode(String.self, forKey: .mimeType)
+            )
+        case "imageAsset":
+            self = .imageAsset(
+                ConversationImageAssetReference(
+                    projectID: try container.decode(UUID.self, forKey: .projectID),
+                    agentID: try container.decode(UUID.self, forKey: .agentID),
+                    messageID: try container.decode(UUID.self, forKey: .messageID),
+                    contentIndex: try container.decode(Int.self, forKey: .contentIndex),
+                    mimeType: try container.decode(String.self, forKey: .mimeType),
+                    byteCount: try container.decode(Int.self, forKey: .byteCount)
+                )
             )
         case "toolUse":
             self = .toolUse(

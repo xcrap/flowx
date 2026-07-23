@@ -19,7 +19,7 @@ struct FlowXApp: App {
                 .id(preferences.themeVersion)
                 .environment(appState)
                 .environment(preferences)
-                .frame(minWidth: 900, minHeight: 600)
+                .frame(minWidth: 1040, minHeight: 640)
                 .tint(FXColors.accent)
                 .preferredColorScheme(preferences.preferredColorScheme)
                 .background(

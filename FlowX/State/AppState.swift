@@ -1,17 +1,34 @@
 import AppKit
+import CryptoKit
+import Darwin
 import Foundation
 import FXAgent
 import FXCore
 import FXDesign
 import FXTerminal
 import SwiftUI
+import UniformTypeIdentifiers
 
-enum RightPanelTab: String, CaseIterable, Codable {
+private final class NotificationObserverToken: @unchecked Sendable {
+    private var observers: [NSObjectProtocol] = []
+
+    func store(_ observer: NSObjectProtocol) {
+        observers.append(observer)
+    }
+
+    deinit {
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+}
+
+enum RightPanelTab: String, CaseIterable, Codable, Sendable {
     case changes = "CHANGES"
     case files = "FILES"
 }
 
-enum InspectorComparisonMode: String, CaseIterable, Codable {
+enum InspectorComparisonMode: String, CaseIterable, Codable, Sendable {
     case unstaged = "Unstaged"
     case staged = "Staged"
     case base = "Base"
@@ -23,7 +40,7 @@ enum InspectorContentKind {
     case message
 }
 
-enum InspectorDiffDisplayMode: String, CaseIterable, Codable {
+enum InspectorDiffDisplayMode: String, CaseIterable, Codable, Sendable {
     case inline = "Inline"
     case split = "Split"
 }
@@ -33,6 +50,49 @@ enum AgentStatus: String {
     case running
     case completed
     case error
+}
+
+struct NativeThreadIdentity: Codable, Sendable, Hashable {
+    var providerID: String
+    var providerSource: String
+    var sessionID: String
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.providerID == rhs.providerID && lhs.sessionID == rhs.sessionID
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(providerID)
+        hasher.combine(sessionID)
+    }
+}
+
+struct NativeThreadBinding: Codable, Sendable, Equatable {
+    var identity: NativeThreadIdentity
+    var title: String
+    var preview: String
+    var workingDirectory: String
+    var createdAt: Date
+    var updatedAt: Date
+    var model: String?
+    var effort: String?
+    var status: String?
+
+    init(summary: ProviderNativeThreadSummary) {
+        identity = NativeThreadIdentity(
+            providerID: summary.providerID,
+            providerSource: summary.source,
+            sessionID: summary.id
+        )
+        title = summary.title
+        preview = summary.preview
+        workingDirectory = summary.workingDirectory
+        createdAt = summary.createdAt
+        updatedAt = summary.updatedAt
+        model = summary.model
+        effort = summary.effort
+        status = summary.status
+    }
 }
 
 private enum FlowXSlashCommand {
@@ -75,7 +135,12 @@ private enum FlowXSlashCommand {
     }
 }
 
-enum SplitContent: String, Codable {
+private struct AttachmentLoadResult: Sendable {
+    var attachments: [Attachment]
+    var errors: [String]
+}
+
+enum SplitContent: String, Codable, Sendable {
     case diff
     case browser
 }
@@ -119,6 +184,11 @@ final class AgentInfo: Identifiable {
     let projectRootPath: String
     var terminalSessions: [TerminalSession]
     var workspace: WorkspaceState
+    var nativeThreadBinding: NativeThreadBinding?
+    var nativeImageSidecar: [NativeImageSidecarEntry]
+    var isLoadingNativeTranscript = false
+    var nativeTranscriptError: String?
+    var nativeTranscriptLoadedAt: Date?
 
     var branch: String = ""
     var additions: Int = 0
@@ -129,21 +199,37 @@ final class AgentInfo: Identifiable {
         agent: Agent,
         projectRootPath: String,
         conversationState: ConversationState? = nil,
-        workspace: WorkspaceState? = nil
+        workspace: WorkspaceState? = nil,
+        nativeThreadBinding: NativeThreadBinding? = nil,
+        nativeImageSidecar: [NativeImageSidecarEntry] = []
     ) {
         id = agent.id
         var normalizedAgent = agent
-        normalizedAgent.configuration.providerID = Self.normalizedProviderID(normalizedAgent.configuration.providerID)
-        normalizedAgent.configuration.modelID = Self.normalizedModelID(normalizedAgent.configuration.modelID)
-        normalizedAgent.configuration.effort = Self.normalizedEffort(normalizedAgent.configuration.effort)
+        normalizedAgent.configuration.providerID = Self.normalizedProviderID(
+            nativeThreadBinding?.identity.providerID ?? normalizedAgent.configuration.providerID
+        )
+        if let modelID = normalizedAgent.configuration.modelID {
+            normalizedAgent.configuration.modelID = Self.normalizedModelID(
+                modelID,
+                providerID: normalizedAgent.configuration.providerID
+            )
+        }
+        if let effort = normalizedAgent.configuration.effort {
+            normalizedAgent.configuration.effort = Self.normalizedEffort(effort)
+        }
         self.agent = normalizedAgent
         self.projectRootPath = projectRootPath
         let resolvedConversation = conversationState ?? ConversationState(agentID: agent.id)
+        if let nativeThreadBinding {
+            resolvedConversation.sessionID = nativeThreadBinding.identity.sessionID
+        }
         resolvedConversation.activeProviderID = normalizedAgent.configuration.providerID
-        resolvedConversation.activeModelID = normalizedAgent.configuration.modelID
+        resolvedConversation.activeModelID = normalizedAgent.configuration.modelID ?? nativeThreadBinding?.model
         resolvedConversation.configuredContextWindow = agent.configuration.contextWindowSize
         self.conversationState = resolvedConversation
         self.workspace = workspace ?? WorkspaceState()
+        self.nativeThreadBinding = nativeThreadBinding
+        self.nativeImageSidecar = nativeImageSidecar
         terminalSessions = []
         syncTerminalSessions(to: self.workspace.terminalCount)
         self.workspace.onChange = { [weak self] in
@@ -171,25 +257,72 @@ final class AgentInfo: Identifiable {
         get { Self.normalizedProviderID(agent.configuration.providerID) }
         set {
             agent.configuration.providerID = Self.normalizedProviderID(newValue)
-            agent.configuration.modelID = Self.normalizedModelID(agent.configuration.modelID)
+            agent.configuration.modelID = agent.configuration.modelID.map {
+                Self.normalizedModelID($0, providerID: agent.configuration.providerID)
+            }
             onChange?()
         }
     }
 
     var modelID: String {
-        get { Self.normalizedModelID(agent.configuration.modelID) }
+        get {
+            Self.normalizedModelID(
+                agent.configuration.modelID ?? nativeThreadBinding?.model,
+                providerID: providerID
+            )
+        }
         set {
-            agent.configuration.modelID = Self.normalizedModelID(newValue)
+            agent.configuration.modelID = Self.normalizedModelID(newValue, providerID: providerID)
             onChange?()
         }
     }
 
+    var explicitModelID: String? {
+        get { agent.configuration.modelID }
+        set {
+            agent.configuration.modelID = newValue.map { Self.normalizedModelID($0, providerID: providerID) }
+            onChange?()
+        }
+    }
+
+    var nativeModelID: String? {
+        nativeThreadBinding?.model
+    }
+
     var effort: String {
-        get { Self.normalizedEffort(agent.configuration.effort) }
+        get { Self.normalizedEffort(agent.configuration.effort ?? nativeThreadBinding?.effort) }
         set {
             agent.configuration.effort = Self.normalizedEffort(newValue)
             onChange?()
         }
+    }
+
+    var explicitEffort: String? {
+        get { agent.configuration.effort }
+        set {
+            agent.configuration.effort = newValue.map { Self.normalizedEffort($0) }
+            onChange?()
+        }
+    }
+
+    var nativeEffort: String? {
+        nativeThreadBinding?.effort
+    }
+
+    var isProviderNativeThread: Bool {
+        nativeThreadBinding != nil
+    }
+
+    var nativePreview: String? {
+        guard let preview = nativeThreadBinding?.preview.trimmingCharacters(in: .whitespacesAndNewlines),
+              !preview.isEmpty else {
+            return nil
+        }
+        return preview
+    }
+
+    var nativeUpdatedAt: Date? {
+        nativeThreadBinding?.updatedAt
     }
 
     var systemPrompt: String? {
@@ -208,8 +341,24 @@ final class AgentInfo: Identifiable {
         }
     }
 
+    var explicitAgentMode: AgentMode? {
+        get { agent.configuration.agentMode }
+        set {
+            agent.configuration.agentMode = newValue
+            onChange?()
+        }
+    }
+
     var agentAccess: AgentAccess {
         get { agent.configuration.resolvedAccess }
+        set {
+            agent.configuration.agentAccess = newValue
+            onChange?()
+        }
+    }
+
+    var explicitAgentAccess: AgentAccess? {
+        get { agent.configuration.agentAccess }
         set {
             agent.configuration.agentAccess = newValue
             onChange?()
@@ -299,33 +448,47 @@ final class AgentInfo: Identifiable {
         }
     }
 
-    private static let defaultProviderID = "codex"
-    private static let defaultGPTModelID = "gpt-5.5"
+    nonisolated private static let defaultProviderID = "codex"
+    nonisolated private static let defaultCodexModelID = "gpt-5.6-sol"
+    nonisolated private static let defaultClaudeModelID = "claude-fable-5"
 
-    static func normalizedProviderID(_: String?) -> String {
-        defaultProviderID
-    }
-
-    static func normalizedModelID(_ modelID: String?) -> String {
-        guard let modelID, modelID.hasPrefix("gpt-5") else { return defaultGPTModelID }
-        return modelID
-    }
-
-    static func normalizedDefaultModelID(_ modelID: String?) -> String {
-        if modelID == "gpt-5.4" {
-            return defaultGPTModelID
+    nonisolated static func normalizedProviderID(_ providerID: String?) -> String {
+        guard let providerID = providerID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !providerID.isEmpty else {
+            return defaultProviderID
         }
-        return normalizedModelID(modelID)
+
+        switch providerID.lowercased() {
+        case "anthropic", "claude-code":
+            return "claude"
+        default:
+            return providerID
+        }
     }
 
-    static func normalizedEffort(_ effort: String?) -> String {
+    nonisolated static func normalizedModelID(_ modelID: String?, providerID: String? = nil) -> String {
+        if let modelID = modelID?.trimmingCharacters(in: .whitespacesAndNewlines), !modelID.isEmpty {
+            switch modelID {
+            case "fable":
+                return defaultClaudeModelID
+            default:
+                return modelID
+            }
+        }
+
+        return normalizedProviderID(providerID) == "claude" ? defaultClaudeModelID : defaultCodexModelID
+    }
+
+    nonisolated static func normalizedDefaultModelID(_ modelID: String?, providerID: String? = nil) -> String {
+        normalizedModelID(modelID, providerID: providerID)
+    }
+
+    nonisolated static func normalizedEffort(_ effort: String?) -> String {
         guard let effort, !effort.isEmpty else { return "medium" }
 
         switch effort.lowercased() {
-        case "none", "minimal", "low", "medium", "high", "xhigh":
+        case "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
             return effort.lowercased()
-        case "max":
-            return "xhigh"
         default:
             return "medium"
         }
@@ -358,6 +521,10 @@ final class ProjectState: Identifiable {
     var agents: [AgentInfo]
     var isExpanded: Bool { didSet { onChange?() } }
     var lastSelectedAgentID: UUID? { didSet { onChange?() } }
+    var nativePresentationAgentIDs: [NativeThreadIdentity: UUID] { didSet { onChange?() } }
+    var isSyncingNativeThreads = false
+    var nativeThreadSyncError: String?
+    var lastNativeThreadSyncAt: Date?
 
     var gitInfo = GitStatusService.GitInfo()
     var repositoryFiles: [String] = []
@@ -375,12 +542,23 @@ final class ProjectState: Identifiable {
     var onChange: (() -> Void)?
     private var refreshFilesTask: Task<Void, Never>?
 
-    init(project: Project, agents: [AgentInfo], isExpanded: Bool = true) {
+    init(
+        project: Project,
+        agents: [AgentInfo],
+        isExpanded: Bool = true,
+        nativePresentationAgentIDs: [NativeThreadIdentity: UUID] = [:]
+    ) {
         id = project.id
         self.project = project
         self.agents = agents
         self.isExpanded = isExpanded
         self.lastSelectedAgentID = agents.first?.id
+        self.nativePresentationAgentIDs = nativePresentationAgentIDs
+        for agent in agents {
+            if let identity = agent.nativeThreadBinding?.identity {
+                self.nativePresentationAgentIDs[identity] = agent.id
+            }
+        }
         if self.project.agentOrder.isEmpty {
             self.project.agentOrder = agents.map(\.id)
         }
@@ -390,33 +568,54 @@ final class ProjectState: Identifiable {
         refreshFilesTask?.cancel()
         let rootURL = project.rootURL
 
+        let enumerationTask = Task.detached(priority: .userInitiated) {
+            Self.enumeratedFiles(at: rootURL, limit: limit)
+        }
         refreshFilesTask = Task { [weak self] in
-            let files = await Task.detached(priority: .userInitiated) {
-                Self.enumeratedFiles(at: rootURL, limit: limit)
-            }.value
+            let files = await withTaskCancellationHandler {
+                await enumerationTask.value
+            } onCancel: {
+                enumerationTask.cancel()
+            }
 
             guard let self, !Task.isCancelled else { return }
             self.repositoryFiles = files
-            if self.selectedInspectorPath == nil {
+            if self.selectedInspectorPath == nil
+                || !files.contains(self.selectedInspectorPath ?? "") {
                 self.selectedInspectorPath = files.first
             }
         }
     }
 
     nonisolated private static func enumeratedFiles(at rootURL: URL, limit: Int) -> [String] {
-        let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey]
+        guard limit > 0 else { return [] }
+        if let gitFiles = gitIndexedFiles(at: rootURL, limit: limit) {
+            return gitFiles
+        }
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey]
         guard let enumerator = FileManager.default.enumerator(
             at: rootURL,
-            includingPropertiesForKeys: keys,
+            includingPropertiesForKeys: Array(keys),
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else {
             return []
         }
 
         var files: [String] = []
+        let candidateLimit = max(limit, min(limit * 20, 20_000))
         while let url = enumerator.nextObject() as? URL {
-            guard let values = try? url.resourceValues(forKeys: Set(keys)) else { continue }
-            let relativePath = String(url.path.dropFirst(rootURL.path.count + 1))
+            guard !Task.isCancelled else { return [] }
+            guard let values = try? url.resourceValues(forKeys: keys) else { continue }
+            let relativePath = url.pathComponents
+                .dropFirst(rootURL.pathComponents.count)
+                .joined(separator: "/")
+
+            if values.isSymbolicLink == true {
+                if values.isDirectory == true {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
 
             if shouldSkip(relativePath, isDirectory: values.isDirectory == true) {
                 if values.isDirectory == true {
@@ -427,22 +626,83 @@ final class ProjectState: Identifiable {
 
             if values.isRegularFile == true {
                 files.append(relativePath)
-                if files.count >= limit {
+                if files.count >= candidateLimit {
                     break
                 }
             }
         }
 
-        return files.sorted()
+        return Array(files.sorted().prefix(limit))
     }
 
-    nonisolated private static func shouldSkip(_ relativePath: String, isDirectory _: Bool) -> Bool {
-        guard let first = relativePath.split(separator: "/").first else { return false }
-        let blocked = [".git", "node_modules", ".build", "build", "dist", "DerivedData"]
-        if blocked.contains(String(first)) {
-            return true
+    nonisolated private static func gitIndexedFiles(at rootURL: URL, limit: Int) -> [String]? {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["ls-files", "-co", "--exclude-standard", "--deduplicate", "-z"]
+        process.currentDirectoryURL = rootURL
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        var environment = ProcessInfo.processInfo.environment
+        environment["GIT_TERMINAL_PROMPT"] = "0"
+        environment["LC_ALL"] = "C"
+        process.environment = environment
+
+        do {
+            try process.run()
+        } catch {
+            return nil
         }
-        return false
+
+        let timeout = DispatchWorkItem { [weak process] in
+            guard let process, process.isRunning else { return }
+            process.terminate()
+            let pid = process.processIdentifier
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) { [weak process] in
+                if process?.isRunning == true { Darwin.kill(pid, SIGKILL) }
+            }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10, execute: timeout)
+
+        var output = Data()
+        var wasTruncated = false
+        let maximumBytes = 16 * 1_024 * 1_024
+        while let chunk = try? pipe.fileHandleForReading.read(upToCount: 64 * 1_024), !chunk.isEmpty {
+            guard !Task.isCancelled else {
+                process.terminate()
+                break
+            }
+            let remaining = maximumBytes - output.count
+            if remaining > 0 { output.append(chunk.prefix(remaining)) }
+            if chunk.count > remaining || output.count >= maximumBytes {
+                wasTruncated = true
+                process.terminate()
+                break
+            }
+        }
+        process.waitUntilExit()
+        timeout.cancel()
+        guard !Task.isCancelled,
+              process.terminationStatus == 0 || wasTruncated else {
+            return nil
+        }
+
+        var seen: Set<String> = []
+        let paths = output.split(separator: 0, omittingEmptySubsequences: true).compactMap { bytes -> String? in
+            let path = String(decoding: bytes, as: UTF8.self)
+            guard !path.hasPrefix("/"),
+                  !NSString(string: path).pathComponents.contains(".."),
+                  !ProjectFileIndexPolicy.shouldSkipFile(relativePath: path),
+                  seen.insert(path).inserted else {
+                return nil
+            }
+            return path
+        }
+        return Array(paths.sorted().prefix(limit))
+    }
+
+    nonisolated private static func shouldSkip(_ relativePath: String, isDirectory: Bool) -> Bool {
+        ProjectFileIndexPolicy.shouldSkip(relativePath: relativePath, isDirectory: isDirectory)
     }
 }
 
@@ -518,8 +778,12 @@ final class AppPreferences {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        defaultProviderID = AgentInfo.normalizedProviderID(defaults.string(forKey: Keys.defaultProviderID))
-        defaultModelID = AgentInfo.normalizedDefaultModelID(defaults.string(forKey: Keys.defaultModelID))
+        let restoredProviderID = AgentInfo.normalizedProviderID(defaults.string(forKey: Keys.defaultProviderID))
+        defaultProviderID = restoredProviderID
+        defaultModelID = AgentInfo.normalizedDefaultModelID(
+            defaults.string(forKey: Keys.defaultModelID),
+            providerID: restoredProviderID
+        )
         defaultEffort = AgentInfo.normalizedEffort(defaults.string(forKey: Keys.defaultEffort))
         defaultAccess = AgentAccess(rawValue: defaults.string(forKey: Keys.defaultAccess) ?? "") ?? .fullAccess
         defaultMode = AgentMode(rawValue: defaults.string(forKey: Keys.defaultMode) ?? "") ?? .auto
@@ -546,7 +810,7 @@ final class AppPreferences {
 
     func normalizeProviderDefaults(using registry: ProviderRegistry) {
         defaultProviderID = AgentInfo.normalizedProviderID(defaultProviderID)
-        defaultModelID = AgentInfo.normalizedModelID(defaultModelID)
+        defaultModelID = AgentInfo.normalizedModelID(defaultModelID, providerID: defaultProviderID)
         defaultEffort = AgentInfo.normalizedEffort(defaultEffort)
 
         if registry.provider(for: defaultProviderID) == nil {
@@ -595,9 +859,11 @@ final class AppPreferences {
     private static func fallbackModelID(for providerID: String) -> String {
         switch providerID {
         case "codex":
-            AgentInfo.normalizedModelID(nil)
+            AgentInfo.normalizedModelID(nil, providerID: "codex")
+        case "claude":
+            AgentInfo.normalizedModelID(nil, providerID: "claude")
         default:
-            AgentInfo.normalizedModelID(nil)
+            AgentInfo.normalizedModelID(nil, providerID: providerID)
         }
     }
 }
@@ -643,6 +909,18 @@ final class AppState {
 
     private let runtimeDiscovery = RuntimeDiscovery()
     private var scheduledSaveTask: Task<Void, Never>?
+    @ObservationIgnored private let terminationObserver = NotificationObserverToken()
+    private var nativeWorkspaceSyncTask: Task<Void, Never>?
+    private var nativeActiveProjectPollingTask: Task<Void, Never>?
+    private var nativeTranscriptTasks: [UUID: Task<Void, Never>] = [:]
+    private var nativeTranscriptLoadIDs: [UUID: UUID] = [:]
+    private var prunedNativePresentations: [UUID: [NativeThreadIdentity: AgentInfo]] = [:]
+    private var isShuttingDown = false
+
+    nonisolated private static let maximumAttachmentBytes = 20 * 1_024 * 1_024
+    nonisolated private static let maximumPendingAttachmentBytes = 50 * 1_024 * 1_024
+    nonisolated private static let maximumPendingAttachmentCount = 10
+    nonisolated private static let maximumPrunedNativePresentationsPerProject = 32
 
     var activeProject: ProjectState? {
         projects.first { $0.project.id == activeProjectID }
@@ -673,6 +951,24 @@ final class AppState {
         gitStatusService.onInfoChange = { [weak self] projectID, gitInfo in
             self?.applyGitInfo(gitInfo, to: projectID)
         }
+        terminationObserver.store(NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.shutdownForTermination()
+            }
+        })
+        terminationObserver.store(NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleApplicationDidBecomeActive()
+            }
+        })
 
         Task { @MainActor in
             await bootstrap()
@@ -680,13 +976,18 @@ final class AppState {
     }
 
     func bootstrap() async {
-        await runtimeDiscovery.register(.codex)
+        // Restore and hydrate the local shell before binary discovery. A
+        // missing CLI can make its login-shell fallback slow, but that must
+        // not hold the persisted workspace UI behind a provider probe.
+        await ProjectPersistence.load(into: self)
 
         providerRegistry.register(CodexProvider(discovery: runtimeDiscovery))
+        providerRegistry.register(ClaudeCodeProvider(discovery: runtimeDiscovery))
         preferences.normalizeProviderDefaults(using: providerRegistry)
-        await refreshRuntimeHealth()
-
-        ProjectPersistence.load(into: self)
+        runtimeHealth = [
+            BinarySpec.codex.id: .checking,
+            BinarySpec.claude.id: .checking,
+        ]
         let normalizedLegacyTitles = normalizeLegacyAgentTitles()
         for project in projects {
             hydrate(project)
@@ -698,13 +999,32 @@ final class AppState {
         }
         #endif
 
-        activeProjectID = activeProjectID ?? projects.first?.id
+        if activeProject == nil {
+            activeProjectID = projects.first?.id
+        }
         if activeAgent == nil {
             activeAgentID = resolvedLastAgentID(for: activeProject)
         }
+        synchronizeProjectResources()
         synchronizeActiveProjectPanels()
 
         isBootstrapped = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await runtimeDiscovery.register(.codex)
+            await runtimeDiscovery.register(.claude)
+            runtimeHealth = await runtimeDiscovery.allHealth()
+
+            // Provider-native repair can begin as soon as executable paths are
+            // known; model/version probes continue independently.
+            scheduleNativeThreadSynchronization(
+                prioritizing: activeProjectID,
+                includeAllProjects: true,
+                discoveryMode: .repair
+            )
+            startActiveProjectNativePolling()
+            await refreshRuntimeHealth()
+        }
 
         if normalizedLegacyTitles {
             ProjectPersistence.save(self)
@@ -723,9 +1043,17 @@ final class AppState {
     }
 
     func addProject(at url: URL) {
-        let standardizedPath = url.standardizedFileURL.path
+        guard url.isFileURL else { return }
+        var isDirectory: ObjCBool = false
+        let standardizedPath = Project.normalizedRootPath(url.path)
+        guard FileManager.default.fileExists(atPath: standardizedPath, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return
+        }
+        let canonicalPath = URL(fileURLWithPath: standardizedPath, isDirectory: true)
+            .resolvingSymlinksInPath().path
 
-        if let existing = projects.first(where: { $0.project.rootPath == standardizedPath }) {
+        if let existing = projects.first(where: { $0.project.canonicalRootPath == canonicalPath }) {
             activateProject(existing.id)
             return
         }
@@ -735,12 +1063,27 @@ final class AppState {
         let state = ProjectState(project: project, agents: [])
         projects.append(state)
         hydrate(state)
-        _ = addAgent(to: state)
+        refreshNativeThreads(for: state)
         scheduleSave()
     }
 
     func removeProject(_ projectID: UUID) {
-        gitStatusService.stopPolling(projectID: projectID)
+        guard let removedProject = projects.first(where: { $0.id == projectID }) else { return }
+
+        for agent in removedProject.agents {
+            nativeTranscriptTasks[agent.id]?.cancel()
+            nativeTranscriptTasks[agent.id] = nil
+            nativeTranscriptLoadIDs[agent.id] = nil
+            conversationService.cancelStreaming(for: agent.id)
+            conversationService.clearPendingRequests(for: agent.id)
+            releaseProviderSession(for: agent)
+            for session in agent.terminalSessions {
+                session.shutdown()
+            }
+        }
+        gitStatusService.removeProject(projectID: projectID)
+        ConversationPersistence.remove(projectID: projectID)
+        prunedNativePresentations[projectID] = nil
         projects.removeAll { $0.id == projectID }
 
         if activeProjectID == projectID {
@@ -749,6 +1092,7 @@ final class AppState {
             } else {
                 activeProjectID = nil
                 activeAgentID = nil
+                synchronizeProjectResources()
             }
         }
 
@@ -781,6 +1125,23 @@ final class AppState {
         return info
     }
 
+    @discardableResult
+    private func addFreshDraft(to project: ProjectState, copying source: AgentInfo) -> AgentInfo {
+        var configuration = source.agent.configuration
+        configuration.providerID = source.providerID
+        let draft = Agent(title: "New Thread", configuration: configuration)
+        let info = AgentInfo(agent: draft, projectRootPath: project.project.rootPath)
+        configureAgent(info)
+        reconcileConfiguration(for: info)
+        info.applyGitInfo(project.gitInfo)
+        project.agents.append(info)
+        project.project.agentOrder = project.agents.map(\.id)
+        project.project.updatedAt = Date()
+        activateAgent(info.id, in: project.id)
+        scheduleSave()
+        return info
+    }
+
     func removeAgent(_ agentID: UUID) {
         guard let project = project(for: agentID),
               let agentIndex = project.agents.firstIndex(where: { $0.id == agentID }) else {
@@ -789,8 +1150,16 @@ final class AppState {
 
         conversationService.cancelStreaming(for: agentID)
         conversationService.clearPendingRequests(for: agentID)
+        nativeTranscriptTasks[agentID]?.cancel()
+        nativeTranscriptTasks[agentID] = nil
+        nativeTranscriptLoadIDs[agentID] = nil
+        releaseProviderSession(for: project.agents[agentIndex])
 
         let removedAgent = project.agents.remove(at: agentIndex)
+        if removedAgent.nativeThreadBinding != nil {
+            cachePrunedNativePresentation(removedAgent, projectID: project.id)
+            trimNativePresentationAgentIDs(for: project)
+        }
         for session in removedAgent.terminalSessions {
             session.shutdown()
         }
@@ -812,7 +1181,9 @@ final class AppState {
             project.lastSelectedAgentID = project.agents.first?.id
         }
 
-        ConversationPersistence.save(project: project)
+        if removedAgent.nativeThreadBinding == nil {
+            ConversationPersistence.remove(agentID: agentID, projectID: project.id)
+        }
         synchronizeActiveProjectPanels()
         scheduleSave()
     }
@@ -822,41 +1193,143 @@ final class AppState {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
+        let supportedKinds = supportedAttachmentKinds(for: agent)
+        guard !supportedKinds.isEmpty else {
+            agent.conversationState.error = "Attachments are not supported by this provider."
+            return
+        }
+        var supportedTypeIdentifiers: Set<String> = []
+        if supportedKinds.contains(.image) {
+            supportedTypeIdentifiers.formUnion(Attachment.supportedImageTypes)
+        }
+        if supportedKinds.contains(.pdf) {
+            supportedTypeIdentifiers.insert("com.adobe.pdf")
+        }
+        panel.allowedContentTypes = supportedTypeIdentifiers.compactMap(UTType.init)
         panel.prompt = "Attach"
 
         guard panel.runModal() == .OK else { return }
 
-        for url in panel.urls {
-            guard let data = try? Data(contentsOf: url) else { continue }
-            let attachment = Attachment(
-                data: data,
-                mimeType: Attachment.mimeType(forExtension: url.pathExtension),
-                filename: url.lastPathComponent
-            )
-            agent.conversationState.addAttachment(attachment)
+        Task { [weak self, weak agent] in
+            guard let self, let agent else { return }
+            if let error = await attachFiles(at: panel.urls, to: agent) {
+                agent.conversationState.error = error
+            }
         }
+    }
+
+    func attachFiles(at urls: [URL], to agent: AgentInfo) async -> String? {
+        guard !urls.isEmpty else { return nil }
+
+        let supportedKinds = supportedAttachmentKinds(for: agent)
+        let existingBytes = agent.conversationState.pendingAttachments.reduce(into: 0) { partial, attachment in
+            partial += attachment.data.count
+        }
+        let existingCount = agent.conversationState.pendingAttachments.count
+
+        let result = await Task.detached(priority: .userInitiated) {
+            Self.loadAttachments(
+                from: urls,
+                existingBytes: existingBytes,
+                existingCount: existingCount,
+                supportedKinds: supportedKinds
+            )
+        }.value
+        guard project(for: agent.id) != nil else { return nil }
+        return applyLoadedAttachments(result, to: agent)
+    }
+
+    func attachImageData(_ data: Data, mimeType: String, filename: String, to agent: AgentInfo) async -> String? {
+        let supportedKinds = supportedAttachmentKinds(for: agent)
+        guard supportedKinds.contains(.image), mimeType.hasPrefix("image/") else {
+            return "Images are not supported by this provider."
+        }
+        guard !data.isEmpty else {
+            return "The pasted image is empty."
+        }
+        guard data.count <= Self.maximumAttachmentBytes else {
+            return "The pasted image exceeds the 20 MB per-file limit."
+        }
+
+        return applyLoadedAttachments(
+            AttachmentLoadResult(
+                attachments: [Attachment(data: data, mimeType: mimeType, filename: filename)],
+                errors: []
+            ),
+            to: agent
+        )
+    }
+
+    private func supportedAttachmentKinds(for agent: AgentInfo) -> Set<ProviderAttachmentKind> {
+        providerRegistry.provider(for: agent.providerID)?.capabilities.supportedAttachments ?? []
+    }
+
+    private func applyLoadedAttachments(_ result: AttachmentLoadResult, to agent: AgentInfo) -> String? {
+        var totalBytes = agent.conversationState.pendingAttachments.reduce(into: 0) { partial, attachment in
+            partial += attachment.data.count
+        }
+        var errors = result.errors
+        for attachment in result.attachments {
+            guard agent.conversationState.pendingAttachments.count < Self.maximumPendingAttachmentCount,
+                  totalBytes + attachment.data.count <= Self.maximumPendingAttachmentBytes else {
+                errors.append("The pending attachment limit was reached.")
+                break
+            }
+            agent.conversationState.addAttachment(attachment)
+            totalBytes += attachment.data.count
+        }
+
+        return errors.isEmpty ? nil : Self.attachmentErrorSummary(errors)
     }
 
     func sendPrompt(for agent: AgentInfo) {
         let prompt = agent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty else { return }
-
         let attachments = agent.conversationState.pendingAttachments
-        agent.conversationState.inputText = ""
-        agent.conversationState.clearAttachments()
+        guard !prompt.isEmpty || !attachments.isEmpty else { return }
+
+        if FlowXSlashCommand(prompt) != nil, !attachments.isEmpty {
+            agent.conversationState.error = "Attachments cannot be used with slash commands. Remove them or send them with a regular prompt."
+            return
+        }
+
+        if FlowXSlashCommand(prompt) != nil,
+           providerRegistry.provider(for: agent.providerID)?.capabilities.supportsThreadControls != true {
+            agent.conversationState.error = "Thread-control slash commands are not supported by this provider."
+            return
+        }
 
         if let slashCommand = FlowXSlashCommand(prompt) {
+            // Keep the composer draft and image bytes intact when the provider
+            // is still starting, unavailable, or bound to another workspace.
+            guard preflightPromptDispatch(for: agent) != nil else { return }
+            agent.conversationState.inputText = ""
+            agent.conversationState.clearAttachments()
             handleSlashCommand(slashCommand, attachments: attachments, for: agent)
             return
         }
 
-        dispatchPrompt(prompt, attachments: attachments, for: agent)
+        // ConversationService can reject a queued prompt at its bounded queue
+        // or attachment limits. Clear the composer only after it accepts the
+        // request so typed text and image bytes are never silently lost.
+        if dispatchPrompt(prompt, attachments: attachments, for: agent) {
+            agent.conversationState.inputText = ""
+            agent.conversationState.clearAttachments()
+        }
     }
 
     func activateProject(_ projectID: UUID) {
         guard let project = projects.first(where: { $0.id == projectID }) else { return }
+        let projectChanged = activeProjectID != projectID
         activeProjectID = projectID
         activeAgentID = resolvedLastAgentID(for: project)
+        cancelNativeTranscriptLoads(except: activeAgentID)
+        if projectChanged {
+            synchronizeProjectResources()
+            scheduleNativeThreadSynchronization(prioritizing: project.id, includeAllProjects: false)
+        }
+        if let agent = activeAgent {
+            loadNativeTranscriptIfNeeded(for: agent, in: project)
+        }
         synchronizeActiveProjectPanels()
         persistStateIfBootstrapped()
     }
@@ -867,10 +1340,19 @@ final class AppState {
             return
         }
 
+        let projectChanged = activeProjectID != projectID
         activeProjectID = projectID
         activeAgentID = agentID
+        cancelNativeTranscriptLoads(except: agentID)
         if project.lastSelectedAgentID != agentID {
             project.lastSelectedAgentID = agentID
+        }
+        if projectChanged {
+            synchronizeProjectResources()
+            scheduleNativeThreadSynchronization(prioritizing: project.id, includeAllProjects: false)
+        }
+        if let agent = project.agents.first(where: { $0.id == agentID }) {
+            loadNativeTranscriptIfNeeded(for: agent, in: project)
         }
         synchronizeActiveProjectPanels()
         persistStateIfBootstrapped()
@@ -880,7 +1362,7 @@ final class AppState {
         conversationService.cancelStreaming(for: agent.id)
         agent.syncExecutionStateFromConversation()
         if let project = project(for: agent.id) {
-            ConversationPersistence.save(project: project)
+            ConversationPersistence.save(agent: agent, projectID: project.id)
         }
         scheduleSave()
     }
@@ -888,10 +1370,15 @@ final class AppState {
     func resetConversation(for agent: AgentInfo) {
         conversationService.cancelStreaming(for: agent.id)
         conversationService.clearPendingRequests(for: agent.id)
+        releaseProviderSession(for: agent)
+        if let project = project(for: agent.id), agent.nativeThreadBinding != nil {
+            _ = addFreshDraft(to: project, copying: agent)
+            return
+        }
         agent.conversationState.resetConversation()
         agent.syncExecutionStateFromConversation()
         if let project = project(for: agent.id) {
-            ConversationPersistence.save(project: project)
+            ConversationPersistence.save(agent: agent, projectID: project.id)
         }
         scheduleSave()
     }
@@ -929,8 +1416,17 @@ final class AppState {
 
     func restartConversationSession(for agent: AgentInfo) {
         conversationService.cancelStreaming(for: agent.id)
+        releaseProviderSession(for: agent)
 
         let latestPrompt = agent.conversationState.latestUserPrompt?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let project = project(for: agent.id), agent.nativeThreadBinding != nil {
+            let draft = addFreshDraft(to: project, copying: agent)
+            if let latestPrompt, !latestPrompt.isEmpty {
+                dispatchPrompt(latestPrompt, for: draft)
+            }
+            return
+        }
 
         agent.conversationState.sessionID = nil
         agent.conversationState.activeTurnID = nil
@@ -979,6 +1475,48 @@ final class AppState {
         }
     }
 
+    func respondToUserInput(
+        _ requestID: UUID,
+        answers: ProviderUserInputAnswers,
+        for agent: AgentInfo
+    ) {
+        guard let request = agent.conversationState.removeUserInputRequest(requestID) else { return }
+        agent.conversationState.recordRuntimeActivity(
+            kind: .note,
+            tone: .info,
+            summary: "Input submitted",
+            detail: request.questions.map(\.header).joined(separator: ", "),
+            state: "answered",
+            turnID: agent.conversationState.activeTurnID
+        )
+        persistConversation(for: agent)
+
+        Task { @MainActor in
+            await conversationService.respondToUserInput(
+                requestID,
+                answers: answers,
+                for: agent.id
+            )
+        }
+    }
+
+    func cancelUserInput(_ requestID: UUID, for agent: AgentInfo) {
+        guard let request = agent.conversationState.removeUserInputRequest(requestID) else { return }
+        agent.conversationState.recordRuntimeActivity(
+            kind: .note,
+            tone: .warning,
+            summary: "Input cancelled",
+            detail: request.title,
+            state: "cancelled",
+            turnID: agent.conversationState.activeTurnID
+        )
+        persistConversation(for: agent)
+
+        Task { @MainActor in
+            await conversationService.cancelUserInput(requestID, for: agent.id)
+        }
+    }
+
     func selectInspectorPath(_ path: String, for project: ProjectState) {
         project.selectedInspectorPath = path
     }
@@ -1009,8 +1547,646 @@ final class AppState {
         }
     }
 
+    /// Refreshes the provider-owned thread index for one project. FlowX only
+    /// stores the resulting presentation binding and workspace layout; the
+    /// provider remains the transcript authority.
+    func refreshNativeThreads(
+        for project: ProjectState,
+        discoveryMode: ProviderNativeThreadDiscoveryMode = .repair
+    ) {
+        guard projects.contains(where: { $0.id == project.id }),
+              !project.isSyncingNativeThreads else {
+            return
+        }
+        scheduleNativeThreadSynchronization(
+            prioritizing: project.id,
+            includeAllProjects: false,
+            forceTranscriptRefresh: true,
+            discoveryMode: discoveryMode
+        )
+    }
+
+    private func startActiveProjectNativePolling() {
+        nativeActiveProjectPollingTask?.cancel()
+        nativeActiveProjectPollingTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(60))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled, NSApplication.shared.isActive else { continue }
+                self?.refreshActiveNativeThreadsIfIdle()
+            }
+        }
+    }
+
+    private func refreshActiveNativeThreadsIfIdle() {
+        guard isBootstrapped,
+              NSApplication.shared.isActive,
+              let project = activeProject,
+              !project.isSyncingNativeThreads else {
+            return
+        }
+        scheduleNativeThreadSynchronization(
+            prioritizing: project.id,
+            includeAllProjects: false
+        )
+    }
+
+    private func handleApplicationDidBecomeActive() {
+        guard isBootstrapped else { return }
+        if let project = activeProject {
+            gitStatusService.forceRefresh(projectID: project.id)
+            project.refreshFiles()
+        }
+        refreshActiveNativeThreadsIfIdle()
+    }
+
+    private func scheduleNativeThreadSynchronization(
+        prioritizing projectID: UUID?,
+        includeAllProjects: Bool,
+        forceTranscriptRefresh: Bool = false,
+        discoveryMode: ProviderNativeThreadDiscoveryMode = .indexed
+    ) {
+        nativeWorkspaceSyncTask?.cancel()
+
+        var projectIDs: [UUID] = []
+        if let projectID, projects.contains(where: { $0.id == projectID }) {
+            projectIDs.append(projectID)
+        }
+        if includeAllProjects {
+            projectIDs.append(contentsOf: projects.map(\.id).filter { !projectIDs.contains($0) })
+        }
+        guard !projectIDs.isEmpty else { return }
+
+        nativeWorkspaceSyncTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            for projectID in projectIDs {
+                guard !Task.isCancelled else { return }
+                await synchronizeNativeThreads(
+                    projectID: projectID,
+                    forceTranscriptRefresh: forceTranscriptRefresh,
+                    discoveryMode: discoveryMode
+                )
+            }
+        }
+    }
+
+    private func synchronizeNativeThreads(
+        projectID: UUID,
+        forceTranscriptRefresh: Bool,
+        discoveryMode: ProviderNativeThreadDiscoveryMode
+    ) async {
+        guard let project = projects.first(where: { $0.id == projectID }) else { return }
+        let projectRootURL = project.project.rootURL
+        let expectedCanonicalPath = project.project.canonicalRootPath
+        let providers = providerRegistry.allProviders
+            .compactMap { $0 as? any AIProviderNativeThreads }
+            .sorted { $0.displayName < $1.displayName }
+
+        project.isSyncingNativeThreads = true
+        project.nativeThreadSyncError = nil
+        defer {
+            if let currentProject = projects.first(where: { $0.id == projectID }) {
+                currentProject.isSyncingNativeThreads = false
+            }
+        }
+
+        var bindingsByIdentity: [NativeThreadIdentity: NativeThreadBinding] = [:]
+        var successfullyListedProviderIDs: Set<String> = []
+        var errors: [String] = []
+        for provider in providers {
+            guard !Task.isCancelled else { return }
+            if runtimeHealth[provider.id]?.isUsable == false {
+                continue
+            }
+            do {
+                let listLimit = 250
+                let summaries = try await provider.listNativeThreads(
+                    workingDirectory: projectRootURL,
+                    limit: listLimit,
+                    discoveryMode: discoveryMode
+                )
+                guard !Task.isCancelled else { return }
+                let providerID = AgentInfo.normalizedProviderID(provider.id)
+                successfullyListedProviderIDs.insert(providerID)
+                for summary in summaries {
+                    guard let binding = Self.validatedNativeBinding(
+                        summary,
+                        expectedCanonicalPath: expectedCanonicalPath
+                    ), binding.identity.providerID == providerID else {
+                        continue
+                    }
+                    if let existing = bindingsByIdentity[binding.identity],
+                       existing.updatedAt >= binding.updatedAt {
+                        continue
+                    }
+                    bindingsByIdentity[binding.identity] = binding
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                errors.append("\(provider.displayName): \(error.localizedDescription)")
+            }
+        }
+
+        guard !Task.isCancelled,
+              let currentProject = projects.first(where: { $0.id == projectID }) else {
+            return
+        }
+
+        let orderedBindings = bindingsByIdentity.values.sorted {
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+            return Self.nativeIdentitySortKey($0.identity) < Self.nativeIdentitySortKey($1.identity)
+        }
+        await mergeNativeBindings(
+            orderedBindings,
+            successfullyListedProviderIDs: successfullyListedProviderIDs,
+            into: currentProject
+        )
+        currentProject.lastNativeThreadSyncAt = Date()
+        currentProject.nativeThreadSyncError = errors.isEmpty ? nil : errors.joined(separator: "\n")
+
+        if activeProjectID == currentProject.id,
+           let activeAgentID,
+           let activeAgent = currentProject.agents.first(where: { $0.id == activeAgentID }) {
+            loadNativeTranscriptIfNeeded(
+                for: activeAgent,
+                in: currentProject,
+                force: forceTranscriptRefresh
+            )
+        }
+        scheduleSave()
+    }
+
+    private func mergeNativeBindings(
+        _ bindings: [NativeThreadBinding],
+        successfullyListedProviderIDs: Set<String>,
+        into project: ProjectState
+    ) async {
+        removeStaleNativeAgents(
+            from: project,
+            retaining: Set(bindings.map(\.identity)),
+            successfullyListedProviderIDs: successfullyListedProviderIDs
+        )
+
+        var agentsByIdentity: [NativeThreadIdentity: AgentInfo] = [:]
+        for agent in project.agents {
+            if let identity = agent.nativeThreadBinding?.identity,
+               agentsByIdentity[identity] == nil {
+                agentsByIdentity[identity] = agent
+            }
+        }
+
+        let cachedPresentations = prunedNativePresentations[project.id] ?? [:]
+        let persistedAgentIDs = Set(bindings.compactMap { binding -> UUID? in
+            guard agentsByIdentity[binding.identity] == nil,
+                  cachedPresentations[binding.identity] == nil else {
+                return nil
+            }
+            return project.nativePresentationAgentIDs[binding.identity]
+                ?? Self.deterministicAgentID(for: binding.identity)
+        })
+        let persistedConversations = await ConversationPersistence.load(
+            agentIDs: persistedAgentIDs,
+            for: project.id
+        )
+        guard projects.contains(where: { $0.id == project.id }) else { return }
+
+        for binding in bindings {
+            let matchingAgent = agentsByIdentity[binding.identity]
+                ?? project.agents.first(where: { agent in
+                    agent.nativeThreadBinding == nil
+                        && agent.providerID == binding.identity.providerID
+                        && agent.conversationState.sessionID == binding.identity.sessionID
+                })
+
+            if let agent = matchingAgent {
+                let previousNativeTitle = agent.nativeThreadBinding?.title
+                if previousNativeTitle == nil || agent.agent.title == previousNativeTitle {
+                    agent.agent.title = binding.title
+                }
+                agent.nativeThreadBinding = binding
+                agent.agent.configuration.providerID = binding.identity.providerID
+                agent.conversationState.sessionID = binding.identity.sessionID
+                project.nativePresentationAgentIDs[binding.identity] = agent.id
+                reconcileConfiguration(for: agent)
+                agentsByIdentity[binding.identity] = agent
+                continue
+            }
+
+            if let cachedAgent = takePrunedNativePresentation(
+                identity: binding.identity,
+                projectID: project.id
+            ) {
+                cachedAgent.nativeThreadBinding = binding
+                cachedAgent.agent.configuration.providerID = binding.identity.providerID
+                cachedAgent.conversationState.sessionID = binding.identity.sessionID
+                cachedAgent.terminalSessions.removeAll()
+                cachedAgent.setTerminalCount(cachedAgent.workspace.terminalCount)
+                configureAgent(cachedAgent)
+                reconcileConfiguration(for: cachedAgent)
+                cachedAgent.applyGitInfo(project.gitInfo)
+                project.agents.append(cachedAgent)
+                project.nativePresentationAgentIDs[binding.identity] = cachedAgent.id
+                agentsByIdentity[binding.identity] = cachedAgent
+                continue
+            }
+
+            let nativeAgentID = project.nativePresentationAgentIDs[binding.identity]
+                ?? Self.deterministicAgentID(for: binding.identity)
+            let persistedConversation = persistedConversations[nativeAgentID].flatMap { conversation in
+                conversation.sessionID == binding.identity.sessionID ? conversation : nil
+            }
+            let nativeAgent = Agent(
+                id: nativeAgentID,
+                title: binding.title,
+                configuration: AgentConfiguration(
+                    providerID: binding.identity.providerID,
+                    modelID: nil,
+                    effort: nil,
+                    agentMode: nil,
+                    agentAccess: nil
+                )
+            )
+            let info = AgentInfo(
+                agent: nativeAgent,
+                projectRootPath: project.project.rootPath,
+                conversationState: persistedConversation.map(ConversationPersistence.state),
+                nativeThreadBinding: binding,
+                nativeImageSidecar: persistedConversation?.nativeImageSidecar ?? []
+            )
+            configureAgent(info)
+            reconcileConfiguration(for: info)
+            info.applyGitInfo(project.gitInfo)
+            project.agents.append(info)
+            project.nativePresentationAgentIDs[binding.identity] = info.id
+            agentsByIdentity[binding.identity] = info
+        }
+
+        // Keep draft rows in their existing slots while ordering every native
+        // slot by provider recency. This makes the current task immediately
+        // visible without reshuffling explicit local drafts.
+        var nativeAgents = project.agents
+            .filter { $0.nativeThreadBinding != nil }
+            .sorted {
+                let lhsDate = $0.nativeUpdatedAt ?? .distantPast
+                let rhsDate = $1.nativeUpdatedAt ?? .distantPast
+                if lhsDate != rhsDate { return lhsDate > rhsDate }
+                let lhsIdentity = $0.nativeThreadBinding.map { Self.nativeIdentitySortKey($0.identity) } ?? ""
+                let rhsIdentity = $1.nativeThreadBinding.map { Self.nativeIdentitySortKey($0.identity) } ?? ""
+                return lhsIdentity < rhsIdentity
+            }
+        project.agents = project.agents.map { agent in
+            guard agent.nativeThreadBinding != nil else { return agent }
+            return nativeAgents.removeFirst()
+        }
+
+        project.project.agentOrder = project.agents.map(\.id)
+        if project.lastSelectedAgentID == nil {
+            project.lastSelectedAgentID = project.agents.first?.id
+        }
+        if activeProjectID == project.id,
+           activeAgentID.flatMap({ selectedID in
+               project.agents.contains(where: { $0.id == selectedID }) ? selectedID : nil
+           }) == nil {
+            activeAgentID = project.lastSelectedAgentID ?? project.agents.first?.id
+        }
+        trimNativePresentationAgentIDs(for: project)
+    }
+
+    private func removeStaleNativeAgents(
+        from project: ProjectState,
+        retaining currentIdentities: Set<NativeThreadIdentity>,
+        successfullyListedProviderIDs: Set<String>
+    ) {
+        let visibleIdentities = project.agents.compactMap { $0.nativeThreadBinding?.identity }
+        let streamingIdentities: Set<NativeThreadIdentity> = Set(project.agents.compactMap { agent -> NativeThreadIdentity? in
+            guard agent.conversationState.isStreaming else { return nil }
+            return agent.nativeThreadBinding?.identity
+        })
+        var protectedIdentities = streamingIdentities
+        if let selectedAgentID = project.lastSelectedAgentID,
+           let selectedIdentity = project.agents.first(where: { $0.id == selectedAgentID })?
+            .nativeThreadBinding?.identity {
+            protectedIdentities.insert(selectedIdentity)
+        }
+        let identitiesToRemove = NativeProjectionPolicy.identitiesToRemove(
+            visibleIdentities: visibleIdentities,
+            returnedIdentities: currentIdentities,
+            successfullyListedProviders: successfullyListedProviderIDs,
+            protectedIdentities: protectedIdentities,
+            providerID: \.providerID
+        )
+        let staleAgents: [AgentInfo] = project.agents.filter { agent in
+            guard let identity = agent.nativeThreadBinding?.identity else { return false }
+            return identitiesToRemove.contains(identity)
+        }
+        guard !staleAgents.isEmpty else { return }
+
+        let staleIDs: Set<UUID> = Set(staleAgents.map(\.id))
+        for agent in staleAgents {
+            nativeTranscriptTasks[agent.id]?.cancel()
+            nativeTranscriptTasks[agent.id] = nil
+            nativeTranscriptLoadIDs[agent.id] = nil
+            conversationService.cancelStreaming(for: agent.id)
+            conversationService.clearPendingRequests(for: agent.id)
+            releaseProviderSession(for: agent)
+            for terminal in agent.terminalSessions {
+                terminal.shutdown()
+            }
+            cachePrunedNativePresentation(agent, projectID: project.id)
+        }
+        project.agents.removeAll { staleIDs.contains($0.id) }
+        if project.lastSelectedAgentID.map(staleIDs.contains) == true {
+            project.lastSelectedAgentID = project.agents.first?.id
+        }
+        if activeProjectID == project.id,
+           activeAgentID.map(staleIDs.contains) == true {
+            activeAgentID = project.lastSelectedAgentID ?? project.agents.first?.id
+        }
+        trimNativePresentationAgentIDs(for: project)
+    }
+
+    private func cachePrunedNativePresentation(_ agent: AgentInfo, projectID: UUID) {
+        guard let identity = agent.nativeThreadBinding?.identity else { return }
+        agent.isLoadingNativeTranscript = false
+        for terminal in agent.terminalSessions {
+            terminal.shutdown()
+        }
+        agent.terminalSessions.removeAll()
+        var cache = prunedNativePresentations[projectID] ?? [:]
+        cache[identity] = agent
+        if cache.count > Self.maximumPrunedNativePresentationsPerProject,
+           let oldestIdentity = cache.min(by: {
+               ($0.value.nativeUpdatedAt ?? .distantPast) < ($1.value.nativeUpdatedAt ?? .distantPast)
+           })?.key {
+            cache[oldestIdentity] = nil
+        }
+        prunedNativePresentations[projectID] = cache
+    }
+
+    private func takePrunedNativePresentation(
+        identity: NativeThreadIdentity,
+        projectID: UUID
+    ) -> AgentInfo? {
+        guard var cache = prunedNativePresentations[projectID] else { return nil }
+        let agent = cache.removeValue(forKey: identity)
+        prunedNativePresentations[projectID] = cache.isEmpty ? nil : cache
+        return agent
+    }
+
+    private func trimNativePresentationAgentIDs(for project: ProjectState) {
+        var boundedMappings: [NativeThreadIdentity: UUID] = [:]
+        for agent in project.agents {
+            if let identity = agent.nativeThreadBinding?.identity {
+                boundedMappings[identity] = agent.id
+            }
+        }
+
+        let activeIdentities = Set(boundedMappings.keys)
+        let reserve = (prunedNativePresentations[project.id] ?? [:]).values
+            .compactMap { agent -> (identity: NativeThreadIdentity, agent: AgentInfo)? in
+                guard let identity = agent.nativeThreadBinding?.identity,
+                      !activeIdentities.contains(identity) else {
+                    return nil
+                }
+                return (identity, agent)
+            }
+            .sorted {
+                let lhsDate = $0.agent.nativeUpdatedAt ?? .distantPast
+                let rhsDate = $1.agent.nativeUpdatedAt ?? .distantPast
+                if lhsDate != rhsDate { return lhsDate > rhsDate }
+                return Self.nativeIdentitySortKey($0.identity) < Self.nativeIdentitySortKey($1.identity)
+            }
+
+        for entry in reserve.prefix(Self.maximumPrunedNativePresentationsPerProject) {
+            boundedMappings[entry.identity] = entry.agent.id
+        }
+        if project.nativePresentationAgentIDs != boundedMappings {
+            project.nativePresentationAgentIDs = boundedMappings
+        }
+    }
+
+    private func loadNativeTranscriptIfNeeded(
+        for agent: AgentInfo,
+        in project: ProjectState,
+        force: Bool = false
+    ) {
+        guard let binding = agent.nativeThreadBinding,
+              !agent.conversationState.isStreaming,
+              let provider = providerRegistry.provider(for: binding.identity.providerID)
+                as? any AIProviderNativeThreads,
+              Self.canonicalDirectoryPath(binding.workingDirectory) == project.project.canonicalRootPath else {
+            return
+        }
+        if !force,
+           let loadedAt = agent.nativeTranscriptLoadedAt,
+           loadedAt >= binding.updatedAt {
+            return
+        }
+
+        nativeTranscriptTasks[agent.id]?.cancel()
+        agent.isLoadingNativeTranscript = true
+        agent.nativeTranscriptError = nil
+        let agentID = agent.id
+        let projectID = project.id
+        let loadID = UUID()
+        nativeTranscriptLoadIDs[agentID] = loadID
+
+        nativeTranscriptTasks[agentID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if nativeTranscriptLoadIDs[agentID] == loadID {
+                    nativeTranscriptTasks[agentID] = nil
+                    nativeTranscriptLoadIDs[agentID] = nil
+                    projects.first(where: { $0.id == projectID })?
+                        .agents.first(where: { $0.id == agentID })?
+                        .isLoadingNativeTranscript = false
+                }
+            }
+            do {
+                let cachedConversation = await ConversationPersistence.load(
+                    agentIDs: [agentID],
+                    for: projectID
+                )[agentID]
+                guard !Task.isCancelled,
+                      nativeTranscriptLoadIDs[agentID] == loadID,
+                      let cachedProject = projects.first(where: { $0.id == projectID }),
+                      let cachedAgent = cachedProject.agents.first(where: { $0.id == agentID }),
+                      !cachedAgent.conversationState.isStreaming,
+                      cachedAgent.nativeThreadBinding?.identity == binding.identity else {
+                    return
+                }
+                if let cachedConversation,
+                   cachedConversation.sessionID == binding.identity.sessionID {
+                    if cachedAgent.conversationState.messages.isEmpty {
+                        ConversationPersistence.hydrate(
+                            cachedAgent.conversationState,
+                            from: cachedConversation
+                        )
+                        cachedAgent.syncExecutionStateFromConversation()
+                    }
+                    cachedAgent.nativeImageSidecar = ConversationAssetStore.updatedNativeImageSidecar(
+                        existing: cachedConversation.nativeImageSidecar + cachedAgent.nativeImageSidecar,
+                        messages: cachedAgent.conversationState.messages,
+                        sessionID: binding.identity.sessionID,
+                        projectID: projectID,
+                        agentID: agentID
+                    )
+                }
+
+                let nativeThread = try await provider.readNativeThread(
+                    id: binding.identity.sessionID,
+                    workingDirectory: project.project.rootURL
+                )
+                guard !Task.isCancelled,
+                      let currentProject = projects.first(where: { $0.id == projectID }),
+                      let currentAgent = currentProject.agents.first(where: { $0.id == agentID }),
+                      !currentAgent.conversationState.isStreaming,
+                      let refreshedBinding = Self.validatedNativeBinding(
+                        nativeThread.summary,
+                        expectedCanonicalPath: currentProject.project.canonicalRootPath
+                      ), refreshedBinding.identity == binding.identity else {
+                    return
+                }
+
+                currentAgent.nativeThreadBinding = refreshedBinding
+                let restoredMessages = ConversationAssetStore.reattachingNativeImages(
+                    to: nativeThread.messages,
+                    from: currentAgent.conversationState.messages,
+                    sidecar: currentAgent.nativeImageSidecar,
+                    sessionID: refreshedBinding.identity.sessionID,
+                    projectID: projectID,
+                    agentID: agentID
+                )
+                currentAgent.conversationState.replaceMessages(restoredMessages)
+                currentAgent.conversationState.sessionID = refreshedBinding.identity.sessionID
+                currentAgent.conversationState.activeProviderID = refreshedBinding.identity.providerID
+                currentAgent.conversationState.activeModelID = currentAgent.explicitModelID ?? refreshedBinding.model
+                currentAgent.nativeTranscriptLoadedAt = Date()
+                currentAgent.nativeTranscriptError = nil
+                currentAgent.isLoadingNativeTranscript = false
+                currentAgent.syncExecutionStateFromConversation()
+                ConversationPersistence.save(agent: currentAgent, projectID: projectID)
+                scheduleSave()
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled,
+                      let currentProject = projects.first(where: { $0.id == projectID }),
+                      let currentAgent = currentProject.agents.first(where: { $0.id == agentID }) else {
+                    return
+                }
+                currentAgent.isLoadingNativeTranscript = false
+                currentAgent.nativeTranscriptError = error.localizedDescription
+            }
+        }
+    }
+
+    private func cancelNativeTranscriptLoads(except retainedAgentID: UUID?) {
+        for agentID in Array(nativeTranscriptTasks.keys) where agentID != retainedAgentID {
+            nativeTranscriptTasks[agentID]?.cancel()
+            nativeTranscriptTasks[agentID] = nil
+            nativeTranscriptLoadIDs[agentID] = nil
+            project(for: agentID)?.agents.first(where: { $0.id == agentID })?
+                .isLoadingNativeTranscript = false
+        }
+    }
+
+    nonisolated private static func validatedNativeBinding(
+        _ summary: ProviderNativeThreadSummary,
+        expectedCanonicalPath: String
+    ) -> NativeThreadBinding? {
+        let providerID = AgentInfo.normalizedProviderID(summary.providerID)
+        let sessionID = summary.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sessionID.isEmpty,
+              let canonicalPath = canonicalDirectoryPath(summary.workingDirectory),
+              canonicalPath == expectedCanonicalPath else {
+            return nil
+        }
+
+        let source = normalizedProviderSource(summary.source, fallback: providerID)
+        let title = summary.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedSummary = ProviderNativeThreadSummary(
+            providerID: providerID,
+            id: sessionID,
+            title: title.isEmpty ? "\(providerID.capitalized) Thread" : title,
+            preview: String(summary.preview.prefix(500)),
+            workingDirectory: canonicalPath,
+            createdAt: summary.createdAt,
+            updatedAt: summary.updatedAt,
+            model: summary.model?.trimmingCharacters(in: .whitespacesAndNewlines),
+            effort: summary.effort?.trimmingCharacters(in: .whitespacesAndNewlines),
+            status: summary.status,
+            source: source
+        )
+        return NativeThreadBinding(summary: normalizedSummary)
+    }
+
+    nonisolated private static func canonicalDirectoryPath(_ rawPath: String) -> String? {
+        let trimmedPath = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else { return nil }
+        let expandedPath = (trimmedPath as NSString).expandingTildeInPath
+        guard (expandedPath as NSString).isAbsolutePath else { return nil }
+        return URL(fileURLWithPath: expandedPath, isDirectory: true)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .path
+    }
+
+    nonisolated private static func normalizedProviderSource(_ source: String, fallback: String) -> String {
+        let trimmedSource = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSource.isEmpty else { return fallback }
+        let expandedSource = (trimmedSource as NSString).expandingTildeInPath
+        if (expandedSource as NSString).isAbsolutePath {
+            return URL(fileURLWithPath: expandedSource)
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+                .path
+        }
+        return trimmedSource.lowercased()
+    }
+
+    nonisolated private static func nativeIdentitySortKey(_ identity: NativeThreadIdentity) -> String {
+        "\(identity.providerID)\u{0}\(identity.providerSource)\u{0}\(identity.sessionID)"
+    }
+
+    nonisolated private static func stableNativeIdentityKey(_ identity: NativeThreadIdentity) -> String {
+        "\(identity.providerID)\u{0}\(identity.sessionID)"
+    }
+
+    nonisolated private static func deterministicAgentID(for identity: NativeThreadIdentity) -> UUID {
+        let digest = SHA256.hash(data: Data(stableNativeIdentityKey(identity).utf8))
+        var bytes = Array(digest.prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x50
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
+    }
+
     func refreshRuntimeHealth() async {
+        await runtimeDiscovery.refreshAll()
         runtimeHealth = await runtimeDiscovery.allHealth()
+        let providers = providerRegistry.allProviders
+        for provider in providers where runtimeHealth[provider.id]?.isUsable != false {
+            _ = await provider.refreshAvailableModels()
+            providerRegistry.register(provider)
+        }
+        preferences.normalizeProviderDefaults(using: providerRegistry)
+        if isBootstrapped {
+            for project in projects {
+                for agent in project.agents {
+                    reconcileConfiguration(for: agent)
+                }
+            }
+            scheduleSave()
+        }
     }
 
     func pushActiveProject() async {
@@ -1153,6 +2329,7 @@ final class AppState {
     }
 
     func scheduleSave() {
+        guard !isShuttingDown else { return }
         scheduledSaveTask?.cancel()
         scheduledSaveTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(250))
@@ -1163,19 +2340,69 @@ final class AppState {
 
     private func hydrate(_ project: ProjectState) {
         configureProject(project)
-        project.refreshFiles()
         if !project.agents.isEmpty {
             for agent in project.agents {
-                agent.providerID = AgentInfo.normalizedProviderID(agent.providerID)
-                agent.modelID = AgentInfo.normalizedModelID(agent.modelID)
-                agent.effort = AgentInfo.normalizedEffort(agent.effort)
+                reconcileConfiguration(for: agent)
                 configureAgent(agent)
                 agent.setTerminalLaunchDirectory(project.project.rootPath)
                 agent.syncExecutionStateFromConversation()
             }
         }
+    }
 
-        gitStatusService.startPolling(projectID: project.id, rootPath: project.project.rootPath)
+    private func synchronizeProjectResources() {
+        guard let project = activeProject else {
+            gitStatusService.stopAll()
+            return
+        }
+
+        gitStatusService.pollOnly(projectID: project.id, rootPath: project.project.rootPath)
+        project.refreshFiles()
+    }
+
+    private func reconcileConfiguration(for agent: AgentInfo) {
+        var providerID = AgentInfo.normalizedProviderID(
+            agent.nativeThreadBinding?.identity.providerID ?? agent.agent.configuration.providerID
+        )
+        if providerRegistry.provider(for: providerID) == nil, agent.nativeThreadBinding == nil {
+            providerID = preferredProviderID()
+        }
+
+        guard let provider = providerRegistry.provider(for: providerID) else {
+            agent.agent.configuration.providerID = providerID
+            agent.conversationState.activeProviderID = providerID
+            agent.conversationState.activeModelID = agent.explicitModelID ?? agent.nativeModelID
+            return
+        }
+        let availableModels = provider.availableModels
+
+        var configuration = agent.agent.configuration
+        configuration.providerID = providerID
+        if let explicitModelID = configuration.modelID {
+            configuration.modelID = AgentInfo.normalizedModelID(explicitModelID, providerID: providerID)
+        }
+        if let explicitEffort = configuration.effort {
+            configuration.effort = AgentInfo.normalizedEffort(explicitEffort)
+        }
+
+        let effectiveModelID = configuration.modelID ?? agent.nativeModelID
+        let model = effectiveModelID.flatMap { effectiveModelID in
+            availableModels.first(where: { $0.id == effectiveModelID })
+        }
+        if let model {
+            let requestedWindow = configuration.contextWindowSize ?? model.contextWindow
+            if model.availableContextWindows.contains(requestedWindow) {
+                configuration.contextWindowSize = requestedWindow
+            } else {
+                configuration.contextWindowSize = model.availableContextWindows
+                    .filter { $0 <= requestedWindow }
+                    .max() ?? model.contextWindow
+            }
+        }
+        agent.agent.configuration = configuration
+        agent.conversationState.activeProviderID = providerID
+        agent.conversationState.activeModelID = effectiveModelID
+        agent.conversationState.configuredContextWindow = configuration.contextWindowSize
     }
 
     private func applyGitInfo(_ gitInfo: GitStatusService.GitInfo, to projectID: UUID) {
@@ -1280,44 +2507,74 @@ final class AppState {
         return project.agents.first?.id
     }
 
+    @discardableResult
     private func dispatchPrompt(
         _ prompt: String,
         attachments: [Attachment] = [],
         for agent: AgentInfo,
         resumeSessionID: String? = nil
-    ) {
-        guard let project = project(for: agent.id) else { return }
+    ) -> Bool {
+        guard let project = preflightPromptDispatch(for: agent) else { return false }
 
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedPrompt.isEmpty else { return }
+        guard !trimmedPrompt.isEmpty || !attachments.isEmpty else { return false }
 
         agent.markConversationStarted()
 
-        conversationService.send(
+        let accepted = conversationService.send(
             prompt: trimmedPrompt,
             attachments: attachments,
             to: agent.conversationState,
             providerID: agent.providerID,
-            model: agent.modelID,
-            effort: agent.effort,
+            model: agent.explicitModelID,
+            effort: agent.explicitEffort,
             systemPrompt: agent.systemPrompt,
-            agentMode: agent.agentMode,
-            agentAccess: agent.agentAccess,
+            agentMode: agent.explicitAgentMode,
+            agentAccess: agent.explicitAgentAccess,
             workingDirectory: project.project.rootURL,
             resumeSessionID: resumeSessionID,
+            onStart: {
+                ConversationPersistence.save(agent: agent, projectID: project.id)
+            },
+            onSessionReady: {
+                ConversationPersistence.save(agent: agent, projectID: project.id)
+            },
             onComplete: { [weak self] in
                 guard let self else { return }
                 Task { @MainActor in
+                    guard self.project(for: agent.id)?.id == project.id else { return }
                     agent.syncExecutionStateFromConversation()
-                    ConversationPersistence.save(project: project)
+                    ConversationPersistence.save(agent: agent, projectID: project.id)
                     gitStatusService.forceRefresh(projectID: project.id)
                     await refreshInspector(for: project)
+                    refreshNativeThreads(for: project, discoveryMode: .indexed)
                     scheduleSave()
                 }
             }
         )
 
-        scheduleSave()
+        if accepted {
+            scheduleSave()
+        }
+        return accepted
+    }
+
+    private func preflightPromptDispatch(for agent: AgentInfo) -> ProjectState? {
+        guard let project = project(for: agent.id) else { return nil }
+        guard runtimeHealth[agent.providerID]?.isUsable == true else {
+            let isChecking = runtimeHealth[agent.providerID] == .checking
+            agent.conversationState.error = isChecking
+                ? "\(agent.providerName) is still starting. Try again in a moment."
+                : "\(agent.providerName) is unavailable. Install or refresh its runtime in Settings."
+            return nil
+        }
+        if let binding = agent.nativeThreadBinding,
+           Self.canonicalDirectoryPath(binding.workingDirectory) != project.project.canonicalRootPath {
+            agent.conversationState.error = "This provider thread belongs to a different workspace. Refresh native threads before sending."
+            refreshNativeThreads(for: project)
+            return nil
+        }
+        return project
     }
 
     private func handleSlashCommand(_ command: FlowXSlashCommand, attachments: [Attachment], for agent: AgentInfo) {
@@ -1332,7 +2589,7 @@ final class AppState {
                             kind: .contextCompaction,
                             tone: .warning,
                             summary: "Nothing to compact",
-                            detail: "Start a Codex session first.",
+                            detail: "Start a provider session first.",
                             state: "skipped",
                             turnID: agent.conversationState.activeTurnID
                         )
@@ -1344,8 +2601,8 @@ final class AppState {
                         for: agent.conversationState,
                         providerID: agent.providerID,
                         systemPrompt: agent.systemPrompt,
-                        agentMode: agent.agentMode,
-                        agentAccess: agent.agentAccess,
+                        agentMode: agent.explicitAgentMode,
+                        agentAccess: agent.explicitAgentAccess,
                         workingDirectory: project.project.rootURL,
                         resumeSessionID: agent.conversationState.sessionID
                     )
@@ -1356,8 +2613,8 @@ final class AppState {
                         for: agent.conversationState,
                         providerID: agent.providerID,
                         systemPrompt: agent.systemPrompt,
-                        agentMode: agent.agentMode,
-                        agentAccess: agent.agentAccess,
+                        agentMode: agent.explicitAgentMode,
+                        agentAccess: agent.explicitAgentAccess,
                         workingDirectory: project.project.rootURL,
                         resumeSessionID: agent.conversationState.sessionID
                     )
@@ -1373,8 +2630,8 @@ final class AppState {
                         for: agent.conversationState,
                         providerID: agent.providerID,
                         systemPrompt: agent.systemPrompt,
-                        agentMode: agent.agentMode,
-                        agentAccess: agent.agentAccess,
+                        agentMode: agent.explicitAgentMode,
+                        agentAccess: agent.explicitAgentAccess,
                         workingDirectory: project.project.rootURL,
                         resumeSessionID: agent.conversationState.sessionID
                     )
@@ -1391,8 +2648,8 @@ final class AppState {
                         for: agent.conversationState,
                         providerID: agent.providerID,
                         systemPrompt: agent.systemPrompt,
-                        agentMode: agent.agentMode,
-                        agentAccess: agent.agentAccess,
+                        agentMode: agent.explicitAgentMode,
+                        agentAccess: agent.explicitAgentAccess,
                         workingDirectory: project.project.rootURL,
                         resumeSessionID: agent.conversationState.sessionID
                     )
@@ -1403,8 +2660,8 @@ final class AppState {
                         for: agent.conversationState,
                         providerID: agent.providerID,
                         systemPrompt: agent.systemPrompt,
-                        agentMode: agent.agentMode,
-                        agentAccess: agent.agentAccess,
+                        agentMode: agent.explicitAgentMode,
+                        agentAccess: agent.explicitAgentAccess,
                         workingDirectory: project.project.rootURL,
                         resumeSessionID: agent.conversationState.sessionID
                     )
@@ -1426,24 +2683,146 @@ final class AppState {
 
     private func persistConversation(for agent: AgentInfo) {
         if let project = project(for: agent.id) {
-            ConversationPersistence.save(project: project)
+            ConversationPersistence.save(agent: agent, projectID: project.id)
         }
         scheduleSave()
     }
 
+    private func releaseProviderSession(for agent: AgentInfo) {
+        guard let sessionID = agent.conversationState.sessionID, !sessionID.isEmpty else { return }
+        let providerID = agent.providerID
+        Task { [conversationService] in
+            await conversationService.releaseProviderSession(sessionID, providerID: providerID)
+        }
+    }
+
+    private func shutdownForTermination() {
+        guard !isShuttingDown else { return }
+        isShuttingDown = true
+        scheduledSaveTask?.cancel()
+        nativeWorkspaceSyncTask?.cancel()
+        nativeActiveProjectPollingTask?.cancel()
+        for task in nativeTranscriptTasks.values {
+            task.cancel()
+        }
+        nativeTranscriptTasks.removeAll()
+        nativeTranscriptLoadIDs.removeAll()
+
+        for project in projects {
+            for agent in project.agents {
+                conversationService.cancelStreaming(for: agent.id)
+                conversationService.clearPendingRequests(for: agent.id)
+                for session in agent.terminalSessions {
+                    session.shutdown()
+                }
+            }
+            ConversationPersistence.save(project: project)
+        }
+        ProjectPersistence.save(self)
+        gitStatusService.stopAll()
+        Task { [conversationService] in
+            await conversationService.releaseAllProviderSessions()
+        }
+        ConversationPersistence.flush()
+        ProjectPersistence.flush()
+    }
+
+    nonisolated private static func loadAttachments(
+        from urls: [URL],
+        existingBytes: Int,
+        existingCount: Int,
+        supportedKinds: Set<ProviderAttachmentKind>
+    ) -> AttachmentLoadResult {
+        var attachments: [Attachment] = []
+        var errors: [String] = []
+        var totalBytes = existingBytes
+        var totalCount = existingCount
+
+        for url in urls {
+            guard !Task.isCancelled else { break }
+            let filename = url.lastPathComponent
+            let mimeType = Attachment.mimeType(forExtension: url.pathExtension)
+            let kind: ProviderAttachmentKind?
+            if mimeType.hasPrefix("image/") {
+                kind = .image
+            } else if mimeType == "application/pdf" {
+                kind = .pdf
+            } else {
+                kind = nil
+            }
+            guard let kind, supportedKinds.contains(kind) else {
+                errors.append("\(filename) is not supported by this provider.")
+                continue
+            }
+            guard totalCount < maximumPendingAttachmentCount else {
+                errors.append("Only \(maximumPendingAttachmentCount) attachments can be queued at once.")
+                break
+            }
+            guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+                  values.isRegularFile == true,
+                  let fileSize = values.fileSize,
+                  fileSize > 0 else {
+                errors.append("\(filename) is empty or unreadable.")
+                continue
+            }
+            guard fileSize <= maximumAttachmentBytes else {
+                errors.append("\(filename) exceeds the 20 MB per-file limit.")
+                continue
+            }
+            guard totalBytes + fileSize <= maximumPendingAttachmentBytes else {
+                errors.append("Attachments cannot exceed 50 MB in total.")
+                break
+            }
+
+            do {
+                let data = try Data(contentsOf: url)
+                guard !data.isEmpty else {
+                    errors.append("\(filename) is empty.")
+                    continue
+                }
+                guard data.count <= maximumAttachmentBytes,
+                      totalBytes + data.count <= maximumPendingAttachmentBytes else {
+                    errors.append("\(filename) exceeds the attachment size limit.")
+                    continue
+                }
+                attachments.append(Attachment(data: data, mimeType: mimeType, filename: filename))
+                totalBytes += data.count
+                totalCount += 1
+            } catch {
+                errors.append("\(filename) could not be read.")
+            }
+        }
+
+        return AttachmentLoadResult(attachments: attachments, errors: errors)
+    }
+
+    nonisolated private static func attachmentErrorSummary(_ errors: [String]) -> String {
+        let uniqueErrors = Array(Set(errors)).sorted()
+        let visibleErrors = uniqueErrors.prefix(3)
+        let suffix = uniqueErrors.count > visibleErrors.count
+            ? " \(uniqueErrors.count - visibleErrors.count) more file(s) were skipped."
+            : ""
+        return visibleErrors.joined(separator: " ") + suffix
+    }
+
     private func preferredProviderID() -> String {
         let configuredProviderID = preferences.resolvedDefaultProviderID(using: providerRegistry)
-        if providerRegistry.provider(for: configuredProviderID) != nil {
+        if providerRegistry.provider(for: configuredProviderID) != nil,
+           runtimeHealth[configuredProviderID]?.isUsable != false {
             return configuredProviderID
         }
-        if runtimeHealth["codex"]?.isUsable == true {
-            return "codex"
+        for providerID in ["codex", "claude"] where runtimeHealth[providerID]?.isUsable == true {
+            if providerRegistry.provider(for: providerID) != nil {
+                return providerID
+            }
         }
-        return configuredProviderID
+        return providerRegistry.allProviders
+            .sorted { $0.displayName < $1.displayName }
+            .first?.id ?? configuredProviderID
     }
 
     private func defaultAgentTitle(for index: Int) -> String {
-        "Agent \(index)"
+        "New Thread"
     }
 
     private func normalizeLegacyAgentTitles() -> Bool {

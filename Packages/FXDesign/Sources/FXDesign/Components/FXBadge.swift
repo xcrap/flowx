@@ -3,6 +3,7 @@ import SwiftUI
 public enum FXBadgeTone {
     case neutral
     case accent
+    case accentSecondary
     case success
     case warning
     case error
@@ -41,6 +42,7 @@ public struct FXBadge: View {
         switch tone {
         case .neutral: FXColors.fgTertiary
         case .accent: FXColors.accent
+        case .accentSecondary: FXColors.accentSecondary
         case .success: FXColors.success
         case .warning: FXColors.warning
         case .error: FXColors.error
@@ -52,6 +54,7 @@ public struct FXBadge: View {
         switch tone {
         case .neutral: FXColors.fgSecondary
         case .accent: FXColors.accent
+        case .accentSecondary: FXColors.accentSecondary
         case .success: FXColors.success
         case .warning: FXColors.warning
         case .error: FXColors.error

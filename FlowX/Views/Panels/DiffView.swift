@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import FXCore
 import FXDesign
 
 private struct ParsedDiffLine: Identifiable, Sendable {
@@ -45,6 +46,7 @@ private struct SplitDiffRow: Identifiable, Sendable {
 private struct DiffTaskKey: Hashable, Sendable {
     let projectID: UUID
     let mode: InspectorComparisonMode
+    let contentRevision: UInt64
     let fileSignature: String
 }
 
@@ -92,6 +94,8 @@ private enum DiffSectionCache {
 
 struct DiffView: View {
     @Environment(AppState.self) private var appState
+
+    private static let parseExecutor = BoundedTaskExecutor(maxConcurrentTasks: 1)
 
     @State private var diffSections: [DiffSection] = []
     @State private var isLoadingDiff = false
@@ -255,7 +259,7 @@ struct DiffView: View {
                     .foregroundStyle(FXColors.fg)
 
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(FXTypography.icon(.micro))
                     .foregroundStyle(FXColors.fgTertiary)
                     .rotationEffect(.degrees(isExpanded ? 180 : 0))
             }
@@ -317,7 +321,7 @@ struct DiffView: View {
             }
         }) {
             Image(systemName: "sidebar.right")
-                .font(.system(size: 11, weight: .medium))
+                .font(FXTypography.icon(.small))
                 .foregroundStyle(showsChangedFiles ? FXColors.fg : FXColors.fgTertiary)
                 .frame(width: 28, height: 28)
                 .background(showsChangedFiles ? FXColors.bgSelected : FXColors.bgSurface)
@@ -359,37 +363,50 @@ struct DiffView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    @ViewBuilder
     private func splitDiffView(project: ProjectState, sections: [DiffSection], scrollTargetPath: String?) -> some View {
-        let allRows = sections.flatMap(splitRows(for:))
-        let maxOldLine = allRows.compactMap(\.oldLine).max() ?? 0
-        let maxNewLine = allRows.compactMap(\.newLine).max() ?? 0
-        let numberWidth = max(lineNumberWidth(maxLine: maxOldLine), lineNumberWidth(maxLine: maxNewLine))
+        if sections.contains(where: { splitRowsBySectionID[$0.id] == nil }) {
+            VStack(spacing: FXSpacing.sm) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Preparing split diff…")
+                    .font(FXTypography.caption)
+                    .foregroundStyle(FXColors.fgTertiary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(FXColors.panelBg)
+        } else {
+            let allRows = sections.flatMap { splitRowsBySectionID[$0.id] ?? [] }
+            let maxOldLine = allRows.compactMap(\.oldLine).max() ?? 0
+            let maxNewLine = allRows.compactMap(\.newLine).max() ?? 0
+            let numberWidth = max(lineNumberWidth(maxLine: maxOldLine), lineNumberWidth(maxLine: maxNewLine))
 
-        return ScrollViewReader { proxy in
-            ScrollView(.vertical) {
-                LazyVStack(spacing: FXSpacing.lg) {
-                    ForEach(sections) { section in
-                        splitSectionCard(
-                            section,
-                            selectedPath: scrollTargetPath,
-                            project: project,
-                            numberWidth: numberWidth
-                        )
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    LazyVStack(spacing: FXSpacing.lg) {
+                        ForEach(sections) { section in
+                            splitSectionCard(
+                                section,
+                                selectedPath: scrollTargetPath,
+                                project: project,
+                                numberWidth: numberWidth
+                            )
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, FXSpacing.md)
+                    .padding(.vertical, FXSpacing.md)
+                    .textSelection(.enabled)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, FXSpacing.md)
-                .padding(.vertical, FXSpacing.md)
-                .textSelection(.enabled)
+                .onAppear {
+                    scrollToSelectedFile(scrollTargetPath, using: proxy, sections: sections)
+                }
+                .onChange(of: scrollTargetPath) { _, path in
+                    scrollToSelectedFile(path, using: proxy, sections: sections)
+                }
             }
-            .onAppear {
-                scrollToSelectedFile(scrollTargetPath, using: proxy, sections: sections)
-            }
-            .onChange(of: scrollTargetPath) { _, path in
-                scrollToSelectedFile(path, using: proxy, sections: sections)
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func inlineSectionCard(
@@ -404,7 +421,7 @@ struct DiffView: View {
 
             if !isCollapsed(section) {
                 ScrollView(.horizontal) {
-                    VStack(spacing: 0) {
+                    LazyVStack(spacing: 0) {
                         ForEach(section.parsedLines) { line in
                             inlineDiffLine(line, numberWidth: numberWidth)
                         }
@@ -452,8 +469,8 @@ struct DiffView: View {
 
             if !isCollapsed(section) {
                 ScrollView(.horizontal) {
-                    VStack(spacing: 0) {
-                        ForEach(splitRows(for: section)) { row in
+                    LazyVStack(spacing: 0) {
+                        ForEach(splitRowsBySectionID[section.id] ?? []) { row in
                             splitRowView(row, numberWidth: numberWidth)
                         }
                     }
@@ -520,7 +537,7 @@ struct DiffView: View {
                 }
             }) {
                 Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(FXTypography.icon(.small))
                     .foregroundStyle(FXColors.fgQuaternary)
                     .frame(width: diffSectionAccessoryWidth, height: diffSectionAccessoryWidth)
                     .contentShape(Rectangle())
@@ -729,7 +746,7 @@ struct DiffView: View {
     private func messageView(title: String, body: String) -> some View {
         VStack(spacing: FXSpacing.md) {
             Image(systemName: "doc.text.magnifyingglass")
-                .font(.system(size: 22, weight: .regular))
+                .font(FXTypography.icon(.illustration))
                 .foregroundStyle(FXColors.fgTertiary)
 
             VStack(spacing: FXSpacing.xs) {
@@ -807,7 +824,10 @@ struct DiffView: View {
             nextID += 1
         }
 
-        for rawLine in text.components(separatedBy: .newlines) {
+        for (index, rawLine) in text.components(separatedBy: .newlines).enumerated() {
+            if index.isMultiple(of: 256), Task.isCancelled {
+                return []
+            }
             if rawLine.hasPrefix("@@") {
                 let hunkLines = Self.hunkLineNumbers(from: rawLine)
                 oldLine = hunkLines?.0
@@ -874,6 +894,9 @@ struct DiffView: View {
         }
 
         while index < parsedLines.count {
+            if index.isMultiple(of: 256), Task.isCancelled {
+                return []
+            }
             let line = parsedLines[index]
 
             switch line.kind {
@@ -982,6 +1005,7 @@ struct DiffView: View {
         rowsBySectionID.reserveCapacity(sections.count)
 
         for section in sections {
+            guard !Task.isCancelled else { return [:] }
             rowsBySectionID[section.id] = splitRows(from: section.parsedLines)
         }
 
@@ -1014,7 +1038,10 @@ struct DiffView: View {
             currentRawLines.removeAll(keepingCapacity: true)
         }
 
-        for rawLine in text.components(separatedBy: .newlines) {
+        for (index, rawLine) in text.components(separatedBy: .newlines).enumerated() {
+            if index.isMultiple(of: 256), Task.isCancelled {
+                return []
+            }
             if rawLine.hasPrefix("diff --git "),
                let anchorPath = Self.diffAnchorPath(from: rawLine) {
                 flushSection()
@@ -1078,18 +1105,113 @@ struct DiffView: View {
     }
 
     nonisolated private static func diffAnchorPath(from line: String) -> String? {
-        guard line.hasPrefix("diff --git "),
-              let range = line.range(of: " b/") else {
+        let prefix = "diff --git "
+        guard line.hasPrefix(prefix) else { return nil }
+
+        let header = line.dropFirst(prefix.count)
+        var cursor = header.startIndex
+        guard let oldToken = gitPathToken(in: header, cursor: &cursor),
+              let newToken = gitPathToken(in: header, cursor: &cursor) else {
             return nil
         }
-        let path = String(line[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-        return path.isEmpty ? nil : path
+
+        // A deletion names /dev/null on the new side; otherwise the b/ path is
+        // authoritative, including rename destinations.
+        let selectedToken = newToken == "/dev/null" ? oldToken : newToken
+        let path: Substring
+        if selectedToken.hasPrefix("a/") || selectedToken.hasPrefix("b/") {
+            path = selectedToken.dropFirst(2)
+        } else {
+            path = selectedToken[...]
+        }
+        return path.isEmpty ? nil : String(path)
+    }
+
+    /// Reads one path from a git patch header. Git wraps paths containing
+    /// whitespace or control/non-ASCII bytes in C-style quotes, with UTF-8
+    /// bytes represented as octal escapes when `core.quotePath` is enabled.
+    nonisolated private static func gitPathToken(
+        in text: Substring,
+        cursor: inout Substring.Index
+    ) -> Substring? {
+        while cursor < text.endIndex, text[cursor].isWhitespace {
+            cursor = text.index(after: cursor)
+        }
+        guard cursor < text.endIndex else { return nil }
+
+        guard text[cursor] == "\"" else {
+            let start = cursor
+            while cursor < text.endIndex, !text[cursor].isWhitespace {
+                cursor = text.index(after: cursor)
+            }
+            return text[start..<cursor]
+        }
+
+        cursor = text.index(after: cursor)
+        var bytes: [UInt8] = []
+
+        while cursor < text.endIndex {
+            let character = text[cursor]
+            cursor = text.index(after: cursor)
+
+            if character == "\"" {
+                return Substring(String(decoding: bytes, as: UTF8.self))
+            }
+
+            guard character == "\\" else {
+                bytes.append(contentsOf: String(character).utf8)
+                continue
+            }
+
+            guard cursor < text.endIndex else { return nil }
+            let escaped = text[cursor]
+            cursor = text.index(after: cursor)
+
+            if let firstOctal = octalDigit(escaped) {
+                var value = Int(firstOctal)
+                var digitCount = 1
+                while digitCount < 3,
+                      cursor < text.endIndex,
+                      let nextOctal = octalDigit(text[cursor]) {
+                    value = value * 8 + Int(nextOctal)
+                    cursor = text.index(after: cursor)
+                    digitCount += 1
+                }
+                bytes.append(UInt8(truncatingIfNeeded: value))
+                continue
+            }
+
+            switch escaped {
+            case "a": bytes.append(7)
+            case "b": bytes.append(8)
+            case "t": bytes.append(9)
+            case "n": bytes.append(10)
+            case "v": bytes.append(11)
+            case "f": bytes.append(12)
+            case "r": bytes.append(13)
+            case "\"": bytes.append(34)
+            case "\\": bytes.append(92)
+            default: bytes.append(contentsOf: String(escaped).utf8)
+            }
+        }
+
+        return nil
+    }
+
+    nonisolated private static func octalDigit(_ character: Character) -> UInt8? {
+        guard character.unicodeScalars.count == 1,
+              let scalar = character.unicodeScalars.first,
+              (48...55).contains(scalar.value) else {
+            return nil
+        }
+        return UInt8(scalar.value - 48)
     }
 
     private func diffTaskKey(for project: ProjectState) -> DiffTaskKey {
         DiffTaskKey(
             projectID: project.id,
             mode: project.inspectorComparisonMode,
+            contentRevision: project.gitInfo.contentRevision,
             fileSignature: visibleDiffFiles(for: project)
                 .map { "\($0.path)|\($0.status)|\($0.additions)|\($0.deletions)" }
                 .joined(separator: "||")
@@ -1142,11 +1264,20 @@ struct DiffView: View {
             files: visibleFiles
         )
 
-        guard activeLoadKey == snapshot, diffTaskKey(for: project) == snapshot else { return }
-        let sections = await Task.detached(priority: .userInitiated) {
-            DiffView.sections(from: diff)
-        }.value
-        guard activeLoadKey == snapshot, diffTaskKey(for: project) == snapshot else { return }
+        guard !Task.isCancelled,
+              activeLoadKey == snapshot,
+              diffTaskKey(for: project) == snapshot else { return }
+        let sections: [DiffSection]
+        do {
+            sections = try await Self.parseExecutor.run(priority: .userInitiated) {
+                DiffView.sections(from: diff)
+            }
+        } catch {
+            return
+        }
+        guard !Task.isCancelled,
+              activeLoadKey == snapshot,
+              diffTaskKey(for: project) == snapshot else { return }
         DiffSectionCache.store(sections, for: snapshot)
         diffSections = sections
         splitRowsBySectionID = [:]
@@ -1169,20 +1300,22 @@ struct DiffView: View {
         let missingSections = sections.filter { splitRowsBySectionID[$0.id] == nil }
         guard !missingSections.isEmpty else { return }
 
-        let computedRows = await Task.detached(priority: .userInitiated) {
-            Self.splitRowsMap(from: missingSections)
-        }.value
+        let computedRows: [String: [SplitDiffRow]]
+        do {
+            computedRows = try await Self.parseExecutor.run(priority: .userInitiated) {
+                Self.splitRowsMap(from: missingSections)
+            }
+        } catch {
+            return
+        }
 
-        guard displayedDiffKey == snapshot,
+        guard !Task.isCancelled,
+              displayedDiffKey == snapshot,
               project.inspectorDiffDisplayMode == .split else {
             return
         }
 
         splitRowsBySectionID.merge(computedRows) { current, _ in current }
-    }
-
-    private func splitRows(for section: DiffSection) -> [SplitDiffRow] {
-        splitRowsBySectionID[section.id] ?? Self.splitRows(from: section.parsedLines)
     }
 
     private func diffTitle(for fileCount: Int, mode: InspectorComparisonMode) -> String {
@@ -1243,9 +1376,9 @@ struct DiffView: View {
         case .context:
             FXColors.fgSecondary
         case .addition:
-            FXColors.success
+            FXColors.diffAddedFg
         case .deletion:
-            FXColors.error
+            FXColors.diffRemovedFg
         }
     }
 
@@ -1258,9 +1391,9 @@ struct DiffView: View {
         case .context:
             .clear
         case .addition:
-            FXColors.success.opacity(0.08)
+            FXColors.diffAddedBg
         case .deletion:
-            FXColors.error.opacity(0.08)
+            FXColors.diffRemovedBg
         }
     }
 
@@ -1271,9 +1404,9 @@ struct DiffView: View {
         case .context:
             FXColors.fgSecondary
         case .addition:
-            FXColors.success
+            FXColors.diffAddedFg
         case .deletion:
-            FXColors.error
+            FXColors.diffRemovedFg
         }
     }
 
@@ -1284,9 +1417,9 @@ struct DiffView: View {
         case .context:
             .clear
         case .addition:
-            FXColors.success.opacity(0.08)
+            FXColors.diffAddedBg
         case .deletion:
-            FXColors.error.opacity(0.08)
+            FXColors.diffRemovedBg
         }
     }
 
@@ -1295,9 +1428,9 @@ struct DiffView: View {
         case .neutral:
             FXColors.fgQuaternary
         case .addition:
-            FXColors.success
+            FXColors.diffAddedFg
         case .deletion:
-            FXColors.error
+            FXColors.diffRemovedFg
         }
     }
 

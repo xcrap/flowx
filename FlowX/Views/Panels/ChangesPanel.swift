@@ -95,7 +95,7 @@ struct ChangesPanel: View {
         }) {
             HStack(spacing: FXSpacing.md) {
                 Image(systemName: iconName(for: file))
-                    .font(.system(size: 12, weight: .medium))
+                    .font(FXTypography.icon(.regular))
                     .foregroundStyle(statusColor(for: file, mode: project.inspectorComparisonMode))
                     .frame(width: 14)
 
@@ -164,7 +164,7 @@ struct ChangesPanel: View {
     private func panelMessage(icon: String, title: String, body: String) -> some View {
         VStack(spacing: FXSpacing.md) {
             Image(systemName: icon)
-                .font(.system(size: 22, weight: .regular))
+                .font(FXTypography.icon(.illustration))
                 .foregroundStyle(FXColors.fgTertiary)
 
             VStack(spacing: FXSpacing.xs) {

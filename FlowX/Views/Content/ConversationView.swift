@@ -4,6 +4,11 @@ import FXAgent
 import FXDesign
 import FXCore
 
+private struct MessageRenderKey: Hashable {
+    let agentID: UUID
+    let revision: Int
+}
+
 struct ConversationView: View {
     @Environment(AppState.self) private var appState
     @Bindable var agent: AgentInfo
@@ -11,6 +16,7 @@ struct ConversationView: View {
     @State private var editingQueuedPromptIndex: Int?
     @State private var editingQueuedPromptText = ""
     @State private var initialScrollRestorePending = true
+    @State private var renderedItems: [ConversationDisplayItem] = []
 
     private let maxContentWidth: CGFloat = FXLayout.readableContentWidth
     private static let exactTokenFormatter: NumberFormatter = {
@@ -23,7 +29,7 @@ struct ConversationView: View {
         VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(displayItems) { item in
+                    ForEach(renderedItems) { item in
                         displayItemView(for: item)
                             .id(item.scrollID)
                             .padding(.bottom, displayItemSpacing(for: item))
@@ -72,6 +78,22 @@ struct ConversationView: View {
             .opacity(initialScrollRestorePending ? 0 : 1)
             .allowsHitTesting(!initialScrollRestorePending)
 
+            if !agent.conversationState.pendingUserInputRequests.isEmpty {
+                ProviderUserInputTray(
+                    requests: agent.conversationState.pendingUserInputRequests,
+                    onSubmit: { request, answers in
+                        appState.respondToUserInput(request.id, answers: answers, for: agent)
+                    },
+                    onCancel: { request in
+                        if request.cancellationBehavior == .respondToProvider {
+                            appState.cancelUserInput(request.id, for: agent)
+                        } else {
+                            appState.cancelPrompt(for: agent)
+                        }
+                    }
+                )
+            }
+
             if agent.conversationState.pendingToolApprovalCount > 0 {
                 approvalTray
             }
@@ -87,6 +109,9 @@ struct ConversationView: View {
             ChatInputBar(agent: agent)
         }
         .background(FXColors.contentBg)
+        .task(id: MessageRenderKey(agentID: agent.id, revision: agent.conversationState.messageRevision)) {
+            renderedItems = Self.makeDisplayItems(from: agent.messages)
+        }
         .onDisappear {
             if appState.isBootstrapped {
                 appState.scheduleSave()
@@ -97,7 +122,7 @@ struct ConversationView: View {
     private var bottomScrollID: String { "conversation-bottom" }
 
     private var contentVersion: Int {
-        var version = agent.messages.count
+        var version = agent.conversationState.messageRevision
         version = version &* 31 &+ agent.conversationState.streamingRevision
         version += agent.isStreaming ? 1 : 0
         version += agent.conversationState.error == nil ? 0 : 1
@@ -108,7 +133,7 @@ struct ConversationView: View {
         return version
     }
 
-    private var displayItems: [ConversationDisplayItem] {
+    private static func makeDisplayItems(from messages: [ConversationMessage]) -> [ConversationDisplayItem] {
         var items: [ConversationDisplayItem] = []
         var toolGroup: [ConversationMessage] = []
 
@@ -118,8 +143,8 @@ struct ConversationView: View {
             toolGroup.removeAll()
         }
 
-        for message in agent.messages {
-            if isGroupedToolEventMessage(message) {
+        for message in messages {
+            if Self.isGroupedToolEventMessage(message) {
                 toolGroup.append(message)
             } else {
                 flushToolGroup()
@@ -165,7 +190,7 @@ struct ConversationView: View {
         }
     }
 
-    private func isGroupedToolEventMessage(_ message: ConversationMessage) -> Bool {
+    private static func isGroupedToolEventMessage(_ message: ConversationMessage) -> Bool {
         !message.content.isEmpty && message.content.allSatisfy { item in
             switch item {
             case .toolUse:
@@ -181,6 +206,7 @@ struct ConversationView: View {
     private var showsContextBar: Bool {
         agent.conversationState.queuedPromptCount > 0
             || agent.conversationState.pendingToolApprovalCount > 0
+            || !agent.conversationState.pendingUserInputRequests.isEmpty
             || agent.conversationState.activeGoal != nil
             || agent.isStreaming
             || (usagePercent ?? 0) >= 70
@@ -366,7 +392,7 @@ struct ConversationView: View {
                                 appState.removeQueuedPrompt(at: index, for: agent)
                             }) {
                                 Image(systemName: "xmark")
-                                    .font(.system(size: 9, weight: .bold))
+                                    .font(FXTypography.icon(.micro))
                                     .foregroundStyle(FXColors.fgTertiary)
                                     .frame(width: 16, height: 16)
                                     .contentShape(Rectangle())
@@ -542,6 +568,11 @@ struct ConversationView: View {
                     FXBadge(count == 1 ? "1 approval needed" : "\(count) approvals needed", tone: .warning)
                 }
 
+                if !agent.conversationState.pendingUserInputRequests.isEmpty {
+                    let count = agent.conversationState.pendingUserInputRequests.count
+                    FXBadge(count == 1 ? "Input needed" : "\(count) inputs needed", tone: .accent)
+                }
+
                 if let usagePercentLabel, (usagePercent ?? 0) >= 70 {
                     FXBadge("\(usagePercentLabel) context", tone: .warning)
                 }
@@ -567,6 +598,7 @@ struct ConversationView: View {
             .top,
             (agent.conversationState.queuedPromptCount > 0
                 || agent.conversationState.pendingToolApprovalCount > 0
+                || !agent.conversationState.pendingUserInputRequests.isEmpty
                 || agent.conversationState.activeGoal != nil)
                 ? 0
                 : FXSpacing.md
@@ -580,7 +612,7 @@ struct ConversationView: View {
     private func goalRow(_ goal: ConversationGoal) -> some View {
         HStack(spacing: FXSpacing.sm) {
             Image(systemName: "target")
-                .font(.system(size: 12, weight: .semibold))
+                .font(FXTypography.icon(.regular))
                 .foregroundStyle(FXColors.accent)
                 .frame(width: 18, height: 18)
 
@@ -656,7 +688,7 @@ struct ConversationView: View {
         VStack(alignment: .leading, spacing: FXSpacing.md) {
             HStack(alignment: .top, spacing: FXSpacing.sm) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 12))
+                    .font(FXTypography.icon(.regular))
                     .foregroundStyle(FXColors.error)
                     .frame(width: 20, height: 20)
 
@@ -723,7 +755,7 @@ struct ConversationView: View {
             HStack(spacing: FXSpacing.xs) {
                 if let icon {
                     Image(systemName: icon)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(FXTypography.icon(.micro))
                 }
 
                 Text(title)
@@ -763,7 +795,7 @@ struct ConversationView: View {
         let normalizedOffset = max(0, min(offset, maxOffset))
         let pinnedToBottom = maxOffset <= 1 || normalizedOffset >= maxOffset - 24
 
-        if abs(agent.workspace.conversationScrollOffset - normalizedOffset) > 1 {
+        if abs(agent.workspace.conversationScrollOffset - normalizedOffset) > 12 {
             agent.workspace.conversationScrollOffset = normalizedOffset
         }
 
@@ -1083,7 +1115,7 @@ private struct ToolActivityGroup: View {
     var body: some View {
         HStack(spacing: FXSpacing.sm) {
             Image(systemName: "terminal")
-                .font(.system(size: 11, weight: .medium))
+                .font(FXTypography.icon(.small))
                 .foregroundStyle(FXColors.fgTertiary)
                 .frame(width: 14)
 

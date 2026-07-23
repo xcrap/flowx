@@ -12,5 +12,6 @@ let package = Package(
     ],
     targets: [
         .target(name: "FXAgent", dependencies: ["FXCore"]),
+        .testTarget(name: "FXAgentTests", dependencies: ["FXAgent", "FXCore"]),
     ]
 )

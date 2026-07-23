@@ -224,7 +224,7 @@ private struct FXDropdownRow: View {
 
                 if item.isSelected {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(FXTypography.icon(.small))
                         .foregroundStyle(FXColors.accent)
                 }
             }

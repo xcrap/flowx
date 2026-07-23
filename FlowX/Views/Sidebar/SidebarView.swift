@@ -3,18 +3,27 @@ import FXDesign
 
 struct SidebarView: View {
     @Environment(AppState.self) private var appState
+    @State private var threadSearchQuery = ""
 
     var body: some View {
         VStack(spacing: 0) {
+            if !appState.projects.isEmpty {
+                taskSearchField
+                FXDivider()
+            }
+
             ScrollView {
                 if appState.projects.isEmpty {
                     emptyState
                         .padding(.horizontal, FXSpacing.md)
                         .padding(.vertical, FXSpacing.xxxl)
                 } else {
-                    VStack(spacing: FXSpacing.xl) {
+                    LazyVStack(spacing: FXSpacing.xl) {
                         ForEach(appState.projects) { project in
-                            ProjectRow(project: project)
+                            ProjectRow(
+                                project: project,
+                                threadSearchQuery: threadSearchQuery
+                            )
                         }
                     }
                     .padding(.horizontal, FXSpacing.md)
@@ -28,7 +37,7 @@ struct SidebarView: View {
             Button(action: { appState.openAddProjectPanel() }) {
                 HStack(spacing: FXSpacing.sm) {
                     Image(systemName: "folder.badge.plus")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(FXTypography.icon(.regular))
                     Text("Add Project")
                         .font(FXTypography.bodyMedium)
                     Spacer()
@@ -47,10 +56,44 @@ struct SidebarView: View {
         }
     }
 
+    private var taskSearchField: some View {
+        HStack(spacing: FXSpacing.sm) {
+            Image(systemName: "magnifyingglass")
+                .font(FXTypography.icon(.small))
+                .foregroundStyle(FXColors.fgQuaternary)
+
+            TextField("Search tasks", text: $threadSearchQuery)
+                .textFieldStyle(.plain)
+                .font(FXTypography.body)
+                .foregroundStyle(FXColors.fgSecondary)
+                .accessibilityLabel("Search provider tasks")
+
+            if !threadSearchQuery.isEmpty {
+                FXIconButton(
+                    icon: "xmark.circle.fill",
+                    label: "Clear task search",
+                    size: 22
+                ) {
+                    threadSearchQuery = ""
+                }
+            }
+        }
+        .padding(.horizontal, FXSpacing.md)
+        .padding(.vertical, FXSpacing.sm)
+        .background(FXColors.bgSurface)
+        .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
+        .overlay(
+            RoundedRectangle(cornerRadius: FXRadii.md)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+        )
+        .padding(.horizontal, FXSpacing.md)
+        .padding(.vertical, FXSpacing.sm)
+    }
+
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: FXSpacing.lg) {
             Image(systemName: "folder.badge.plus")
-                .font(.system(size: 24, weight: .regular))
+                .font(FXTypography.icon(.illustration))
                 .foregroundStyle(FXColors.fgTertiary)
 
             VStack(alignment: .leading, spacing: FXSpacing.xs) {

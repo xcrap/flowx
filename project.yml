@@ -3,7 +3,7 @@ options:
   bundleIdPrefix: com.flowx
   deploymentTarget:
     macOS: "26.0"
-  xcodeVersion: "16.0"
+  xcodeVersion: "26.0"
   createIntermediateGroups: true
   generateEmptyDirectories: true
 settings:
@@ -34,8 +34,13 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.flowx.app
         PRODUCT_NAME: FlowX
+        MARKETING_VERSION: 1.0.0
+        CURRENT_PROJECT_VERSION: 1
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_GENERATION_MODE: GeneratedFile
+        INFOPLIST_KEY_CFBundleDisplayName: FlowX
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Manual
         ENABLE_APP_SANDBOX: false

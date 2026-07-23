@@ -4,6 +4,7 @@ import FXTerminal
 
 struct TerminalPanel: View {
     @Bindable var agent: AgentInfo
+    @State private var resizeStartHeight: CGFloat?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,7 +18,7 @@ struct TerminalPanel: View {
 
             // Terminal panes side by side
             HStack(spacing: 0) {
-                ForEach(Array(agent.visibleTerminalSessions.enumerated()), id: \.offset) { index, session in
+                ForEach(Array(agent.visibleTerminalSessions.enumerated()), id: \.element.id) { index, session in
                     if index > 0 {
                         FXDivider(.vertical)
                     }
@@ -38,8 +39,18 @@ struct TerminalPanel: View {
             .gesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { value in
-                        let newHeight = agent.workspace.terminalHeight - value.translation.height
-                        agent.workspace.terminalHeight = max(120, min(500, newHeight))
+                        if resizeStartHeight == nil {
+                            resizeStartHeight = agent.workspace.terminalHeight
+                        }
+                        let startHeight = resizeStartHeight ?? agent.workspace.terminalHeight
+                        let proposedHeight = startHeight - value.translation.height
+                        agent.workspace.terminalHeight = min(
+                            max(proposedHeight, FXLayout.minimumTerminalHeight),
+                            FXLayout.maximumTerminalHeight
+                        )
+                    }
+                    .onEnded { _ in
+                        resizeStartHeight = nil
                     }
             )
             .overlay(alignment: .top) { FXDivider() }
@@ -53,7 +64,7 @@ struct TerminalPanel: View {
     private var header: some View {
         HStack(spacing: FXSpacing.sm) {
             Image(systemName: "terminal")
-                .font(.system(size: 11))
+                .font(FXTypography.icon(.small))
                 .foregroundStyle(FXColors.fgTertiary)
             Text("Terminal")
                 .font(FXTypography.captionMedium)
@@ -99,7 +110,7 @@ struct TerminalPanel: View {
             action()
         }) {
             Image(systemName: icon)
-                .font(.system(size: 10, weight: .semibold))
+                .font(FXTypography.icon(.micro))
                 .foregroundStyle(enabled ? FXColors.fgSecondary : FXColors.fgQuaternary)
                 .frame(width: 24, height: 22)
                 .background(FXColors.bgSurface.opacity(enabled ? 0.7 : 0.3))
@@ -123,6 +134,7 @@ struct TerminalPanel: View {
             FXDivider()
 
             TerminalSurface(session: session)
+                .id(session.viewIdentity)
                 .background(FXColors.terminalBg)
         }
         .frame(maxWidth: .infinity)
@@ -130,37 +142,92 @@ struct TerminalPanel: View {
 
     private func paneHeader(index: Int, session: TerminalSession) -> some View {
         HStack(spacing: FXSpacing.sm) {
+            Circle()
+                .fill(session.isRunning ? FXColors.success : exitStatusColor(for: session))
+                .frame(width: 6, height: 6)
+                .accessibilityHidden(true)
+
             Text(paneTitle(index: index, session: session))
                 .font(FXTypography.captionMedium)
                 .foregroundStyle(FXColors.fgSecondary)
                 .lineLimit(1)
 
             Text(session.currentDirectory)
-                .font(FXTypography.caption)
+                .font(FXTypography.monoSmall)
                 .foregroundStyle(FXColors.fgTertiary)
                 .lineLimit(1)
+                .truncationMode(.middle)
+                .help(session.currentDirectory)
 
             Spacer(minLength: 0)
 
-            Button(action: {
+            if let launchError = session.launchError {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(FXTypography.icon(.micro))
+                    .foregroundStyle(FXColors.warning)
+                    .help(launchError)
+                    .accessibilityLabel("Terminal launch warning: \(launchError)")
+            }
+
+            if !session.isRunning {
+                terminalStatusBadge(for: session)
+
+                FXIconButton(icon: "arrow.clockwise", label: "Restart terminal") {
+                    session.restart()
+                }
+            } else {
+                FXIconButton(icon: "eraser", label: "Clear terminal") {
+                    session.clearScreen()
+                    session.focus()
+                }
+                .disabled(!session.isRunning)
+
+                FXIconButton(icon: "stop.fill", label: "Interrupt terminal", tint: FXColors.warning) {
+                    session.interrupt()
+                    session.focus()
+                }
+                .disabled(!session.isRunning)
+            }
+
+            FXIconButton(icon: "xmark", label: agent.terminalPaneCount > 1 ? "Close \(paneTitle(index: index, session: session))" : "Hide terminal") {
                 withAnimation(FXAnimation.quick) {
                     agent.closeTerminalPane(at: index)
                 }
-            }) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(FXColors.fgTertiary)
-                    .frame(width: 22, height: 22)
-                    .background(FXColors.bgSurface.opacity(0.55))
-                    .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
             }
-            .buttonStyle(.plain)
-            .help(agent.terminalPaneCount > 1 ? "Close this split" : "Hide terminal")
-            .accessibilityLabel(agent.terminalPaneCount > 1 ? "Close \(paneTitle(index: index, session: session))" : "Hide terminal")
         }
         .padding(.horizontal, FXSpacing.md)
         .padding(.vertical, FXSpacing.xs)
         .background(FXColors.bgSurface)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func exitStatusColor(for session: TerminalSession) -> Color {
+        if session.launchError != nil { return FXColors.warning }
+        guard let exitCode = session.lastExitCode else { return FXColors.fgQuaternary }
+        return exitCode == 0 ? FXColors.success : FXColors.error
+    }
+
+    private func terminalStatusBadge(for session: TerminalSession) -> some View {
+        let text: String
+        let tone: FXBadgeTone
+        let accessibilityText: String
+
+        if session.launchError != nil {
+            text = "Stopped"
+            tone = .warning
+            accessibilityText = "Terminal stopped with a launch warning"
+        } else if let exitCode = session.lastExitCode {
+            text = exitCode == 0 ? "Exited" : "Exit \(exitCode)"
+            tone = exitCode == 0 ? .success : .error
+            accessibilityText = exitCode == 0 ? "Terminal exited successfully" : "Terminal exited with code \(exitCode)"
+        } else {
+            text = "Stopped"
+            tone = .neutral
+            accessibilityText = "Terminal stopped"
+        }
+
+        return FXBadge(text, tone: tone)
+            .accessibilityLabel(accessibilityText)
     }
 
     private func paneTitle(index: Int, session: TerminalSession) -> String {

@@ -5,18 +5,22 @@ import FXCore
 public final class ConversationService {
     nonisolated private static let streamFlushInterval: TimeInterval = 1.0 / 30.0
     nonisolated private static let streamFlushCharacterThreshold = 512
+    nonisolated private static let maxQueuedRequestsPerConversation = 20
+    nonisolated private static let maxQueuedAttachmentBytesPerConversation = 64 * 1_024 * 1_024
 
     private struct PendingRequest {
         var prompt: String
         let attachments: [Attachment]
         let providerID: String
-        let model: String
+        let model: String?
         let effort: String?
         let systemPrompt: String?
         let agentMode: AgentMode?
         let agentAccess: AgentAccess?
         let workingDirectory: URL?
         let resumeSessionID: String?
+        let onStart: (() -> Void)?
+        let onSessionReady: (() -> Void)?
         let onComplete: (() -> Void)?
         let queued: Bool
     }
@@ -25,6 +29,8 @@ public final class ConversationService {
         let task: Task<Void, Never>
         let cancel: @Sendable () async -> Void
         let respondToApproval: @Sendable (UUID, Bool) async -> Void
+        let respondToUserInput: @Sendable (UUID, ProviderUserInputAnswers) async -> Void
+        let cancelUserInput: @Sendable (UUID) async -> Void
     }
 
     private let registry: ProviderRegistry
@@ -36,20 +42,23 @@ public final class ConversationService {
         self.registry = registry
     }
 
+    @discardableResult
     public func send(
         prompt: String,
         attachments: [Attachment] = [],
         to conversationState: ConversationState,
         providerID: String,
-        model: String,
+        model: String?,
         effort: String? = nil,
         systemPrompt: String? = nil,
         agentMode: AgentMode? = nil,
         agentAccess: AgentAccess? = nil,
         workingDirectory: URL? = nil,
         resumeSessionID: String? = nil,
+        onStart: (() -> Void)? = nil,
+        onSessionReady: (() -> Void)? = nil,
         onComplete: (() -> Void)? = nil
-    ) {
+    ) -> Bool {
         let isQueued = activeRequests[conversationState.agentID] != nil
 
         let request = PendingRequest(
@@ -63,13 +72,44 @@ public final class ConversationService {
             agentAccess: agentAccess,
             workingDirectory: workingDirectory,
             resumeSessionID: resumeSessionID,
+            onStart: onStart,
+            onSessionReady: onSessionReady,
             onComplete: onComplete,
             queued: isQueued
         )
 
         if isQueued {
+            let existingQueue = pendingRequests[conversationState.agentID] ?? []
+            let queuedAttachmentBytes = existingQueue.reduce(into: 0) { total, queuedRequest in
+                total += Self.attachmentByteCount(queuedRequest.attachments)
+            }
+            let requestedAttachmentBytes = Self.attachmentByteCount(attachments)
+
+            let rejection: String?
+            if existingQueue.count >= Self.maxQueuedRequestsPerConversation {
+                rejection = "The queue is full (maximum \(Self.maxQueuedRequestsPerConversation) prompts)."
+            } else if queuedAttachmentBytes > Self.maxQueuedAttachmentBytesPerConversation - requestedAttachmentBytes {
+                rejection = "Queued attachments would exceed the 64 MB per-conversation limit."
+            } else {
+                rejection = nil
+            }
+
+            if let rejection {
+                conversationState.reportNonfatalError(rejection)
+                conversationState.recordRuntimeActivity(
+                    kind: .queue,
+                    tone: .error,
+                    summary: "Prompt not queued",
+                    detail: rejection,
+                    state: "rejected",
+                    turnID: conversationState.activeTurnID
+                )
+                onComplete?()
+                return false
+            }
+
             conversationState.enqueuePrompt(prompt)
-            let queuedCount = (pendingRequests[conversationState.agentID]?.count ?? 0) + 1
+            let queuedCount = existingQueue.count + 1
             conversationState.recordRuntimeActivity(
                 kind: .queue,
                 tone: .info,
@@ -79,11 +119,20 @@ public final class ConversationService {
                 turnID: conversationState.activeTurnID
             )
             pendingRequests[conversationState.agentID, default: []].append(request)
-            return
+            return true
         }
 
         conversationState.appendUserMessage(prompt, attachments: attachments)
+        request.onStart?()
         start(request, for: conversationState)
+        return true
+    }
+
+    nonisolated private static func attachmentByteCount(_ attachments: [Attachment]) -> Int {
+        attachments.reduce(into: 0) { total, attachment in
+            let (sum, overflow) = total.addingReportingOverflow(attachment.data.count)
+            total = overflow ? Int.max : sum
+        }
     }
 
     public func removeQueuedPrompt(at index: Int, for agentID: UUID, conversationState: ConversationState) {
@@ -119,6 +168,19 @@ public final class ConversationService {
         pendingRequests[agentID] = nil
     }
 
+    public func releaseProviderSession(_ sessionID: String, providerID: String) async {
+        guard let provider = registry.provider(for: providerID) as? any AIProviderSessionManaging else { return }
+        await provider.releaseSession(sessionID)
+    }
+
+    public func releaseAllProviderSessions() async {
+        for provider in registry.allProviders {
+            if let manager = provider as? any AIProviderSessionManaging {
+                await manager.releaseAllSessions()
+            }
+        }
+    }
+
     public func cancelStreaming(for agentID: UUID) {
         guard let activeRequest = activeRequests[agentID] else { return }
         activeStates[agentID]?.markCancellationRequested()
@@ -129,11 +191,28 @@ public final class ConversationService {
         pendingRequests[agentID] = nil
         activeStates[agentID]?.clearQueuedPrompts()
         activeStates[agentID]?.clearToolApprovalRequests()
+        activeStates[agentID]?.clearUserInputRequests()
     }
 
     public func respondToToolApproval(_ approvalID: UUID, approved: Bool, for agentID: UUID) async {
         guard let activeRequest = activeRequests[agentID] else { return }
         await activeRequest.respondToApproval(approvalID, approved)
+    }
+
+    public func respondToUserInput(
+        _ requestID: UUID,
+        answers: ProviderUserInputAnswers,
+        for agentID: UUID
+    ) async {
+        guard let activeRequest = activeRequests[agentID] else { return }
+        await activeRequest.respondToUserInput(requestID, answers)
+        activeStates[agentID]?.removeUserInputRequest(requestID)
+    }
+
+    public func cancelUserInput(_ requestID: UUID, for agentID: UUID) async {
+        guard let activeRequest = activeRequests[agentID] else { return }
+        await activeRequest.cancelUserInput(requestID)
+        activeStates[agentID]?.removeUserInputRequest(requestID)
     }
 
     @discardableResult
@@ -298,6 +377,7 @@ public final class ConversationService {
         if request.queued {
             conversationState.beginQueuedPrompt()
             conversationState.appendUserMessage(request.prompt, attachments: request.attachments)
+            request.onStart?()
         }
 
         conversationState.startStreaming(providerID: request.providerID, modelID: request.model)
@@ -374,14 +454,32 @@ public final class ConversationService {
                         let previousSessionID = conversationState.sessionID
                         let previousModelID = conversationState.activeModelID
                         conversationState.registerSession(sessionID, modelID: model)
+                        request.onSessionReady?()
                         if previousSessionID != sessionID || previousModelID != model {
-                            let sessionDetail = [provider.displayName, model].filter { !$0.isEmpty }.joined(separator: " • ")
+                            let sessionDetail = [provider.displayName, model]
+                                .compactMap { $0 }
+                                .filter { !$0.isEmpty }
+                                .joined(separator: " • ")
                             conversationState.recordRuntimeActivity(
                                 kind: .session,
                                 tone: .success,
                                 summary: "Session ready",
                                 detail: sessionDetail.isEmpty ? nil : sessionDetail,
                                 state: "configured",
+                                turnID: conversationState.activeTurnID
+                            )
+                        }
+
+                    case .modelChanged(let model, let reason):
+                        let previousModel = conversationState.activeModelID
+                        conversationState.updateActiveModel(model)
+                        if previousModel != model {
+                            conversationState.recordRuntimeActivity(
+                                kind: .session,
+                                tone: .info,
+                                summary: "Model changed",
+                                detail: [model, reason].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " • "),
+                                state: "rerouted",
                                 turnID: conversationState.activeTurnID
                             )
                         }
@@ -429,6 +527,17 @@ public final class ConversationService {
                             turnID: conversationState.activeTurnID
                         )
 
+                    case .userInputRequest(let request):
+                        conversationState.addUserInputRequest(request)
+                        conversationState.recordRuntimeActivity(
+                            kind: .note,
+                            tone: .warning,
+                            summary: "Input required",
+                            detail: request.questions.first?.question,
+                            state: "pending",
+                            turnID: conversationState.activeTurnID
+                        )
+
                     case .toolUse(let id, let name, let input):
                         flushPendingStreamDelta()
                         conversationState.recordRuntimeActivity(
@@ -451,7 +560,7 @@ public final class ConversationService {
                         conversationState.appendMessage(
                             ConversationMessage(
                                 role: .assistant,
-                                content: [.toolUse(id: id, name: name, input: input)]
+                                content: [.toolUse(id: id, name: name, input: Self.truncatedPayload(input, limit: 32_768))]
                             )
                         )
 
@@ -464,11 +573,16 @@ public final class ConversationService {
                             state: isError ? "failed" : "completed",
                             turnID: conversationState.activeTurnID
                         )
-                        if isError {
+                        let retainedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if isError || (!retainedContent.isEmpty && retainedContent != "Completed") {
                             conversationState.appendMessage(
                                 ConversationMessage(
                                     role: .tool,
-                                    content: [.toolResult(id: id, content: content, isError: true)]
+                                    content: [.toolResult(
+                                        id: id,
+                                        content: Self.truncatedPayload(retainedContent, limit: 65_536),
+                                        isError: isError
+                                    )]
                                 )
                             )
                         }
@@ -551,12 +665,14 @@ public final class ConversationService {
                         didReceiveCompletion = true
                         flushPendingStreamDelta()
                         conversationState.clearToolApprovalRequests()
+                        conversationState.clearUserInputRequests()
                         conversationState.finishStreaming(stopReason: stopReason)
 
                     case .error(let message):
                         didReceiveError = true
                         pendingStreamDelta = ""
                         conversationState.clearToolApprovalRequests()
+                        conversationState.clearUserInputRequests()
                         conversationState.setError(message)
                         conversationState.recordRuntimeActivity(
                             kind: .error,
@@ -573,6 +689,7 @@ public final class ConversationService {
                     didReceiveError = true
                     pendingStreamDelta = ""
                     conversationState.clearToolApprovalRequests()
+                    conversationState.clearUserInputRequests()
                     conversationState.setError(error.localizedDescription)
                     conversationState.recordRuntimeActivity(
                         kind: .error,
@@ -588,6 +705,7 @@ public final class ConversationService {
             if Task.isCancelled {
                 flushPendingStreamDelta()
                 conversationState.clearToolApprovalRequests()
+                conversationState.clearUserInputRequests()
                 conversationState.finishStreaming(stopReason: "cancelled")
             } else if !didReceiveCompletion && !didReceiveError {
                 flushPendingStreamDelta()
@@ -608,7 +726,9 @@ public final class ConversationService {
         activeRequests[agentID] = ActiveRequest(
             task: task,
             cancel: handle.cancel,
-            respondToApproval: handle.respondToApproval
+            respondToApproval: handle.respondToApproval,
+            respondToUserInput: handle.respondToUserInput,
+            cancelUserInput: handle.cancelUserInput
         )
     }
 
@@ -688,6 +808,20 @@ public final class ConversationService {
 
         let endIndex = normalized.index(normalized.startIndex, offsetBy: limit)
         return String(normalized[..<endIndex]) + "…"
+    }
+
+    nonisolated private static func truncatedPayload(_ text: String, limit: Int) -> String {
+        guard text.utf8.count > limit else { return text }
+        var byteCount = 0
+        var end = text.startIndex
+        while end < text.endIndex, byteCount < limit {
+            let next = text.index(after: end)
+            let characterBytes = text[end..<next].utf8.count
+            guard byteCount + characterBytes <= limit else { break }
+            byteCount += characterBytes
+            end = next
+        }
+        return String(text[..<end]) + "\n… [FlowX truncated this retained tool payload]"
     }
 
     private static func usageDetail(for conversationState: ConversationState) -> String? {

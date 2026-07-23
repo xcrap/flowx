@@ -8,14 +8,17 @@ let package = Package(
         .library(name: "FXTerminal", targets: ["FXTerminal"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.12.0"),
+        .package(path: "../FXDesign"),
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.15.0"),
     ],
     targets: [
         .target(
             name: "FXTerminal",
             dependencies: [
+                "FXDesign",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ]
         ),
+        .testTarget(name: "FXTerminalTests", dependencies: ["FXTerminal"]),
     ]
 )

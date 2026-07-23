@@ -9,5 +9,6 @@ let package = Package(
     ],
     targets: [
         .target(name: "FXCore"),
+        .testTarget(name: "FXCoreTests", dependencies: ["FXCore"]),
     ]
 )

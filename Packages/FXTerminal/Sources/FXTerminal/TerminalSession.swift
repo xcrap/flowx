@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import FXDesign
 import SwiftTerm
 
 @Observable
@@ -12,11 +13,14 @@ public final class TerminalSession {
     public var isRunning = false
     public var lastExitCode: Int32?
     public var terminalTitle: String?
+    public private(set) var launchError: String?
+    public private(set) var isUsingAcceleratedRenderer = false
     public var onChange: (() -> Void)?
 
     private let shellPath: String
     private var hasStartedShell = false
     private var terminalView: LocalProcessTerminalView?
+    private var terminalGeneration = UUID()
     private let delegateBridge: DelegateBridge
 
     public init(
@@ -25,8 +29,9 @@ public final class TerminalSession {
         shellPath: String? = nil
     ) {
         self.id = id
-        launchDirectory = currentDirectory
-        self.currentDirectory = currentDirectory
+        let normalizedDirectory = Self.normalizedDirectory(currentDirectory)
+        launchDirectory = normalizedDirectory
+        self.currentDirectory = normalizedDirectory
         self.shellPath = shellPath?.nilIfEmpty
             ?? Self.userLoginShell()
             ?? ProcessInfo.processInfo.environment["SHELL"]?.nilIfEmpty
@@ -45,28 +50,44 @@ public final class TerminalSession {
         view.processDelegate = delegateBridge
         configure(view)
         terminalView = view
+        delegateBridge.activate(source: view, generation: terminalGeneration)
         return view
     }
 
     public func updateView(_ view: LocalProcessTerminalView) {
         if terminalView !== view {
+            terminalGeneration = UUID()
             terminalView = view
             terminalView?.processDelegate = delegateBridge
         }
+        delegateBridge.activate(source: view, generation: terminalGeneration)
         configure(view)
+        enableAcceleratedRendererIfPossible(on: view)
     }
 
     public func startIfNeeded() {
         guard let terminalView, !hasStartedShell else { return }
 
+        guard FileManager.default.isExecutableFile(atPath: shellPath) else {
+            launchError = "The login shell is unavailable: \(shellPath)"
+            lastExitCode = 127
+            isRunning = false
+            onChange?()
+            return
+        }
+
         let shellName = URL(fileURLWithPath: shellPath).lastPathComponent
         let execName = shellName.isEmpty ? nil : "-\(shellName)"
-        currentDirectory = launchDirectory
+        let resolvedDirectory = resolvedLaunchDirectory()
+        currentDirectory = resolvedDirectory
+        launchError = resolvedDirectory == launchDirectory
+            ? nil
+            : "Workspace path is unavailable. The terminal opened in \(resolvedDirectory)."
         terminalView.startProcess(
             executable: shellPath,
             args: ["-il"],
             execName: execName,
-            currentDirectory: launchDirectory
+            currentDirectory: resolvedDirectory
         )
         hasStartedShell = true
         isRunning = true
@@ -75,29 +96,24 @@ public final class TerminalSession {
     }
 
     public func restart() {
+        terminalGeneration = UUID()
+        delegateBridge.deactivate()
         terminalView?.terminate()
         terminalView = nil
         hasStartedShell = false
         isRunning = false
         lastExitCode = nil
-        currentDirectory = launchDirectory
+        currentDirectory = resolvedLaunchDirectory()
+        launchError = nil
         viewIdentity = UUID()
         onChange?()
     }
 
     public func setLaunchDirectory(_ directory: String) {
-        launchDirectory = directory
+        launchDirectory = Self.normalizedDirectory(directory)
         if !isRunning {
-            currentDirectory = directory
+            currentDirectory = resolvedLaunchDirectory()
         }
-    }
-
-    public func setPersistedTranscript(_ transcript: String?) {
-        _ = transcript
-    }
-
-    public func snapshotTranscript() -> String? {
-        nil
     }
 
     public func terminate() {
@@ -109,6 +125,7 @@ public final class TerminalSession {
 
     public func shutdown() {
         guard hasStartedShell else { return }
+        delegateBridge.deactivate()
         terminalView?.terminate()
         hasStartedShell = false
         isRunning = false
@@ -134,26 +151,46 @@ public final class TerminalSession {
     }
 
     private func configure(_ view: LocalProcessTerminalView) {
-        view.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        view.nativeBackgroundColor = NSColor(calibratedRed: 0.09, green: 0.09, blue: 0.10, alpha: 1)
-        view.nativeForegroundColor = NSColor(calibratedWhite: 0.90, alpha: 1)
+        view.font = NSFont.monospacedSystemFont(
+            ofSize: FXTypography.terminalPointSize,
+            weight: .regular
+        )
+        view.nativeBackgroundColor = NSColor(FXColors.terminalBg)
+        view.nativeForegroundColor = NSColor(FXColors.fg)
         view.optionAsMetaKey = true
     }
 
-    fileprivate func handleTerminalTitle(_ title: String) {
+    private func enableAcceleratedRendererIfPossible(on view: LocalProcessTerminalView) {
+        guard view.window != nil, !view.isUsingMetalRenderer else {
+            isUsingAcceleratedRenderer = view.isUsingMetalRenderer
+            return
+        }
+
+        do {
+            try view.setUseMetal(true)
+            isUsingAcceleratedRenderer = true
+        } catch {
+            isUsingAcceleratedRenderer = false
+        }
+    }
+
+    func handleTerminalTitle(_ title: String, generation: UUID) {
+        guard generation == terminalGeneration else { return }
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         terminalTitle = trimmed.isEmpty ? nil : trimmed
         onChange?()
     }
 
-    fileprivate func handleCurrentDirectory(_ directory: String?) {
+    func handleCurrentDirectory(_ directory: String?, generation: UUID) {
+        guard generation == terminalGeneration else { return }
         guard let directory = normalizedDirectory(from: directory),
               directory != currentDirectory else { return }
         currentDirectory = directory
         onChange?()
     }
 
-    fileprivate func handleProcessTerminated(_ exitCode: Int32?) {
+    func handleProcessTerminated(_ exitCode: Int32?, generation: UUID) {
+        guard generation == terminalGeneration else { return }
         isRunning = false
         lastExitCode = exitCode
         onChange?()
@@ -171,33 +208,77 @@ public final class TerminalSession {
         guard !trimmed.isEmpty else { return nil }
 
         if trimmed.hasPrefix("file://"), let url = URL(string: trimmed) {
-            return url.path
+            return Self.normalizedDirectory(url.path)
         }
 
-        return trimmed
+        return Self.normalizedDirectory(trimmed)
+    }
+
+    private func resolvedLaunchDirectory() -> String {
+        let candidate = Self.normalizedDirectory(launchDirectory)
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: candidate, isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            return candidate
+        }
+        return NSHomeDirectory()
+    }
+
+    private static func normalizedDirectory(_ path: String) -> String {
+        let expanded = (path as NSString).expandingTildeInPath
+        return URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL.path
     }
 }
 
 private final class DelegateBridge: LocalProcessTerminalViewDelegate {
+    private struct ActiveSource {
+        var identifier: ObjectIdentifier
+        var generation: UUID
+    }
+
     weak var session: TerminalSession?
+    private let sourceLock = NSLock()
+    private var activeSource: ActiveSource?
+
+    func activate(source: LocalProcessTerminalView, generation: UUID) {
+        sourceLock.lock()
+        activeSource = ActiveSource(identifier: ObjectIdentifier(source), generation: generation)
+        sourceLock.unlock()
+    }
+
+    func deactivate() {
+        sourceLock.lock()
+        activeSource = nil
+        sourceLock.unlock()
+    }
+
+    private func activeGeneration(for source: TerminalView) -> UUID? {
+        sourceLock.lock()
+        defer { sourceLock.unlock() }
+        guard activeSource?.identifier == ObjectIdentifier(source) else { return nil }
+        return activeSource?.generation
+    }
 
     func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
 
     func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
+        guard let generation = activeGeneration(for: source) else { return }
         Task { @MainActor [weak session] in
-            session?.handleTerminalTitle(title)
+            session?.handleTerminalTitle(title, generation: generation)
         }
     }
 
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
+        guard let generation = activeGeneration(for: source) else { return }
         Task { @MainActor [weak session] in
-            session?.handleCurrentDirectory(directory)
+            session?.handleCurrentDirectory(directory, generation: generation)
         }
     }
 
     func processTerminated(source: TerminalView, exitCode: Int32?) {
+        guard let generation = activeGeneration(for: source) else { return }
         Task { @MainActor [weak session] in
-            session?.handleProcessTerminated(exitCode)
+            session?.handleProcessTerminated(exitCode, generation: generation)
         }
     }
 }

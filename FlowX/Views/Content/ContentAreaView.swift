@@ -9,7 +9,7 @@ struct ContentAreaView: View {
     @State private var splitHandleHovered = false
 
     private let splitPanelHandleWidth: CGFloat = 12
-    private let minimumConversationWidth: CGFloat = 880
+    private let minimumConversationWidth: CGFloat = 460
     private let minimumSplitPanelWidth: CGFloat = 320
 
     var body: some View {
@@ -79,18 +79,18 @@ struct ContentAreaView: View {
     private var emptyState: some View {
         VStack(spacing: FXSpacing.lg) {
             Image(systemName: "bubble.left.and.bubble.right")
-                .font(.system(size: 44, weight: .ultraLight))
+                .font(FXTypography.icon(.hero))
                 .foregroundStyle(FXColors.fgTertiary)
 
             if let project = appState.activeProject {
-                Text("No agents in this project")
+                Text("No provider threads in this project")
                     .font(FXTypography.title3)
                     .foregroundStyle(FXColors.fgSecondary)
-                Text("Create a new agent to start a conversation in \(project.project.name).")
+                Text("Start a Codex or Claude thread in \(project.project.name). Existing provider threads appear here after sync.")
                     .font(FXTypography.body)
                     .foregroundStyle(FXColors.fgTertiary)
-                Button(action: { _ = appState.addAgent(to: project) }) {
-                    Text("New Agent")
+                Button(action: { _ = appState.addAgent(to: project, title: "New Thread") }) {
+                    Text("New Thread")
                         .font(FXTypography.bodyMedium)
                         .foregroundStyle(FXColors.fg)
                         .padding(.horizontal, FXSpacing.lg)
@@ -100,10 +100,10 @@ struct ContentAreaView: View {
                 }
                 .buttonStyle(.plain)
             } else {
-                Text("Select an agent to get started")
+                Text("Select a provider thread to get started")
                     .font(FXTypography.title3)
                     .foregroundStyle(FXColors.fgSecondary)
-                Text("Choose a project and agent from the sidebar")
+                Text("Choose a project and Codex or Claude thread from the sidebar")
                     .font(FXTypography.body)
                     .foregroundStyle(FXColors.fgTertiary)
             }
@@ -115,7 +115,7 @@ struct ContentAreaView: View {
     private var unavailableSplitView: some View {
         VStack(spacing: FXSpacing.md) {
             Image(systemName: "arrow.triangle.branch")
-                .font(.system(size: 22, weight: .regular))
+                .font(FXTypography.icon(.illustration))
                 .foregroundStyle(FXColors.fgTertiary)
 
             VStack(spacing: FXSpacing.xs) {

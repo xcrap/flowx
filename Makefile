@@ -1,4 +1,4 @@
-.PHONY: dev build test clean generate
+.PHONY: dev build test check clean generate
 
 generate:
 	xcodegen generate
@@ -19,11 +19,15 @@ build: generate
 	cp -R build/FlowX.xcarchive/Products/Applications/FlowX.app dist/FlowX.app
 
 test:
-	cd Packages/FXCore && swift test --quiet
-	cd Packages/FXAgent && swift test --quiet
-	cd Packages/FXTerminal && swift test --quiet
-	cd Packages/FXDesign && swift test --quiet
+	cd Packages/FXCore && swift test --scratch-path ../../build/tests/FXCore --quiet
+	cd Packages/FXAgent && swift test --scratch-path ../../build/tests/FXAgent --quiet
+	cd Packages/FXTerminal && swift test --scratch-path ../../build/tests/FXTerminal --quiet
+	cd Packages/FXDesign && swift test --scratch-path ../../build/tests/FXDesign --quiet
 	@echo "All tests passed."
+
+check: test generate
+	xcodebuild -project FlowX.xcodeproj -scheme FlowX -configuration Debug -derivedDataPath build/check CODE_SIGNING_ALLOWED=NO build -quiet
+	@echo "Tests and app integration build passed."
 
 clean:
 	rm -rf build dist

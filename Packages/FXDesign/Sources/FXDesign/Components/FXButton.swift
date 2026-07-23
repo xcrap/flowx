@@ -15,6 +15,8 @@ public struct FXButton: View {
 
     @State private var isHovered = false
     @State private var isPressed = false
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(_ label: String, icon: String? = nil, style: FXButtonStyle = .secondary, action: @escaping () -> Void) {
         self.label = label
@@ -28,7 +30,7 @@ public struct FXButton: View {
             HStack(spacing: FXSpacing.xs) {
                 if let icon {
                     Image(systemName: icon)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(FXTypography.icon(.regular))
                 }
                 Text(label)
                     .font(FXTypography.bodyMedium)
@@ -42,24 +44,35 @@ public struct FXButton: View {
                 RoundedRectangle(cornerRadius: FXRadii.sm)
                     .strokeBorder(borderColor, lineWidth: 0.5)
             )
-            .scaleEffect(isPressed ? 0.97 : 1.0)
+            .scaleEffect(!reduceMotion && isPressed ? 0.97 : 1.0)
+            .opacity(isEnabled ? 1 : 0.52)
         }
         .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
+        .onHover { isHovered = isEnabled && $0 }
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { _ in
-                    withAnimation(FXAnimation.micro) { isPressed = true }
+                    guard isEnabled else { return }
+                    if reduceMotion {
+                        isPressed = true
+                    } else {
+                        withAnimation(FXAnimation.micro) { isPressed = true }
+                    }
                 }
                 .onEnded { _ in
-                    withAnimation(FXAnimation.quick) { isPressed = false }
+                    if reduceMotion {
+                        isPressed = false
+                    } else {
+                        withAnimation(FXAnimation.quick) { isPressed = false }
+                    }
                 }
         )
+        .accessibilityLabel(label)
     }
 
     private var foregroundColor: Color {
         switch style {
-        case .primary: .white
+        case .primary: FXColors.onAccent
         case .secondary: FXColors.fg
         case .ghost: isHovered ? FXColors.fg : FXColors.fgSecondary
         case .danger: FXColors.error

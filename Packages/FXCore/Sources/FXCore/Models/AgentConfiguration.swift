@@ -102,7 +102,13 @@ public struct AgentConfiguration: Codable, Sendable, Equatable {
         try container.encodeIfPresent(agentAccess, forKey: .agentAccess)
         try container.encodeIfPresent(contextWindowSize, forKey: .contextWindowSize)
 
+        // Keep the legacy field only when FlowX has an explicit override to
+        // represent. Native provider threads intentionally leave both values
+        // unset so the provider's persisted policy remains authoritative; an
+        // inferred legacy value would turn that inheritance into an override
+        // after the next decode.
         let legacy: String? = {
+            guard agentMode != nil || agentAccess != nil else { return nil }
             let mode = resolvedMode
             let access = resolvedAccess
             if mode == .plan {

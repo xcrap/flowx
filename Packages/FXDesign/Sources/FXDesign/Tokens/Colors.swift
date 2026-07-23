@@ -299,6 +299,9 @@ public enum FXColors {
     // Accents
     public static var accent: Color { FXTheme.accentColor }
     public static var accentHover: Color { FXTheme.accentHoverColor }
+    /// Foreground used on a solid accent fill. Kept here so controls never
+    /// hardcode a system white and can evolve with the accent palette.
+    public static var onAccent: Color { Color.white }
     public static var accentSecondary: Color { h(0x4ECDC4) }
     public static var accentMuted: Color { FXTheme.accentMutedColor }
 

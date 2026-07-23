@@ -10,6 +10,7 @@ public final class ConversationState {
 
     public let agentID: UUID
     public var messages: [ConversationMessage] = []
+    public private(set) var messageRevision: Int = 0
     public var runtimeActivities: [ConversationRuntimeActivity] = []
     public var runtimePhase: ProviderSessionPhase = .idle
     public var streamingText: String = ""
@@ -35,6 +36,7 @@ public final class ConversationState {
     public var queuedPromptCount: Int = 0
     public var queuedPromptPreviews: [String] = []
     public var pendingToolApprovals: [ToolApprovalRequest] = []
+    public var pendingUserInputRequests: [ProviderUserInputRequest] = []
     public var pendingAttachments: [Attachment] = []
 
     public init(agentID: UUID) {
@@ -52,7 +54,7 @@ public final class ConversationState {
     public func appendUserMessage(_ text: String, attachments: [Attachment] = []) {
         var content: [MessageContent] = []
         for attachment in attachments where attachment.isImage {
-            content.append(.image(data: Data(), mimeType: attachment.mimeType))
+            content.append(.image(data: attachment.data, mimeType: attachment.mimeType))
         }
         content.append(.text(text))
         appendMessage(ConversationMessage(role: .user, content: content))
@@ -61,10 +63,12 @@ public final class ConversationState {
     public func appendMessage(_ message: ConversationMessage) {
         messages.append(message)
         trimRetainedMessages()
+        messageRevision &+= 1
     }
 
     public func replaceMessages(_ retainedMessages: [ConversationMessage]) {
         messages = Array(retainedMessages.suffix(Self.maxRetainedMessages))
+        messageRevision &+= 1
     }
 
     public func addAttachment(_ attachment: Attachment) {
@@ -147,6 +151,12 @@ public final class ConversationState {
         lastRuntimeEventAt = Date()
     }
 
+    public func updateActiveModel(_ modelID: String) {
+        guard !modelID.isEmpty else { return }
+        activeModelID = modelID
+        lastRuntimeEventAt = Date()
+    }
+
     public func markTurnStarted(turnID: String? = nil) {
         if let turnID, !turnID.isEmpty {
             activeTurnID = turnID
@@ -206,6 +216,11 @@ public final class ConversationState {
         streamingRevision &+= 1
         runtimePhase = .failed
         activeTurnID = nil
+        lastRuntimeEventAt = Date()
+    }
+
+    public func reportNonfatalError(_ errorMessage: String) {
+        error = errorMessage
         lastRuntimeEventAt = Date()
     }
 
@@ -311,6 +326,24 @@ public final class ConversationState {
         pendingToolApprovals.removeAll()
     }
 
+    public func addUserInputRequest(_ request: ProviderUserInputRequest) {
+        if let index = pendingUserInputRequests.firstIndex(where: { $0.id == request.id }) {
+            pendingUserInputRequests[index] = request
+        } else {
+            pendingUserInputRequests.append(request)
+        }
+    }
+
+    @discardableResult
+    public func removeUserInputRequest(_ id: UUID) -> ProviderUserInputRequest? {
+        guard let index = pendingUserInputRequests.firstIndex(where: { $0.id == id }) else { return nil }
+        return pendingUserInputRequests.remove(at: index)
+    }
+
+    public func clearUserInputRequests() {
+        pendingUserInputRequests.removeAll()
+    }
+
     public func updateGoal(_ goal: ConversationGoal) {
         activeGoal = goal
         lastRuntimeEventAt = Date()
@@ -323,6 +356,7 @@ public final class ConversationState {
 
     public func resetConversation() {
         messages.removeAll()
+        messageRevision &+= 1
         runtimePhase = .idle
         streamingText = ""
         streamingRevision &+= 1
@@ -346,6 +380,7 @@ public final class ConversationState {
         queuedPromptCount = 0
         queuedPromptPreviews.removeAll()
         pendingToolApprovals.removeAll()
+        pendingUserInputRequests.removeAll()
         pendingAttachments.removeAll()
         runtimeActivities.removeAll()
     }

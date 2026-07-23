@@ -7,6 +7,7 @@ public enum FXAnimation {
     public static let smooth = Animation.easeInOut(duration: 0.3)
     public static let panel = Animation.spring(duration: 0.3, bounce: 0.0)
     public static let micro = Animation.easeOut(duration: 0.1)
+    public static let statusPulse = Animation.easeInOut(duration: 1.6).repeatForever(autoreverses: true)
 }
 
 // MARK: - Pulsing status indicator
@@ -14,6 +15,7 @@ public enum FXAnimation {
 public struct PulsingDot: View {
     let color: Color
     @State private var pulse = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(color: Color) {
         self.color = color
@@ -23,19 +25,32 @@ public struct PulsingDot: View {
         ZStack {
             // Outer glow ring — slow, smooth breathe
             Circle()
-                .fill(color.opacity(pulse ? 0.0 : 0.35))
-                .frame(width: pulse ? 18 : 8, height: pulse ? 18 : 8)
+                .fill(color.opacity(reduceMotion ? 0.18 : (pulse ? 0.0 : 0.35)))
+                .frame(
+                    width: reduceMotion ? 12 : (pulse ? 18 : 8),
+                    height: reduceMotion ? 12 : (pulse ? 18 : 8)
+                )
 
             // Inner dot — gentle brightness breathe
             Circle()
                 .fill(color)
                 .frame(width: 8, height: 8)
-                .opacity(pulse ? 0.7 : 1.0)
+                .opacity(reduceMotion ? 1.0 : (pulse ? 0.7 : 1.0))
         }
         .frame(width: 18, height: 18)
         .onAppear {
-            withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
+            guard !reduceMotion else { return }
+            withAnimation(FXAnimation.statusPulse) {
                 pulse = true
+            }
+        }
+        .onChange(of: reduceMotion) { _, shouldReduceMotion in
+            if shouldReduceMotion {
+                pulse = false
+            } else {
+                withAnimation(FXAnimation.statusPulse) {
+                    pulse = true
+                }
             }
         }
     }
@@ -45,6 +60,7 @@ public struct PulsingDot: View {
 
 public struct TypingIndicator: View {
     @State private var phase: Int = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init() {}
 
@@ -54,17 +70,20 @@ public struct TypingIndicator: View {
                 Circle()
                     .fill(FXColors.fgTertiary)
                     .frame(width: 4, height: 4)
-                    .opacity(phase == i ? 1.0 : 0.3)
-                    .scaleEffect(phase == i ? 1.2 : 1.0)
+                    .opacity(reduceMotion ? 0.65 : (phase == i ? 1.0 : 0.3))
+                    .scaleEffect(reduceMotion ? 1.0 : (phase == i ? 1.2 : 1.0))
             }
         }
         .task {
+            guard !reduceMotion else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(350))
-                withAnimation(.easeInOut(duration: 0.3)) {
+                guard !Task.isCancelled else { return }
+                withAnimation(FXAnimation.smooth) {
                     phase = (phase + 1) % 3
                 }
             }
         }
+        .accessibilityLabel("Assistant is responding")
     }
 }

@@ -11,6 +11,11 @@ public struct TerminalSurface: NSViewRepresentable {
     public func makeNSView(context: Context) -> LocalProcessTerminalView {
         let view = session.makeView()
         session.startIfNeeded()
+        Task { @MainActor [weak view] in
+            await Task.yield()
+            guard let view else { return }
+            session.updateView(view)
+        }
         return view
     }
 

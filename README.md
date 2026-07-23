@@ -5,8 +5,11 @@ FlowX is a native macOS AI workspace for orchestrating conversations, browser pr
 ## Features
 
 - **Clean shell layout** instead of canvas nodes
-- **GPT agent chat** through persistent Codex sessions
-- **Supervised approvals** for tool calls where supported
+- **Provider-native conversations** discovered from Codex and Claude Code for each workspace
+- **Current model catalogs** — GPT-5.6 Sol, Terra, and Luna; Claude Fable 5, Opus 4.8, Sonnet 5, and Haiku 4.5 — plus runtime discovery and provider defaults
+- **Persistent session continuity** — begin in FlowX and resume in the provider, or the other way around
+- **Unified provider controls** — Supervised, Accept Edits, or Full Access — while structured questions always remain visible and require an answer
+- **Image attachments and durable image history** with bounded decoding and storage
 - **Browser split** for previewing local and remote pages
 - **Up to 3 terminal panes** per agent
 - **Git inspector** for changes, files, commit, and push
@@ -16,9 +19,10 @@ FlowX is a native macOS AI workspace for orchestrating conversations, browser pr
 ## Requirements
 
 - macOS 26 or later
-- Xcode 16+
+- Xcode 26+
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 - [Codex](https://openai.com/codex) CLI installed as `codex`
+- [Claude Code](https://claude.com/product/claude-code) CLI installed as `claude` for Anthropic sessions
 
 ## Build And Run
 
@@ -27,6 +31,7 @@ make generate   # Regenerate FlowX.xcodeproj
 make dev        # Build debug app and open dist/FlowX-Dev.app
 make build      # Build release app to dist/FlowX.app
 make test       # Run package tests
+make check      # Run tests + compile the integrated debug app
 make clean      # Remove build artifacts
 ```
 
@@ -49,3 +54,7 @@ open FlowX.xcodeproj
 
 - Debug app data: `~/Library/Application Support/FlowX-Dev/`
 - Release app data: `~/Library/Application Support/FlowX/`
+
+FlowX stores workspace layout and a bounded UI cache in those directories. The
+provider's own Codex or Claude session remains authoritative and can be opened
+from the provider's other native clients.
