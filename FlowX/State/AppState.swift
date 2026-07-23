@@ -232,8 +232,12 @@ final class WorkspaceState {
     var terminalHeight: CGFloat = 220 { didSet { notifyIfChanged(from: oldValue, to: terminalHeight) } }
     var terminalCount: Int = 1 { didSet { notifyIfChanged(from: oldValue, to: terminalCount) } }
     var browserURLString: String = "" { didSet { notifyIfChanged(from: oldValue, to: browserURLString) } }
-    var conversationScrollOffset: CGFloat = 0
-    var conversationPinnedToBottom: Bool = true
+    var conversationScrollOffset: CGFloat = 0 {
+        didSet { notifyIfChanged(from: oldValue, to: conversationScrollOffset) }
+    }
+    var conversationPinnedToBottom: Bool = true {
+        didSet { notifyIfChanged(from: oldValue, to: conversationPinnedToBottom) }
+    }
 
     var onChange: (() -> Void)?
 
@@ -1104,6 +1108,10 @@ final class AppState {
             ?? (usesAppDefaults ? defaultModelID : nil)
         let resolvedEffort = explicitEffort
             ?? agent.nativeEffort
+            ?? (agent.isProviderNativeThread
+                ? (providerRegistry.provider(for: agent.providerID) as? any AIProviderRuntimeDefaultsProviding)?
+                    .runtimeDefaultEffort
+                : nil)
             ?? (usesAppDefaults ? preferences.defaultEffort : nil)
 
         return EffectiveAgentConfiguration(

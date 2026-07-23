@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import FXAgent
@@ -99,11 +100,9 @@ struct ConversationView: View {
     @State private var initialScrollRestorePending = true
     @State private var transcriptPrepared = false
     @State private var renderedItems: [ConversationDisplayItem] = []
-    @State private var scrollPosition = ScrollPosition(idType: String.self)
-    @State private var userScrollInProgress = false
 
     private let maxContentWidth: CGFloat = FXLayout.readableContentWidth
-    private let restoresAtBottom: Bool
+    private let lazyTranscriptThreshold = 32
     private static let renderExecutor = BoundedTaskExecutor(maxConcurrentTasks: 2)
     private static let renderCache = ConversationRenderCache(
         maximumEntryCount: 6,
@@ -117,7 +116,6 @@ struct ConversationView: View {
 
     init(agent: AgentInfo) {
         self.agent = agent
-        restoresAtBottom = agent.workspace.conversationPinnedToBottom
 
         let key = MessageRenderKey(
             agentID: agent.id,
@@ -211,107 +209,73 @@ struct ConversationView: View {
     @ViewBuilder
     private var transcriptViewport: some View {
         if transcriptPrepared {
-            ScrollViewReader { scrollProxy in
-                let transcriptScrollView = ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(renderedItems) { item in
-                            displayItemView(for: item)
-                                .id(item.scrollID)
-                                .padding(.bottom, displayItemSpacing(for: item))
-                        }
-
-                        if !agent.conversationState.streamingText.isEmpty {
-                            MessageBubble(streamingText: agent.conversationState.streamingText)
-                                .id("streaming-message")
-                                .padding(.bottom, FXSpacing.xl)
-                        } else if agent.isTranscriptRunning {
-                            streamingIndicator
-                                .id("streaming-indicator")
-                                .padding(.bottom, FXSpacing.xl)
-                        }
-
-                        if let error = agent.conversationState.error {
-                            errorCard(error)
-                                .id("conversation-error")
-                                .padding(.bottom, FXSpacing.xl)
-                        }
-
-                        Color.clear
-                            .frame(height: FXSpacing.md + 1)
-                            .id(bottomScrollID)
-                    }
+            ScrollView {
+                transcriptStack
                     .frame(maxWidth: maxContentWidth)
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, FXSpacing.xxl)
                     .padding(.top, FXSpacing.xxl)
-                }
-                .scrollContentBackground(.hidden)
-
-                configuredScrollView(transcriptScrollView)
-                .opacity(initialScrollRestorePending ? 0 : 1)
-                .allowsHitTesting(!initialScrollRestorePending)
-                .onScrollPhaseChange { _, newPhase, context in
-                    handleScrollPhaseChange(newPhase, geometry: context.geometry)
-                }
-                .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                    ConversationScrollPolicy.metrics(
-                        contentOffsetY: geometry.contentOffset.y,
-                        contentHeight: geometry.contentSize.height,
-                        topInset: geometry.contentInsets.top,
-                        bottomInset: geometry.contentInsets.bottom,
-                        containerHeight: geometry.containerSize.height
-                    ).maxOffset
-                } action: { oldMaxOffset, newMaxOffset in
-                    guard ConversationScrollPolicy.shouldFollowContentGrowth(
-                        initialRestorePending: initialScrollRestorePending,
-                        userScrollInProgress: userScrollInProgress,
-                        pinnedToBottom: agent.workspace.conversationPinnedToBottom,
-                        oldMaxOffset: oldMaxOffset,
-                        newMaxOffset: newMaxOffset
-                    ) else {
-                        return
-                    }
-                    scrollProxy.scrollTo(bottomScrollID, anchor: .bottom)
-                }
-                .onChange(of: contentVersion) { _, _ in
-                    guard ConversationScrollPolicy.shouldFollowContentUpdate(
-                        initialRestorePending: initialScrollRestorePending,
-                        userScrollInProgress: userScrollInProgress,
-                        pinnedToBottom: agent.workspace.conversationPinnedToBottom
-                    ) else {
-                        return
-                    }
-                    scrollProxy.scrollTo(bottomScrollID, anchor: .bottom)
-                }
-                .task {
-                    if restoresAtBottom {
-                        await restorePinnedScrollPosition(using: scrollProxy)
-                    } else {
-                        await restoreSavedScrollPosition()
-                    }
-                }
+                    .background(
+                        ConversationScrollCoordinator(
+                            restoreKey: agent.id,
+                            desiredOffset: agent.workspace.conversationScrollOffset,
+                            stickToBottom: agent.workspace.conversationPinnedToBottom,
+                            contentVersion: contentVersion
+                        ) { offset, maxOffset in
+                            updateScrollState(offset: offset, maxOffset: maxOffset)
+                        } onInitialRestoreCompleted: {
+                            initialScrollRestorePending = false
+                        }
+                    )
             }
+            .scrollContentBackground(.hidden)
+            .opacity(initialScrollRestorePending ? 0 : 1)
+            .allowsHitTesting(!initialScrollRestorePending)
         } else {
             transcriptLoadingView
         }
     }
 
     @ViewBuilder
-    private func configuredScrollView<Content: View>(_ content: Content) -> some View {
-        if restoresAtBottom {
-            content
+    private var transcriptStack: some View {
+        if renderedItems.count <= lazyTranscriptThreshold {
+            VStack(spacing: 0) {
+                transcriptRows
+            }
         } else {
-            // The binding exists only to issue the one-time saved-position
-            // restore. Ignoring SwiftUI's continuous write-back keeps a long
-            // lazy transcript from invalidating this entire view on every
-            // trackpad frame; final offsets are captured once at scroll idle.
-            content.scrollPosition(
-                Binding(
-                    get: { scrollPosition },
-                    set: { _ in }
-                )
-            )
+            LazyVStack(spacing: 0) {
+                transcriptRows
+            }
         }
+    }
+
+    @ViewBuilder
+    private var transcriptRows: some View {
+        ForEach(renderedItems) { item in
+            displayItemView(for: item)
+                .id(item.scrollID)
+                .padding(.bottom, displayItemSpacing(for: item))
+        }
+
+        if !agent.conversationState.streamingText.isEmpty {
+            MessageBubble(streamingText: agent.conversationState.streamingText)
+                .id("streaming-message")
+                .padding(.bottom, FXSpacing.xl)
+        } else if agent.isTranscriptRunning {
+            streamingIndicator
+                .id("streaming-indicator")
+                .padding(.bottom, FXSpacing.xl)
+        }
+
+        if let error = agent.conversationState.error {
+            errorCard(error)
+                .id("conversation-error")
+                .padding(.bottom, FXSpacing.xl)
+        }
+
+        Color.clear
+            .frame(height: FXSpacing.md + 1)
+            .id(bottomScrollID)
     }
 
     private var transcriptLoadingView: some View {
@@ -1250,100 +1214,13 @@ struct ConversationView: View {
             )
         )
 
-        if abs(agent.workspace.conversationScrollOffset - normalizedOffset) > 12 {
+        if abs(agent.workspace.conversationScrollOffset - normalizedOffset) > 0.5 {
             agent.workspace.conversationScrollOffset = normalizedOffset
         }
 
         if agent.workspace.conversationPinnedToBottom != pinnedToBottom {
             agent.workspace.conversationPinnedToBottom = pinnedToBottom
         }
-    }
-
-    private func handleScrollPhaseChange(
-        _ phase: ScrollPhase,
-        geometry: ScrollGeometry
-    ) {
-        switch phase {
-        case .tracking, .interacting:
-            userScrollInProgress = true
-            // A real user gesture must take control immediately. Waiting until
-            // the phase becomes idle leaves follow-to-bottom active while the
-            // lazy transcript is being remeasured, which fights the gesture
-            // and visibly jumps between distant sections.
-            if agent.workspace.conversationPinnedToBottom {
-                agent.workspace.conversationPinnedToBottom = false
-            }
-        case .decelerating:
-            userScrollInProgress = true
-        case .idle:
-            let shouldPersist = ConversationScrollPolicy.shouldPersistUserScroll(
-                initialRestorePending: initialScrollRestorePending,
-                userScrollInProgress: userScrollInProgress
-            )
-            userScrollInProgress = false
-            guard shouldPersist else { return }
-            let metrics = ConversationScrollPolicy.metrics(
-                contentOffsetY: geometry.contentOffset.y,
-                contentHeight: geometry.contentSize.height,
-                topInset: geometry.contentInsets.top,
-                bottomInset: geometry.contentInsets.bottom,
-                containerHeight: geometry.containerSize.height
-            )
-            updateScrollState(offset: metrics.offset, maxOffset: metrics.maxOffset)
-        case .animating:
-            break
-        }
-    }
-
-    private func restorePinnedScrollPosition(using scrollProxy: ScrollViewProxy) async {
-        await Task.yield()
-        guard !Task.isCancelled else { return }
-
-        scrollProxy.scrollTo(bottomScrollID, anchor: .bottom)
-        do {
-            try await Task.sleep(for: .milliseconds(32))
-        } catch {
-            return
-        }
-        guard !Task.isCancelled else { return }
-
-        scrollProxy.scrollTo(bottomScrollID, anchor: .bottom)
-        initialScrollRestorePending = false
-
-        do {
-            try await Task.sleep(for: .milliseconds(120))
-        } catch {
-            return
-        }
-        guard
-            !Task.isCancelled,
-            agent.workspace.conversationPinnedToBottom
-        else {
-            return
-        }
-        scrollProxy.scrollTo(bottomScrollID, anchor: .bottom)
-    }
-
-    private func restoreSavedScrollPosition() async {
-        let desiredOffset = max(0, agent.workspace.conversationScrollOffset)
-
-        await Task.yield()
-        guard !Task.isCancelled else { return }
-
-        scrollPosition.scrollTo(y: desiredOffset)
-        do {
-            try await Task.sleep(for: .milliseconds(32))
-        } catch {
-            return
-        }
-        guard !Task.isCancelled else { return }
-
-        scrollPosition.scrollTo(y: desiredOffset)
-        initialScrollRestorePending = false
-        await Task.yield()
-        guard !Task.isCancelled else { return }
-
-        scrollPosition = ScrollPosition(idType: String.self)
     }
 
     private func formatTokenCount(_ count: Int) -> String {
@@ -1361,6 +1238,490 @@ struct ConversationView: View {
 
     private func formatExactTokenCount(_ count: Int) -> String {
         Self.exactTokenFormatter.string(from: NSNumber(value: count)) ?? "\(count)"
+    }
+}
+
+/// Keeps transcript scrolling under one owner. AppKit performs restoration,
+/// live scrolling, settling, and follow-to-bottom; SwiftUI receives one state
+/// update only after a gesture settles.
+private struct ConversationScrollCoordinator: NSViewRepresentable {
+    let restoreKey: UUID
+    let desiredOffset: CGFloat
+    let stickToBottom: Bool
+    let contentVersion: Int
+    let onScrollSettled: (CGFloat, CGFloat) -> Void
+    let onInitialRestoreCompleted: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        context.coordinator.update(
+            anchorView: view,
+            restoreKey: restoreKey,
+            desiredOffset: desiredOffset,
+            stickToBottom: stickToBottom,
+            contentVersion: contentVersion,
+            onScrollSettled: onScrollSettled,
+            onInitialRestoreCompleted: onInitialRestoreCompleted
+        )
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.update(
+            anchorView: nsView,
+            restoreKey: restoreKey,
+            desiredOffset: desiredOffset,
+            stickToBottom: stickToBottom,
+            contentVersion: contentVersion,
+            onScrollSettled: onScrollSettled,
+            onInitialRestoreCompleted: onInitialRestoreCompleted
+        )
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        private weak var anchorView: NSView?
+        private weak var scrollView: NSScrollView?
+        private weak var clipView: NSClipView?
+        private var clipViewPostedBoundsChanges = false
+        private var clipViewPostedFrameChanges = false
+        private var observingBounds = false
+        private var observingFrame = false
+        private var observingLiveScroll = false
+
+        private var activeRestoreKey: UUID?
+        private var hasCompletedInitialRestore = false
+        private var isApplyingProgrammaticScroll = false
+        private var isLiveScrolling = false
+        private var desiredOffset: CGFloat = 0
+        private var stickToBottom = true
+        private var lastContentVersion: Int?
+        private var lastClipBounds: NSRect?
+        private var boundsBurstHadViewportResize = false
+        private var lastBoundsChangeTime: TimeInterval = 0
+
+        private var restoreTask: Task<Void, Never>?
+        private var followTask: Task<Void, Never>?
+        private var settleTimer: Timer?
+        private var onScrollSettled: (CGFloat, CGFloat) -> Void = { _, _ in }
+        private var onInitialRestoreCompleted: () -> Void = {}
+
+        func update(
+            anchorView: NSView,
+            restoreKey: UUID,
+            desiredOffset: CGFloat,
+            stickToBottom: Bool,
+            contentVersion: Int,
+            onScrollSettled: @escaping (CGFloat, CGFloat) -> Void,
+            onInitialRestoreCompleted: @escaping () -> Void
+        ) {
+            self.anchorView = anchorView
+            self.onScrollSettled = onScrollSettled
+            self.onInitialRestoreCompleted = onInitialRestoreCompleted
+            attachIfNeeded()
+
+            if activeRestoreKey != restoreKey {
+                prepareForRestore(
+                    key: restoreKey,
+                    desiredOffset: desiredOffset,
+                    stickToBottom: stickToBottom,
+                    contentVersion: contentVersion
+                )
+            } else {
+                self.desiredOffset = desiredOffset
+                if !isLiveScrolling {
+                    self.stickToBottom = stickToBottom
+                }
+            }
+
+            guard hasCompletedInitialRestore else {
+                scheduleInitialRestore()
+                return
+            }
+
+            let contentChanged = lastContentVersion != contentVersion
+            lastContentVersion = contentVersion
+            if contentChanged, stickToBottom, !isLiveScrolling {
+                scheduleFollowToBottom()
+            }
+        }
+
+        func detach() {
+            restoreTask?.cancel()
+            followTask?.cancel()
+            settleTimer?.invalidate()
+            restoreTask = nil
+            followTask = nil
+            settleTimer = nil
+
+            if observingBounds, let clipView {
+                NotificationCenter.default.removeObserver(
+                    self,
+                    name: NSView.boundsDidChangeNotification,
+                    object: clipView
+                )
+                clipView.postsBoundsChangedNotifications = clipViewPostedBoundsChanges
+            }
+            if observingFrame, let clipView {
+                NotificationCenter.default.removeObserver(
+                    self,
+                    name: NSView.frameDidChangeNotification,
+                    object: clipView
+                )
+                clipView.postsFrameChangedNotifications = clipViewPostedFrameChanges
+            }
+            if observingLiveScroll, let scrollView {
+                NotificationCenter.default.removeObserver(
+                    self,
+                    name: NSScrollView.willStartLiveScrollNotification,
+                    object: scrollView
+                )
+                NotificationCenter.default.removeObserver(
+                    self,
+                    name: NSScrollView.didEndLiveScrollNotification,
+                    object: scrollView
+                )
+            }
+
+            observingBounds = false
+            observingFrame = false
+            observingLiveScroll = false
+            scrollView = nil
+            clipView = nil
+            lastClipBounds = nil
+            boundsBurstHadViewportResize = false
+            anchorView = nil
+        }
+
+        private func prepareForRestore(
+            key: UUID,
+            desiredOffset: CGFloat,
+            stickToBottom: Bool,
+            contentVersion: Int
+        ) {
+            restoreTask?.cancel()
+            followTask?.cancel()
+            settleTimer?.invalidate()
+            restoreTask = nil
+            followTask = nil
+            settleTimer = nil
+
+            activeRestoreKey = key
+            hasCompletedInitialRestore = false
+            isLiveScrolling = false
+            self.desiredOffset = desiredOffset
+            self.stickToBottom = stickToBottom
+            lastContentVersion = contentVersion
+        }
+
+        private func attachIfNeeded() {
+            guard
+                let anchorView,
+                let enclosingScrollView = enclosingScrollView(from: anchorView)
+            else {
+                return
+            }
+            if scrollView === enclosingScrollView {
+                return
+            }
+
+            if scrollView != nil {
+                detach()
+                self.anchorView = anchorView
+            }
+
+            scrollView = enclosingScrollView
+            let enclosingClipView = enclosingScrollView.contentView
+            clipView = enclosingClipView
+            lastClipBounds = enclosingClipView.bounds
+
+            clipViewPostedBoundsChanges = enclosingClipView.postsBoundsChangedNotifications
+            clipViewPostedFrameChanges = enclosingClipView.postsFrameChangedNotifications
+            enclosingClipView.postsBoundsChangedNotifications = true
+            enclosingClipView.postsFrameChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleBoundsDidChange(_:)),
+                name: NSView.boundsDidChangeNotification,
+                object: enclosingClipView
+            )
+            observingBounds = true
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleClipFrameDidChange(_:)),
+                name: NSView.frameDidChangeNotification,
+                object: enclosingClipView
+            )
+            observingFrame = true
+
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleLiveScrollWillStart(_:)),
+                name: NSScrollView.willStartLiveScrollNotification,
+                object: enclosingScrollView
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleLiveScrollDidEnd(_:)),
+                name: NSScrollView.didEndLiveScrollNotification,
+                object: enclosingScrollView
+            )
+            observingLiveScroll = true
+        }
+
+        private func scheduleInitialRestore() {
+            guard restoreTask == nil, let restoreKey = activeRestoreKey else { return }
+
+            restoreTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                var eligiblePasses = 0
+                var attachedLayoutPasses = 0
+
+                for _ in 0..<120 {
+                    guard
+                        !Task.isCancelled,
+                        self.activeRestoreKey == restoreKey
+                    else {
+                        return
+                    }
+
+                    self.attachIfNeeded()
+                    if let scrollView = self.scrollView {
+                        attachedLayoutPasses += 1
+                        let maxOffset = self.applyScrollPosition(
+                            desiredOffset: self.desiredOffset,
+                            stickToBottom: self.stickToBottom,
+                            to: scrollView
+                        )
+                        let minimumLayoutPasses = self.stickToBottom ? 30 : 8
+                        let targetIsAvailable = self.desiredOffset <= maxOffset + 0.5
+                        if attachedLayoutPasses >= minimumLayoutPasses, targetIsAvailable {
+                            eligiblePasses += 1
+                        } else {
+                            eligiblePasses = 0
+                        }
+                        if eligiblePasses >= 3 {
+                            self.finishInitialRestore()
+                            return
+                        }
+                    }
+
+                    do {
+                        try await Task.sleep(for: .milliseconds(16))
+                    } catch {
+                        return
+                    }
+                }
+
+                if let scrollView = self.scrollView {
+                    self.applyScrollPosition(
+                        desiredOffset: self.desiredOffset,
+                        stickToBottom: self.stickToBottom,
+                        to: scrollView
+                    )
+                }
+                self.finishInitialRestore()
+            }
+        }
+
+        private func finishInitialRestore() {
+            guard !hasCompletedInitialRestore else { return }
+            hasCompletedInitialRestore = true
+            restoreTask = nil
+            onInitialRestoreCompleted()
+        }
+
+        private func scheduleFollowToBottom() {
+            guard followTask == nil else { return }
+
+            followTask = Task { @MainActor [weak self] in
+                await Task.yield()
+                do {
+                    try await Task.sleep(for: .milliseconds(16))
+                } catch {
+                    return
+                }
+                guard let self else { return }
+                defer { self.followTask = nil }
+                guard
+                    !Task.isCancelled,
+                    !self.isLiveScrolling,
+                    self.stickToBottom,
+                    let scrollView = self.scrollView
+                else {
+                    return
+                }
+
+                self.applyScrollPosition(
+                    desiredOffset: self.desiredOffset,
+                    stickToBottom: true,
+                    to: scrollView
+                )
+            }
+        }
+
+        @discardableResult
+        private func applyScrollPosition(
+            desiredOffset: CGFloat,
+            stickToBottom: Bool,
+            to scrollView: NSScrollView
+        ) -> CGFloat {
+            scrollView.layoutSubtreeIfNeeded()
+            guard let documentView = scrollView.documentView else { return 0 }
+
+            let clipView = scrollView.contentView
+            let maxOffset = max(0, documentView.frame.height - clipView.bounds.height)
+            let clampedOffset = stickToBottom
+                ? maxOffset
+                : max(0, min(desiredOffset, maxOffset))
+            guard abs(clipView.bounds.origin.y - clampedOffset) > 0.5 else {
+                return maxOffset
+            }
+
+            isApplyingProgrammaticScroll = true
+            clipView.setBoundsOrigin(NSPoint(x: clipView.bounds.origin.x, y: clampedOffset))
+            scrollView.reflectScrolledClipView(clipView)
+            isApplyingProgrammaticScroll = false
+            return maxOffset
+        }
+
+        @objc
+        private func handleLiveScrollWillStart(_ notification: Notification) {
+            guard hasCompletedInitialRestore else { return }
+            isLiveScrolling = true
+            stickToBottom = false
+            boundsBurstHadViewportResize = false
+            followTask?.cancel()
+            followTask = nil
+        }
+
+        @objc
+        private func handleLiveScrollDidEnd(_ notification: Notification) {
+            guard hasCompletedInitialRestore else { return }
+            isLiveScrolling = false
+            settleTimer?.invalidate()
+            settleTimer = nil
+            boundsBurstHadViewportResize = false
+            reportSettledPosition()
+        }
+
+        @objc
+        private func handleBoundsDidChange(_ notification: Notification) {
+            guard
+                hasCompletedInitialRestore,
+                !isApplyingProgrammaticScroll,
+                let clipView
+            else {
+                return
+            }
+
+            let currentBounds = clipView.bounds
+            let sizeChanged = lastClipBounds.map {
+                abs($0.width - currentBounds.width) > 0.5
+                    || abs($0.height - currentBounds.height) > 0.5
+            } ?? false
+            lastClipBounds = currentBounds
+            boundsBurstHadViewportResize = boundsBurstHadViewportResize || sizeChanged
+            lastBoundsChangeTime = ProcessInfo.processInfo.systemUptime
+
+            guard settleTimer == nil else { return }
+            settleTimer = Timer.scheduledTimer(
+                timeInterval: 0.05,
+                target: self,
+                selector: #selector(handleSettleTimer(_:)),
+                userInfo: nil,
+                repeats: true
+            )
+        }
+
+        @objc
+        private func handleClipFrameDidChange(_ notification: Notification) {
+            guard
+                hasCompletedInitialRestore,
+                !isApplyingProgrammaticScroll,
+                let clipView
+            else {
+                return
+            }
+
+            lastClipBounds = clipView.bounds
+            boundsBurstHadViewportResize = true
+            lastBoundsChangeTime = ProcessInfo.processInfo.systemUptime
+
+            guard settleTimer == nil else { return }
+            settleTimer = Timer.scheduledTimer(
+                timeInterval: 0.05,
+                target: self,
+                selector: #selector(handleSettleTimer(_:)),
+                userInfo: nil,
+                repeats: true
+            )
+        }
+
+        @objc
+        private func handleSettleTimer(_ timer: Timer) {
+            let idleFor = ProcessInfo.processInfo.systemUptime - lastBoundsChangeTime
+            guard idleFor >= 0.12 else { return }
+
+            timer.invalidate()
+            settleTimer = nil
+
+            // AppKit can post the origin change before the matching size
+            // change while resizing the window, terminal, or composer. Wait
+            // for the whole burst before deciding whether this was a scroll.
+            if boundsBurstHadViewportResize, !isLiveScrolling {
+                boundsBurstHadViewportResize = false
+                if stickToBottom {
+                    scheduleFollowToBottom()
+                }
+                return
+            }
+
+            boundsBurstHadViewportResize = false
+            // Some synthetic scroll sources and a few AppKit edge paths omit
+            // didEndLiveScroll. Bounds have been idle long enough here, so
+            // this is the authoritative gesture end fallback.
+            isLiveScrolling = false
+            stickToBottom = false
+            followTask?.cancel()
+            followTask = nil
+            reportSettledPosition()
+        }
+
+        private func reportSettledPosition() {
+            guard let scrollView else { return }
+            let clipView = scrollView.contentView
+            let maxOffset = maximumOffset(for: scrollView)
+            let offset = max(0, min(clipView.bounds.origin.y, maxOffset))
+            stickToBottom = ConversationScrollPolicy.isPinnedToBottom(
+                ConversationScrollMetrics(offset: offset, maxOffset: maxOffset)
+            )
+            onScrollSettled(offset, maxOffset)
+        }
+
+        private func maximumOffset(for scrollView: NSScrollView) -> CGFloat {
+            guard let documentView = scrollView.documentView else { return 0 }
+            return max(0, documentView.frame.height - scrollView.contentView.bounds.height)
+        }
+
+        private func enclosingScrollView(from view: NSView) -> NSScrollView? {
+            var current: NSView? = view
+            while let candidate = current {
+                if let scrollView = candidate.enclosingScrollView {
+                    return scrollView
+                }
+                current = candidate.superview
+            }
+            return nil
+        }
     }
 }
 

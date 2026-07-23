@@ -418,6 +418,12 @@ public protocol AIProviderSessionManaging: AIProvider {
     func releaseAllSessions() async
 }
 
+/// Provider-owned defaults that remain authoritative when a native task did
+/// not record an explicit value in its transcript.
+public protocol AIProviderRuntimeDefaultsProviding: AIProvider {
+    var runtimeDefaultEffort: String? { get }
+}
+
 public struct ProviderNativeThreadSummary: Identifiable, Sendable, Equatable {
     public let providerID: String
     public let id: String

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import FXDesign
 import FXAgent
 import FXCore
@@ -8,7 +9,8 @@ struct ChatInputBar: View {
     @Environment(AppState.self) private var appState
     @Environment(AppPreferences.self) private var preferences
     @Bindable var agent: AgentInfo
-    @FocusState private var composerFocused: Bool
+    @State private var composerFocused = false
+    @State private var composerEditorHeight: CGFloat = 28
     @State private var isDropTargeted = false
     @State private var attachmentFeedback: String?
 
@@ -33,19 +35,20 @@ struct ChatInputBar: View {
                             .padding(.top, FXSpacing.lg)
                             .allowsHitTesting(false)
                     }
-                    TextEditor(text: $agent.conversationState.inputText)
-                        .scrollContentBackground(.hidden)
-                        .font(FXTypography.body)
-                        .foregroundStyle(FXColors.fg)
-                        .lineSpacing(FXSpacing.xxs)
-                        .frame(minHeight: 28, maxHeight: 120)
-                        .fixedSize(horizontal: false, vertical: true)
+                    ComposerNativeTextEditor(
+                        text: $agent.conversationState.inputText,
+                        measuredHeight: $composerEditorHeight,
+                        isFocused: composerFocused,
+                        isEnabled: !isSubmittingSteer,
+                        onFocusChange: { composerFocused = $0 },
+                        onPasteImage: pasteImageFromClipboard,
+                        onDropImages: addDroppedImages,
+                        onDropTargeted: { isDropTargeted = $0 }
+                    )
+                        .frame(height: composerEditorHeight)
                         .padding(.horizontal, FXSpacing.xl)
                         .padding(.top, FXSpacing.lg)
                         .padding(.bottom, FXSpacing.sm)
-                        .focused($composerFocused)
-                        .focusEffectDisabled()
-                        .disabled(isSubmittingSteer)
                         .accessibilityLabel("Prompt input")
                         .accessibilityHint("Type a request for \(agent.title)")
                 }
@@ -88,12 +91,11 @@ struct ChatInputBar: View {
 
                             controlButton(
                                 icon: "doc.on.clipboard",
-                                tooltip: canAttachImages ? "Attach image from clipboard (Command-Shift-V)" : attachmentControlTooltip,
+                                tooltip: canAttachImages ? "Attach image from clipboard (Command-V)" : attachmentControlTooltip,
                                 enabled: canAttachImages && !isSubmittingSteer
                             ) {
                                 pasteImageFromClipboard()
                             }
-                            .keyboardShortcut("v", modifiers: [.command, .shift])
 
                             inlineDivider
 
@@ -213,7 +215,9 @@ struct ChatInputBar: View {
         .padding(.top, FXSpacing.sm)
         .padding(.bottom, FXSpacing.xxl)
         .background(FXColors.contentBg)
-        .onAppear(perform: focusComposer)
+        .onAppear {
+            focusComposer()
+        }
         .onChange(of: appState.activeAgentID) { _, newValue in
             guard newValue == agent.id else { return }
             focusComposer()
@@ -694,22 +698,23 @@ struct ChatInputBar: View {
         return true
     }
 
-    private func pasteImageFromClipboard() {
-        guard !isSubmittingSteer else { return }
+    @discardableResult
+    private func pasteImageFromClipboard() -> Bool {
+        guard !isSubmittingSteer else { return false }
         guard canAttachImages else {
             showAttachmentFeedback("Choose a vision-capable model before attaching images.")
-            return
+            return true
         }
 
         let pasteboard = NSPasteboard.general
         if let data = pasteboard.data(forType: .png), !data.isEmpty {
             attachClipboardData(data, mimeType: "image/png", filename: "Pasted Image.png")
-            return
+            return true
         }
 
         if let tiffData = pasteboard.data(forType: .tiff), !tiffData.isEmpty {
             attachClipboardData(tiffData, mimeType: "image/tiff", filename: "Pasted Image.tiff")
-            return
+            return true
         }
 
         if let urls = pasteboard.readObjects(
@@ -717,10 +722,11 @@ struct ChatInputBar: View {
             options: [.urlReadingFileURLsOnly: true]
         ) as? [URL], addDroppedImages(urls) {
             attachmentFeedback = nil
-            return
+            return true
         }
 
         showAttachmentFeedback("The clipboard does not contain a supported image.")
+        return false
     }
 
     private func attachClipboardData(_ data: Data, mimeType: String, filename: String) {
@@ -758,35 +764,249 @@ struct ChatInputBar: View {
     }
 }
 
+/// A native editor gives FlowX first ownership of paste and drag events.
+/// SwiftUI's TextEditor allows its backing NSTextView to insert dragged file
+/// paths before an outer drop destination can convert them into attachments.
+private struct ComposerNativeTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var measuredHeight: CGFloat
+
+    let isFocused: Bool
+    let isEnabled: Bool
+    let onFocusChange: (Bool) -> Void
+    let onPasteImage: () -> Bool
+    let onDropImages: ([URL]) -> Bool
+    let onDropTargeted: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.contentView.drawsBackground = false
+
+        let textView = ComposerNSTextView(frame: .zero)
+        textView.delegate = context.coordinator
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.drawsBackground = false
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.minSize = NSSize(width: 0, height: 28)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainerInset = .zero
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(
+            width: 0,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.string = text
+        textView.onPasteImage = onPasteImage
+        textView.onDropImages = onDropImages
+        textView.onDropTargeted = onDropTargeted
+        textView.registerForDraggedTypes([.fileURL])
+        applyAppearance(to: textView)
+
+        scrollView.documentView = textView
+        context.coordinator.measure(textView)
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? ComposerNSTextView else { return }
+        context.coordinator.parent = self
+
+        if textView.string != text {
+            let selection = textView.selectedRange()
+            textView.string = text
+            let location = min(selection.location, (text as NSString).length)
+            let length = min(selection.length, (text as NSString).length - location)
+            textView.setSelectedRange(NSRange(location: location, length: length))
+        }
+
+        textView.isEditable = isEnabled
+        textView.isSelectable = isEnabled
+        textView.onPasteImage = onPasteImage
+        textView.onDropImages = onDropImages
+        textView.onDropTargeted = onDropTargeted
+        applyAppearance(to: textView)
+        context.coordinator.measure(textView)
+
+        Task { @MainActor [weak textView] in
+            guard let textView, let window = textView.window else { return }
+            if isFocused, window.firstResponder !== textView {
+                window.makeFirstResponder(textView)
+            } else if !isFocused, window.firstResponder === textView {
+                window.makeFirstResponder(nil)
+            }
+        }
+    }
+
+    private func applyAppearance(to textView: NSTextView) {
+        let baseFont = NSFont.systemFont(ofSize: FXTypography.bodyPointSize)
+        let roundedDescriptor = baseFont.fontDescriptor.withDesign(.rounded)
+            ?? baseFont.fontDescriptor
+        textView.font = NSFont(
+            descriptor: roundedDescriptor,
+            size: FXTypography.bodyPointSize
+        ) ?? baseFont
+        textView.textColor = NSColor(FXColors.fg)
+        textView.insertionPointColor = NSColor(FXColors.accent)
+        textView.selectedTextAttributes = [
+            .backgroundColor: NSColor(FXColors.accent).withAlphaComponent(0.28)
+        ]
+        textView.typingAttributes = [
+            .font: textView.font ?? baseFont,
+            .foregroundColor: NSColor(FXColors.fg)
+        ]
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: ComposerNativeTextEditor
+
+        init(parent: ComposerNativeTextEditor) {
+            self.parent = parent
+        }
+
+        func textDidBeginEditing(_ notification: Notification) {
+            parent.onFocusChange(true)
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            parent.onFocusChange(false)
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            if parent.text != textView.string {
+                parent.text = textView.string
+            }
+            measure(textView)
+        }
+
+        func measure(_ textView: NSTextView) {
+            guard let layoutManager = textView.layoutManager,
+                  let textContainer = textView.textContainer else { return }
+            layoutManager.ensureLayout(for: textContainer)
+            let contentHeight = ceil(
+                layoutManager.usedRect(for: textContainer).height
+                    + textView.textContainerInset.height * 2
+            )
+            let nextHeight = min(120, max(28, contentHeight))
+            guard abs(parent.measuredHeight - nextHeight) > 0.5 else { return }
+
+            Task { @MainActor [weak self] in
+                guard let self,
+                      abs(self.parent.measuredHeight - nextHeight) > 0.5 else { return }
+                self.parent.measuredHeight = nextHeight
+            }
+        }
+    }
+}
+
+private final class ComposerNSTextView: NSTextView {
+    var onPasteImage: (() -> Bool)?
+    var onDropImages: (([URL]) -> Bool)?
+    var onDropTargeted: ((Bool) -> Void)?
+
+    override func paste(_ sender: Any?) {
+        if containsSupportedImage(NSPasteboard.general),
+           onPasteImage?() == true {
+            return
+        }
+        super.paste(sender)
+    }
+
+    override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)),
+           containsSupportedImage(NSPasteboard.general) {
+            return true
+        }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        let acceptsDrop = !imageURLs(from: sender.draggingPasteboard).isEmpty
+        onDropTargeted?(acceptsDrop)
+        return acceptsDrop ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        let acceptsDrop = !imageURLs(from: sender.draggingPasteboard).isEmpty
+        onDropTargeted?(acceptsDrop)
+        return acceptsDrop ? .copy : []
+    }
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        onDropTargeted?(false)
+    }
+
+    override func draggingEnded(_ sender: any NSDraggingInfo) {
+        onDropTargeted?(false)
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        onDropTargeted?(false)
+        let urls = imageURLs(from: sender.draggingPasteboard)
+        guard !urls.isEmpty else { return false }
+        return onDropImages?(urls) == true
+    }
+
+    private func containsSupportedImage(_ pasteboard: NSPasteboard) -> Bool {
+        if pasteboard.availableType(from: [.png, .tiff]) != nil {
+            return true
+        }
+        return !imageURLs(from: pasteboard).isEmpty
+    }
+
+    private func imageURLs(from pasteboard: NSPasteboard) -> [URL] {
+        let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] ?? []
+
+        return urls.filter { url in
+            guard url.isFileURL,
+                  let contentType = UTType(filenameExtension: url.pathExtension) else {
+                return false
+            }
+            return contentType.conforms(to: .image)
+        }
+    }
+}
+
 private struct PendingAttachmentChip: View {
     let attachment: Attachment
     let onRemove: () -> Void
+    private let thumbnailSize = FXSpacing.huge + FXSpacing.sm
 
     var body: some View {
-        HStack(spacing: FXSpacing.sm) {
+        ZStack(alignment: .topTrailing) {
             AttachmentThumbnail(
                 data: attachment.data,
                 cacheKey: "composer-\(attachment.id.uuidString)",
-                accessibilityLabel: attachment.filename
+                accessibilityLabel: attachment.filename,
+                size: thumbnailSize
             )
 
-            VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
-                Text(attachment.filename)
-                    .font(FXTypography.captionMedium)
-                    .foregroundStyle(FXColors.fgSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                Text(ByteCountFormatter.string(fromByteCount: Int64(attachment.data.count), countStyle: .file))
-                    .font(FXTypography.monoSmall)
-                    .foregroundStyle(FXColors.fgTertiary)
-            }
-
             FXIconButton(icon: "xmark", label: "Remove \(attachment.filename)", size: 24, action: onRemove)
+                .background(FXColors.bgElevated)
+                .clipShape(Circle())
+                .padding(FXSpacing.xxxs)
         }
-        .padding(.leading, FXSpacing.xxs)
-        .padding(.trailing, FXSpacing.xs)
-        .padding(.vertical, FXSpacing.xxs)
         .background(FXColors.bgElevated)
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
         .overlay(
@@ -796,6 +1016,13 @@ private struct PendingAttachmentChip: View {
         .contextMenu {
             Button("Remove", action: onRemove)
         }
+        .help(
+            "\(attachment.filename) · "
+                + ByteCountFormatter.string(
+                    fromByteCount: Int64(attachment.data.count),
+                    countStyle: .file
+                )
+        )
         .accessibilityElement(children: .contain)
     }
 }
@@ -804,6 +1031,7 @@ private struct AttachmentThumbnail: View {
     let data: Data
     let cacheKey: String
     let accessibilityLabel: String
+    let size: CGFloat
 
     @State private var image: NSImage?
 
@@ -819,7 +1047,7 @@ private struct AttachmentThumbnail: View {
                     .foregroundStyle(FXColors.fgTertiary)
             }
         }
-        .frame(width: 34, height: 34)
+        .frame(width: size, height: size)
         .background(FXColors.bgSurface)
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.sm))
         .clipped()

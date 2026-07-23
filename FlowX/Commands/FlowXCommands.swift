@@ -53,8 +53,8 @@ struct FlowXCommands: Commands {
             .keyboardShortcut("p", modifiers: .command)
             .disabled(appState.activeAgent == nil)
 
-            Button("Settings") {
-                appState.settingsVisible = true
+            Button(appState.settingsVisible ? "Hide Settings" : "Show Settings") {
+                appState.settingsVisible.toggle()
             }
             .keyboardShortcut(",", modifiers: .command)
         }

@@ -25,6 +25,10 @@ public enum FXTypography {
     public static var mono: Font { .system(size: scaled(13), weight: .regular, design: .monospaced) }
     public static var monoSmall: Font { .system(size: scaled(12), weight: .regular, design: .monospaced) }
 
+    /// AppKit-compatible point size for native text editors.
+    /// This is the same scaled measure used by the SwiftUI body token.
+    public static var bodyPointSize: CGFloat { scaled(14) }
+
     /// AppKit-compatible point size for SwiftTerm and other native code views.
     /// This is the same scaled measure used by the SwiftUI monospace token.
     public static var terminalPointSize: CGFloat { scaled(13) }

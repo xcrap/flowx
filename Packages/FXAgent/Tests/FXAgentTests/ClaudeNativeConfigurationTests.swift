@@ -27,6 +27,26 @@ private func claudeNativeJSONL(_ records: [[String: Any]]) throws -> Data {
     return result
 }
 
+@Test func claudeProviderReadsRuntimeDefaultEffortFromSettings() throws {
+    let manager = FileManager.default
+    let container = manager.temporaryDirectory
+        .appendingPathComponent("flowx-claude-runtime-defaults-\(UUID().uuidString)", isDirectory: true)
+    try manager.createDirectory(at: container, withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: container) }
+
+    let settings = try JSONSerialization.data(
+        withJSONObject: ["effortLevel": "XHIGH"],
+        options: [.sortedKeys]
+    )
+    try settings.write(to: container.appendingPathComponent("settings.json"))
+
+    let provider = ClaudeCodeProvider(
+        discovery: RuntimeDiscovery(),
+        configRoot: container
+    )
+    #expect(provider.runtimeDefaultEffort == "xhigh")
+}
+
 @Test func claudeNativeSummaryExtractsRealConfigurationShapesAndLatestBoundedValues() async throws {
     let manager = FileManager.default
     let container = manager.temporaryDirectory

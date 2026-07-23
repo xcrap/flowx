@@ -16,36 +16,6 @@ public struct ConversationScrollMetrics: Equatable, Sendable {
 public enum ConversationScrollPolicy {
     public static let bottomTolerance: CGFloat = 24
 
-    public static func shouldPersistUserScroll(
-        initialRestorePending: Bool,
-        userScrollInProgress: Bool
-    ) -> Bool {
-        !initialRestorePending && userScrollInProgress
-    }
-
-    public static func shouldFollowContentGrowth(
-        initialRestorePending: Bool,
-        userScrollInProgress: Bool,
-        pinnedToBottom: Bool,
-        oldMaxOffset: CGFloat,
-        newMaxOffset: CGFloat
-    ) -> Bool {
-        !initialRestorePending
-            && !userScrollInProgress
-            && pinnedToBottom
-            && newMaxOffset > oldMaxOffset + 1
-    }
-
-    public static func shouldFollowContentUpdate(
-        initialRestorePending: Bool,
-        userScrollInProgress: Bool,
-        pinnedToBottom: Bool
-    ) -> Bool {
-        !initialRestorePending
-            && !userScrollInProgress
-            && pinnedToBottom
-    }
-
     public static func metrics(
         contentOffsetY: CGFloat,
         contentHeight: CGFloat,

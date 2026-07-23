@@ -101,6 +101,42 @@ private final class ClaudeOutputState: @unchecked Sendable {
 
 }
 
+private final class ClaudeRuntimeDefaults: @unchecked Sendable {
+    private let configRoot: URL
+    private let storedEffort = OSAllocatedUnfairLock<String?>(initialState: nil)
+
+    init(configRoot: URL?) {
+        self.configRoot = configRoot
+            ?? ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]
+                .map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".claude", isDirectory: true)
+        refresh()
+    }
+
+    var effort: String? {
+        storedEffort.withLock { $0 }
+    }
+
+    func refresh() {
+        let settingsURL = configRoot.appendingPathComponent("settings.json")
+        let effort: String?
+        if let values = try? settingsURL.resourceValues(forKeys: [.fileSizeKey]),
+           let fileSize = values.fileSize,
+           fileSize > 0,
+           fileSize <= 1 * 1_024 * 1_024,
+           let data = try? Data(contentsOf: settingsURL, options: [.mappedIfSafe]),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let configuredEffort = object["effortLevel"] as? String {
+            let normalized = configuredEffort.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            effort = normalized.isEmpty ? nil : normalized
+        } else {
+            effort = nil
+        }
+        storedEffort.withLock { $0 = effort }
+    }
+}
+
 final class ClaudeTurnController: @unchecked Sendable {
     private enum PendingControl: @unchecked Sendable {
         case approval(requestID: String, toolUseID: String)
@@ -595,7 +631,7 @@ final class ClaudeStreamParser: @unchecked Sendable {
     }
 }
 
-public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIProviderNativeThreadTrashManaging, Sendable {
+public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIProviderNativeThreadTrashManaging, AIProviderRuntimeDefaultsProviding, Sendable {
     public let id = "claude"
     public let displayName = "Claude Code"
     public var availableModels: [AIModel] { modelCatalog.models }
@@ -608,15 +644,23 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
 
     private let discovery: RuntimeDiscovery
     private let modelCatalog = ProviderModelCatalog(ClaudeCodeProvider.fallbackModels)
-    private let nativeStore = ClaudeNativeThreadStore()
+    private let nativeStore: ClaudeNativeThreadStore
+    private let runtimeDefaults: ClaudeRuntimeDefaults
     private let sessionLeases = ClaudeSessionLeaseRegistry()
 
-    public init(discovery: RuntimeDiscovery) {
+    public var runtimeDefaultEffort: String? {
+        runtimeDefaults.effort
+    }
+
+    public init(discovery: RuntimeDiscovery, configRoot: URL? = nil) {
         self.discovery = discovery
+        nativeStore = ClaudeNativeThreadStore(configRoot: configRoot)
+        runtimeDefaults = ClaudeRuntimeDefaults(configRoot: configRoot)
     }
 
     @discardableResult
     public func refreshAvailableModels() async -> [AIModel] {
+        runtimeDefaults.refresh()
         guard let result = try? await discovery.run(binaryID: "claude", arguments: ["--help"], timeout: 10),
               result.terminationStatus == 0 else { return availableModels }
         let help = result.standardOutputString.lowercased()
