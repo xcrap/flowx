@@ -128,6 +128,7 @@ struct ProjectRow: View {
                         }
                     }
                 }
+                .clipped()
                 .transition(.projectDisclosure)
             }
         }

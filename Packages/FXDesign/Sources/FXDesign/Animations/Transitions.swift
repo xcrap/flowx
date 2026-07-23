@@ -1,5 +1,18 @@
 import SwiftUI
 
+private struct ProjectDisclosureTransitionModifier: ViewModifier {
+    let progress: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(x: 1, y: progress, anchor: .top)
+            .mask(alignment: .top) {
+                Rectangle()
+                    .scaleEffect(x: 1, y: progress, anchor: .top)
+            }
+    }
+}
+
 public extension AnyTransition {
     static var slideFromRight: AnyTransition {
         .asymmetric(
@@ -23,9 +36,9 @@ public extension AnyTransition {
     }
 
     static var projectDisclosure: AnyTransition {
-        .asymmetric(
-            insertion: .move(edge: .top),
-            removal: .move(edge: .top)
+        .modifier(
+            active: ProjectDisclosureTransitionModifier(progress: 0.001),
+            identity: ProjectDisclosureTransitionModifier(progress: 1)
         )
     }
 }

@@ -602,20 +602,8 @@ private struct UserMessageAttachmentGrid: View {
     let filenames: [String]
     let messageID: UUID?
 
-    private var columns: [GridItem] {
-        [
-            GridItem(
-                .adaptive(
-                    minimum: FXLayout.userAttachmentMinimumWidth,
-                    maximum: FXLayout.userAttachmentMaximumWidth
-                ),
-                spacing: FXSpacing.sm
-            ),
-        ]
-    }
-
     var body: some View {
-        LazyVGrid(columns: columns, alignment: .leading, spacing: FXSpacing.sm) {
+        TrailingThumbnailGridLayout(spacing: FXSpacing.sm) {
             ForEach(Array(entries.enumerated()), id: \.offset) { position, entry in
                 let filename = filenames.indices.contains(position)
                     ? filenames[position]
@@ -646,13 +634,82 @@ private struct UserMessageAttachmentGrid: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .trailing)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(
             entries.count == 1
                 ? "1 image attachment"
                 : "\(entries.count) image attachments"
         )
+    }
+}
+
+private struct TrailingThumbnailGridLayout: Layout {
+    let spacing: CGFloat
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+
+        let contentWidth = CGFloat(subviews.count) * FXLayout.userAttachmentThumbnailWidth
+            + CGFloat(max(0, subviews.count - 1)) * spacing
+        let width = proposal.width ?? contentWidth
+        let columns = columnCount(for: width, itemCount: subviews.count)
+        let rows = Int(ceil(Double(subviews.count) / Double(columns)))
+        let height = CGFloat(rows) * FXLayout.userAttachmentThumbnailHeight
+            + CGFloat(max(0, rows - 1)) * spacing
+
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        guard !subviews.isEmpty else { return }
+
+        let columns = columnCount(for: bounds.width, itemCount: subviews.count)
+        let rowCount = Int(ceil(Double(subviews.count) / Double(columns)))
+        let itemProposal = ProposedViewSize(
+            width: FXLayout.userAttachmentThumbnailWidth,
+            height: FXLayout.userAttachmentThumbnailHeight
+        )
+
+        for row in 0..<rowCount {
+            let firstIndex = row * columns
+            let lastIndex = min(firstIndex + columns, subviews.count)
+            let itemsInRow = lastIndex - firstIndex
+            let rowWidth = CGFloat(itemsInRow) * FXLayout.userAttachmentThumbnailWidth
+                + CGFloat(max(0, itemsInRow - 1)) * spacing
+            let startX = bounds.maxX - rowWidth
+            let y = bounds.minY
+                + CGFloat(row) * (FXLayout.userAttachmentThumbnailHeight + spacing)
+
+            for index in firstIndex..<lastIndex {
+                let column = index - firstIndex
+                let x = startX
+                    + CGFloat(column) * (FXLayout.userAttachmentThumbnailWidth + spacing)
+                subviews[index].place(
+                    at: CGPoint(x: x, y: y),
+                    anchor: .topLeading,
+                    proposal: itemProposal
+                )
+            }
+        }
+    }
+
+    private func columnCount(for width: CGFloat, itemCount: Int) -> Int {
+        let availableWidth = max(width, FXLayout.userAttachmentThumbnailWidth)
+        let fittingColumns = Int(
+            (availableWidth + spacing)
+                / (FXLayout.userAttachmentThumbnailWidth + spacing)
+        )
+        return max(1, min(itemCount, fittingColumns))
     }
 }
 
@@ -1198,10 +1255,16 @@ struct MessageImageView: View {
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFill()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(
+                            width: FXLayout.userAttachmentThumbnailWidth,
+                            height: FXLayout.userAttachmentThumbnailHeight
+                        )
                 }
-                    .aspectRatio(FXLayout.userAttachmentAspectRatio, contentMode: .fit)
-                    .clipped()
+                .frame(
+                    width: FXLayout.userAttachmentThumbnailWidth,
+                    height: FXLayout.userAttachmentThumbnailHeight
+                )
+                .clipped()
             }
         }
         .background(FXColors.bgSurface)
@@ -1229,8 +1292,11 @@ struct MessageImageView: View {
     private func imagePlaceholder(title: String, detail: String) -> some View {
         if presentation == .thumbnail {
             placeholderContent(title: title, detail: detail)
-                .aspectRatio(FXLayout.userAttachmentAspectRatio, contentMode: .fit)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(
+                    width: FXLayout.userAttachmentThumbnailWidth,
+                    height: FXLayout.userAttachmentThumbnailHeight,
+                    alignment: .leading
+                )
                 .background(FXColors.bgSurface)
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
                 .overlay(
@@ -1286,8 +1352,10 @@ struct MessageImageView: View {
 
         if presentation == .thumbnail {
             content
-                .aspectRatio(FXLayout.userAttachmentAspectRatio, contentMode: .fit)
-                .frame(maxWidth: .infinity)
+                .frame(
+                    width: FXLayout.userAttachmentThumbnailWidth,
+                    height: FXLayout.userAttachmentThumbnailHeight
+                )
                 .background(FXColors.bgSurface)
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
         } else {
@@ -1396,10 +1464,16 @@ struct MessageAssetImageView: View {
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFill()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(
+                            width: FXLayout.userAttachmentThumbnailWidth,
+                            height: FXLayout.userAttachmentThumbnailHeight
+                        )
                 }
-                    .aspectRatio(FXLayout.userAttachmentAspectRatio, contentMode: .fit)
-                    .clipped()
+                .frame(
+                    width: FXLayout.userAttachmentThumbnailWidth,
+                    height: FXLayout.userAttachmentThumbnailHeight
+                )
+                .clipped()
             }
         }
         .background(FXColors.bgSurface)
@@ -1429,8 +1503,11 @@ struct MessageAssetImageView: View {
     private func assetPlaceholder(icon: String, title: String, detail: String) -> some View {
         if presentation == .thumbnail {
             placeholderContent(icon: icon, title: title, detail: detail)
-                .aspectRatio(FXLayout.userAttachmentAspectRatio, contentMode: .fit)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(
+                    width: FXLayout.userAttachmentThumbnailWidth,
+                    height: FXLayout.userAttachmentThumbnailHeight,
+                    alignment: .leading
+                )
                 .background(FXColors.bgSurface)
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
                 .overlay(
@@ -1486,8 +1563,10 @@ struct MessageAssetImageView: View {
 
         if presentation == .thumbnail {
             content
-                .aspectRatio(FXLayout.userAttachmentAspectRatio, contentMode: .fit)
-                .frame(maxWidth: .infinity)
+                .frame(
+                    width: FXLayout.userAttachmentThumbnailWidth,
+                    height: FXLayout.userAttachmentThumbnailHeight
+                )
                 .background(FXColors.bgSurface)
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
         } else {

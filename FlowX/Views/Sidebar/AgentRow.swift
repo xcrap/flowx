@@ -78,9 +78,11 @@ struct ThreadRow: View {
 
             Spacer(minLength: 0)
 
-            if showsLifecycleMenu {
+            if hasLifecycleMenu {
                 lifecycleMenu
-                    .transition(.opacity)
+                    .opacity(showsLifecycleMenu ? 1 : 0)
+                    .allowsHitTesting(showsLifecycleMenu)
+                    .accessibilityHidden(!showsLifecycleMenu)
             }
         }
         .padding(.horizontal, FXSpacing.md)
