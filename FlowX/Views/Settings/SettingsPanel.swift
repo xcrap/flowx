@@ -166,6 +166,10 @@ struct SettingsPanel: View {
                         .help("Refresh provider command availability and versions")
                     }
 
+                    settingsSection("Archived Tasks") {
+                        ArchivedTasksSettingsSection()
+                    }
+
                     // Shortcuts
                     settingsSection("Shortcuts") {
                         shortcutRow("Toggle Sidebar", shortcut: "⌘B")

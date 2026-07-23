@@ -74,41 +74,44 @@ struct MessageBubble: View {
     }
 
     private var standardBubble: some View {
-        HStack(alignment: .top, spacing: 0) {
-            if isUser { Spacer(minLength: 80) }
-
-            VStack(alignment: .leading, spacing: FXSpacing.xs) {
-                if isUser, !userImageEntries.isEmpty {
-                    UserMessageAttachmentGrid(
-                        entries: userImageEntries,
-                        filenames: attachmentFilenames,
-                        messageID: messageID
-                    )
-                }
-
-                ForEach(displayContentEntries, id: \.offset) { entry in
-                    contentView(for: entry.element, index: entry.offset)
-                }
-
-                if !isUser, !directives.isEmpty {
-                    TranscriptActionSummaryView(directives: directives)
-                }
+        VStack(alignment: isUser ? .trailing : .leading, spacing: FXSpacing.sm) {
+            if isUser, !userImageEntries.isEmpty {
+                UserMessageAttachmentGrid(
+                    entries: userImageEntries,
+                    filenames: attachmentFilenames,
+                    messageID: messageID
+                )
             }
-            .frame(
-                maxWidth: isUser ? FXLayout.userMessageMaxWidth : .infinity,
-                alignment: .leading
-            )
-            .padding(.horizontal, isUser ? FXSpacing.xl : 0)
-            .padding(.vertical, isUser ? FXSpacing.md : FXSpacing.xs)
-            .background(isUser ? FXColors.accent.opacity(0.12) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: isUser ? FXRadii.xl : 0))
-            .overlay(
-                RoundedRectangle(cornerRadius: isUser ? FXRadii.xl : 0)
-                    .strokeBorder(isUser ? FXColors.accent.opacity(0.2) : Color.clear, lineWidth: 0.5)
-            )
 
-            if !isUser { Spacer(minLength: 80) }
+            HStack(alignment: .top, spacing: 0) {
+                if isUser { Spacer(minLength: 80) }
+
+                VStack(alignment: .leading, spacing: FXSpacing.xs) {
+                    ForEach(displayContentEntries, id: \.offset) { entry in
+                        contentView(for: entry.element, index: entry.offset)
+                    }
+
+                    if !isUser, !directives.isEmpty {
+                        TranscriptActionSummaryView(directives: directives)
+                    }
+                }
+                .frame(
+                    maxWidth: isUser ? FXLayout.userMessageMaxWidth : .infinity,
+                    alignment: .leading
+                )
+                .padding(.horizontal, isUser ? FXSpacing.xl : 0)
+                .padding(.vertical, isUser ? FXSpacing.md : FXSpacing.xs)
+                .background(isUser ? FXColors.accent.opacity(0.12) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: isUser ? FXRadii.xl : 0))
+                .overlay(
+                    RoundedRectangle(cornerRadius: isUser ? FXRadii.xl : 0)
+                        .strokeBorder(isUser ? FXColors.accent.opacity(0.2) : Color.clear, lineWidth: 0.5)
+                )
+
+                if !isUser { Spacer(minLength: 80) }
+            }
         }
+        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
         .contextMenu {
             if !copyableText.isEmpty {
                 Button("Copy Message", systemImage: "doc.on.doc", action: copyMessage)
@@ -600,15 +603,19 @@ private struct UserMessageAttachmentGrid: View {
     let messageID: UUID?
 
     private var columns: [GridItem] {
-        let column = GridItem(
-            .fixed(FXLayout.userAttachmentThumbnailWidth),
-            spacing: FXSpacing.sm
-        )
-        return entries.count == 1 ? [column] : [column, column]
+        [
+            GridItem(
+                .adaptive(
+                    minimum: FXLayout.userAttachmentMinimumWidth,
+                    maximum: FXLayout.userAttachmentMaximumWidth
+                ),
+                spacing: FXSpacing.sm
+            ),
+        ]
     }
 
     var body: some View {
-        LazyVGrid(columns: columns, alignment: .trailing, spacing: FXSpacing.sm) {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: FXSpacing.sm) {
             ForEach(Array(entries.enumerated()), id: \.offset) { position, entry in
                 let filename = filenames.indices.contains(position)
                     ? filenames[position]
@@ -639,8 +646,7 @@ private struct UserMessageAttachmentGrid: View {
                 }
             }
         }
-        .frame(maxWidth: FXLayout.userAttachmentGridWidth, alignment: .trailing)
-        .frame(maxWidth: .infinity, alignment: .trailing)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(
             entries.count == 1
@@ -1118,6 +1124,7 @@ struct MessageImageView: View {
 
     @State private var image: NSImage?
     @State private var decodeFailed = false
+    @State private var isPreviewPresented = false
 
     init(
         data: Data,
@@ -1145,17 +1152,7 @@ struct MessageImageView: View {
             } else if decodeFailed {
                 imagePlaceholder(title: "Image unavailable", detail: "FlowX could not decode this \(mimeType) image.")
             } else {
-                HStack(spacing: FXSpacing.sm) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Loading image…")
-                        .font(FXTypography.caption)
-                        .foregroundStyle(FXColors.fgTertiary)
-                        .lineLimit(1)
-                }
-                .frame(width: placeholderWidth, height: placeholderHeight)
-                .background(FXColors.bgSurface)
-                .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+                loadingPlaceholder
             }
         }
         .task {
@@ -1178,6 +1175,11 @@ struct MessageImageView: View {
                 decodeFailed = true
             }
         }
+        .sheet(isPresented: $isPreviewPresented) {
+            if let image {
+                MessageImagePreviewSheet(image: image, title: accessibilityName)
+            }
+        }
     }
 
     @ViewBuilder
@@ -1191,13 +1193,14 @@ struct MessageImageView: View {
                     .frame(maxWidth: 520, maxHeight: 360)
 
             case .thumbnail:
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(
-                        width: FXLayout.userAttachmentThumbnailWidth,
-                        height: FXLayout.userAttachmentThumbnailHeight
-                    )
+                ZStack {
+                    FXColors.bgSurface
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                    .aspectRatio(FXLayout.userAttachmentAspectRatio, contentMode: .fit)
                     .clipped()
             }
         }
@@ -1210,10 +1213,47 @@ struct MessageImageView: View {
         .contextMenu {
             Button("Copy Image", systemImage: "doc.on.doc", action: copyImage)
         }
+        .contentShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+        .onTapGesture {
+            isPreviewPresented = true
+        }
+        .help("Open image")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            isPreviewPresented = true
+        }
         .accessibilityLabel(accessibilityLabel)
     }
 
+    @ViewBuilder
     private func imagePlaceholder(title: String, detail: String) -> some View {
+        if presentation == .thumbnail {
+            placeholderContent(title: title, detail: detail)
+                .aspectRatio(FXLayout.userAttachmentAspectRatio, contentMode: .fit)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(FXColors.bgSurface)
+                .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+                .overlay(
+                    RoundedRectangle(cornerRadius: FXRadii.lg)
+                        .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                )
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(accessibilityLabel)
+        } else {
+            placeholderContent(title: title, detail: detail)
+                .frame(maxWidth: 420, alignment: .leading)
+                .background(FXColors.bgSurface)
+                .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+                .overlay(
+                    RoundedRectangle(cornerRadius: FXRadii.lg)
+                        .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                )
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(accessibilityLabel)
+        }
+    }
+
+    private func placeholderContent(title: String, detail: String) -> some View {
         HStack(spacing: FXSpacing.md) {
             Image(systemName: "photo")
                 .font(FXTypography.icon(.large))
@@ -1231,28 +1271,31 @@ struct MessageImageView: View {
             }
         }
         .padding(FXSpacing.md)
-        .frame(
-            width: presentation == .thumbnail ? FXLayout.userAttachmentThumbnailWidth : nil,
-            height: presentation == .thumbnail ? FXLayout.userAttachmentThumbnailHeight : nil,
-            alignment: .leading
-        )
-        .frame(maxWidth: presentation == .full ? 420 : nil, alignment: .leading)
-        .background(FXColors.bgSurface)
-        .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
-        .overlay(
-            RoundedRectangle(cornerRadius: FXRadii.lg)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityLabel)
     }
 
-    private var placeholderWidth: CGFloat {
-        presentation == .thumbnail ? FXLayout.userAttachmentThumbnailWidth : 180
-    }
+    @ViewBuilder
+    private var loadingPlaceholder: some View {
+        let content = HStack(spacing: FXSpacing.sm) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Loading image…")
+                .font(FXTypography.caption)
+                .foregroundStyle(FXColors.fgTertiary)
+                .lineLimit(1)
+        }
 
-    private var placeholderHeight: CGFloat {
-        presentation == .thumbnail ? FXLayout.userAttachmentThumbnailHeight : 96
+        if presentation == .thumbnail {
+            content
+                .aspectRatio(FXLayout.userAttachmentAspectRatio, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .background(FXColors.bgSurface)
+                .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+        } else {
+            content
+                .frame(width: 180, height: 96)
+                .background(FXColors.bgSurface)
+                .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+        }
     }
 
     private var accessibilityLabel: String {
@@ -1275,6 +1318,7 @@ struct MessageAssetImageView: View {
     @State private var image: NSImage?
     @State private var assetURL: URL?
     @State private var loadFailed = false
+    @State private var isPreviewPresented = false
 
     init(
         reference: ConversationImageAssetReference,
@@ -1299,17 +1343,7 @@ struct MessageAssetImageView: View {
                     detail: "The saved attachment could not be loaded."
                 )
             } else {
-                HStack(spacing: FXSpacing.sm) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Loading saved image…")
-                        .font(FXTypography.caption)
-                        .foregroundStyle(FXColors.fgTertiary)
-                        .lineLimit(1)
-                }
-                .frame(width: placeholderWidth, height: placeholderHeight)
-                .background(FXColors.bgSurface)
-                .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+                loadingPlaceholder
             }
         }
         .task(id: cacheKey) {
@@ -1339,6 +1373,11 @@ struct MessageAssetImageView: View {
                 loadFailed = true
             }
         }
+        .sheet(isPresented: $isPreviewPresented) {
+            if let image {
+                MessageImagePreviewSheet(image: image, title: accessibilityName)
+            }
+        }
     }
 
     @ViewBuilder
@@ -1352,13 +1391,14 @@ struct MessageAssetImageView: View {
                     .frame(maxWidth: 520, maxHeight: 360)
 
             case .thumbnail:
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(
-                        width: FXLayout.userAttachmentThumbnailWidth,
-                        height: FXLayout.userAttachmentThumbnailHeight
-                    )
+                ZStack {
+                    FXColors.bgSurface
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                    .aspectRatio(FXLayout.userAttachmentAspectRatio, contentMode: .fit)
                     .clipped()
             }
         }
@@ -1373,10 +1413,47 @@ struct MessageAssetImageView: View {
                 Button("Copy Image File", systemImage: "doc.on.doc", action: copyImageFile)
             }
         }
+        .contentShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+        .onTapGesture {
+            isPreviewPresented = true
+        }
+        .help("Open image")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction {
+            isPreviewPresented = true
+        }
         .accessibilityLabel(accessibilityLabel)
     }
 
+    @ViewBuilder
     private func assetPlaceholder(icon: String, title: String, detail: String) -> some View {
+        if presentation == .thumbnail {
+            placeholderContent(icon: icon, title: title, detail: detail)
+                .aspectRatio(FXLayout.userAttachmentAspectRatio, contentMode: .fit)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(FXColors.bgSurface)
+                .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+                .overlay(
+                    RoundedRectangle(cornerRadius: FXRadii.lg)
+                        .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                )
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(accessibilityLabel)
+        } else {
+            placeholderContent(icon: icon, title: title, detail: detail)
+                .frame(maxWidth: 420, alignment: .leading)
+                .background(FXColors.bgSurface)
+                .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+                .overlay(
+                    RoundedRectangle(cornerRadius: FXRadii.lg)
+                        .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                )
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(accessibilityLabel)
+        }
+    }
+
+    private func placeholderContent(icon: String, title: String, detail: String) -> some View {
         HStack(spacing: FXSpacing.md) {
             Image(systemName: icon)
                 .font(FXTypography.icon(.large))
@@ -1394,28 +1471,31 @@ struct MessageAssetImageView: View {
             }
         }
         .padding(FXSpacing.md)
-        .frame(
-            width: presentation == .thumbnail ? FXLayout.userAttachmentThumbnailWidth : nil,
-            height: presentation == .thumbnail ? FXLayout.userAttachmentThumbnailHeight : nil,
-            alignment: .leading
-        )
-        .frame(maxWidth: presentation == .full ? 420 : nil, alignment: .leading)
-        .background(FXColors.bgSurface)
-        .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
-        .overlay(
-            RoundedRectangle(cornerRadius: FXRadii.lg)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityLabel)
     }
 
-    private var placeholderWidth: CGFloat {
-        presentation == .thumbnail ? FXLayout.userAttachmentThumbnailWidth : 180
-    }
+    @ViewBuilder
+    private var loadingPlaceholder: some View {
+        let content = HStack(spacing: FXSpacing.sm) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Loading saved image…")
+                .font(FXTypography.caption)
+                .foregroundStyle(FXColors.fgTertiary)
+                .lineLimit(1)
+        }
 
-    private var placeholderHeight: CGFloat {
-        presentation == .thumbnail ? FXLayout.userAttachmentThumbnailHeight : 96
+        if presentation == .thumbnail {
+            content
+                .aspectRatio(FXLayout.userAttachmentAspectRatio, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .background(FXColors.bgSurface)
+                .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+        } else {
+            content
+                .frame(width: 180, height: 96)
+                .background(FXColors.bgSurface)
+                .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+        }
     }
 
     private var accessibilityLabel: String {
@@ -1426,5 +1506,53 @@ struct MessageAssetImageView: View {
         guard let assetURL else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.writeObjects([assetURL as NSURL])
+    }
+}
+
+private struct MessageImagePreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let image: NSImage
+    let title: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: FXSpacing.md) {
+                Text(resolvedTitle)
+                    .font(FXTypography.bodyMedium)
+                    .foregroundStyle(FXColors.fgSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Spacer(minLength: 0)
+
+                FXIconButton(icon: "xmark", label: "Close image preview", size: 28) {
+                    dismiss()
+                }
+            }
+            .padding(.horizontal, FXSpacing.lg)
+            .frame(height: 48)
+
+            FXDivider()
+
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(FXSpacing.lg)
+        }
+        .frame(
+            minWidth: FXLayout.imagePreviewMinimumWidth,
+            minHeight: FXLayout.imagePreviewMinimumHeight
+        )
+        .background(FXColors.bg)
+    }
+
+    private var resolvedTitle: String {
+        guard let title = title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty else {
+            return "Image preview"
+        }
+        return title
     }
 }

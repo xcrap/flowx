@@ -109,7 +109,7 @@ struct ThreadLifecycleConfirmation: Identifiable {
         case .deleteDraft:
             "Delete “\(threadTitle)” from FlowX? Its local draft, attachments, terminals, and workspace layout will be removed. Any unbound provider task is left untouched and may reappear after refresh."
         case .archiveProviderTask:
-            "Archive “\(threadTitle)” in Codex? Codex also archives any spawned descendants. You can restore this parent from the project's Archived section."
+            "Archive “\(threadTitle)” in Codex? Codex also archives any spawned descendants. You can restore it from Settings → Archived Tasks."
         case .deleteProviderTask:
             "Permanently delete “\(threadTitle)” from Codex? Codex also deletes any spawned descendants. This cannot be undone."
         case .moveProviderTaskToTrash:

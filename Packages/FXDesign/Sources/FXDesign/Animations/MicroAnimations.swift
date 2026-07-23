@@ -8,6 +8,7 @@ public enum FXAnimation {
     public static let panel = Animation.spring(duration: 0.3, bounce: 0.0)
     public static let micro = Animation.easeOut(duration: 0.1)
     public static let statusPulse = Animation.easeInOut(duration: 1.6).repeatForever(autoreverses: true)
+    public static let activitySpin = Animation.linear(duration: 0.8).repeatForever(autoreverses: false)
 }
 
 // MARK: - Pulsing status indicator

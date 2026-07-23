@@ -10,26 +10,23 @@ struct SidebarView: View {
             taskToolbar
             FXDivider()
 
-            TimelineView(.periodic(from: .now, by: 60)) { timeline in
-                ScrollView {
-                    if appState.projects.isEmpty {
-                        emptyState
-                            .padding(.horizontal, FXSpacing.md)
-                            .padding(.vertical, FXSpacing.xxxl)
-                    } else {
-                        LazyVStack(spacing: FXSpacing.sm) {
-                            ForEach(appState.projects) { project in
-                                ProjectRow(
-                                    project: project,
-                                    threadSearchQuery: threadSearchQuery,
-                                    currentDate: timeline.date
-                                )
-                            }
-                        }
+            ScrollView {
+                if appState.projects.isEmpty {
+                    emptyState
                         .padding(.horizontal, FXSpacing.md)
-                        .padding(.top, FXSpacing.sm)
-                        .padding(.bottom, FXSpacing.lg)
+                        .padding(.vertical, FXSpacing.xxxl)
+                } else {
+                    LazyVStack(spacing: FXSpacing.sm) {
+                        ForEach(appState.projects) { project in
+                            ProjectRow(
+                                project: project,
+                                threadSearchQuery: threadSearchQuery
+                            )
+                        }
                     }
+                    .padding(.horizontal, FXSpacing.md)
+                    .padding(.top, FXSpacing.sm)
+                    .padding(.bottom, FXSpacing.lg)
                 }
             }
         }

@@ -21,4 +21,11 @@ public extension AnyTransition {
             removal: .scale(scale: 0.95).combined(with: .opacity)
         )
     }
+
+    static var projectDisclosure: AnyTransition {
+        .asymmetric(
+            insertion: .move(edge: .top),
+            removal: .move(edge: .top)
+        )
+    }
 }

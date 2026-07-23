@@ -10,7 +10,6 @@ struct ThreadRow: View {
     @Environment(AppState.self) private var appState
     @Bindable var agent: AgentInfo
     @Bindable var project: ProjectState
-    let currentDate: Date
 
     @State private var isHovered = false
     @FocusState private var isFocused: Bool
@@ -64,50 +63,29 @@ struct ThreadRow: View {
     }
 
     private var rowContent: some View {
-        VStack(alignment: .leading, spacing: FXSpacing.xs) {
-            HStack(spacing: FXSpacing.sm) {
-                providerBadge
+        HStack(spacing: FXSpacing.sm) {
+            FXActivityDot(color: providerColor, state: activityDotState)
+                .help(sourceAndStatusHelp)
+                .accessibilityLabel(sourceAndStatusHelp)
 
-                Text(displayTitle)
-                    .font(FXTypography.bodyMedium)
-                    .foregroundStyle(isSelected ? FXColors.fg : FXColors.fgSecondary)
-                    .lineLimit(1)
+            Text(displayTitle)
+                .font(FXTypography.bodyMedium)
+                .foregroundStyle(isSelected ? FXColors.fg : FXColors.fgSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .allowsTightening(true)
+                .layoutPriority(1)
 
-                Spacer(minLength: 0)
+            Spacer(minLength: 0)
 
-                if agent.shouldShowStatusIndicator {
-                    statusIndicator
-                }
-
-                if hasLifecycleMenu {
-                    lifecycleMenu
-                        .opacity(showsLifecycleMenu ? 1 : 0)
-                        .allowsHitTesting(showsLifecycleMenu)
-                        .accessibilityHidden(!showsLifecycleMenu)
-                }
+            if showsLifecycleMenu {
+                lifecycleMenu
+                    .transition(.opacity)
             }
-
-            HStack(alignment: .firstTextBaseline, spacing: FXSpacing.sm) {
-                Text(threadPreview)
-                    .font(FXTypography.caption)
-                    .foregroundStyle(FXColors.fgTertiary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                if let activityLabel {
-                    Text(activityLabel)
-                        .font(FXTypography.caption)
-                        .foregroundStyle(activityColor)
-                        .lineLimit(1)
-                        .fixedSize()
-                        .accessibilityLabel(activityAccessibilityLabel)
-                }
-            }
-
         }
         .padding(.horizontal, FXSpacing.md)
-        .padding(.vertical, FXSpacing.sm)
+        .padding(.vertical, FXSpacing.xs)
+        .frame(minHeight: 32)
         .background(
             RoundedRectangle(cornerRadius: FXRadii.md)
                 .fill(
@@ -196,7 +174,7 @@ struct ThreadRow: View {
     }
 
     private var showsLifecycleMenu: Bool {
-        (isHovered || isSelected) && hasLifecycleMenu
+        (isHovered || isFocused) && hasLifecycleMenu
     }
 
     private var hasLifecycleMenu: Bool {
@@ -213,64 +191,11 @@ struct ThreadRow: View {
         case .deleteDraft:
             return "Remove this local FlowX draft"
         case .archiveProviderTask:
-            return "Restore later from Archived; includes spawned tasks"
+            return "Restore later in Settings; includes spawned tasks"
         case .deleteProviderTask:
             return "Permanent; includes spawned tasks"
         case .moveProviderTaskToTrash:
             return "Recoverable from macOS Trash"
-        }
-    }
-
-    private var providerBadge: some View {
-        FXBadge(providerShortLabel, tone: providerBadgeTone)
-            .accessibilityLabel("Source: \(agent.providerName)")
-    }
-
-    private var statusIndicator: some View {
-        HStack(spacing: FXSpacing.xxs) {
-            statusGlyph
-
-            Text(statusLabel)
-                .font(FXTypography.monoSmall)
-                .lineLimit(1)
-        }
-        .foregroundStyle(statusColor)
-        .frame(width: 76, alignment: .trailing)
-        .help(statusHelp)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(statusHelp)
-    }
-
-    @ViewBuilder
-    private var statusGlyph: some View {
-        switch agent.status {
-        case .running:
-            PulsingDot(color: statusColor)
-        case .waitingForInput:
-            Image(systemName: "questionmark.bubble.fill")
-                .font(FXTypography.icon(.small))
-        case .waitingForApproval:
-            Image(systemName: "hand.raised.fill")
-                .font(FXTypography.icon(.small))
-        case .completed:
-            Image(systemName: "checkmark.circle.fill")
-                .font(FXTypography.icon(.small))
-        case .error:
-            Image(systemName: "exclamationmark.circle.fill")
-                .font(FXTypography.icon(.small))
-        case .idle:
-            EmptyView()
-        }
-    }
-
-    private var statusLabel: String {
-        return switch agent.status {
-        case .running: "RUNNING"
-        case .waitingForInput: "INPUT"
-        case .waitingForApproval: "APPROVAL"
-        case .completed: "DONE"
-        case .error: "ERROR"
-        case .idle: ""
         }
     }
 
@@ -291,24 +216,26 @@ struct ThreadRow: View {
         }
     }
 
-    private var statusColor: Color {
-        return switch agent.status {
-        case .running: FXColors.accent
-        case .waitingForInput, .waitingForApproval: FXColors.warning
-        case .completed: FXColors.success
-        case .error: FXColors.error
-        case .idle: FXColors.fgQuaternary
+    private var sourceAndStatusHelp: String {
+        guard agent.shouldShowStatusIndicator else {
+            return "\(agent.providerName) task"
         }
+        return "\(agent.providerName) · \(statusHelp)"
     }
 
-    private var providerShortLabel: String {
-        switch agent.providerID {
-        case "codex":
-            "CODEX"
-        case "claude":
-            "CLAUDE"
-        default:
-            agent.providerName.uppercased()
+    private var activityDotState: FXActivityDotState {
+        guard agent.shouldShowStatusIndicator else { return .idle }
+        return switch agent.status {
+        case .running:
+            .running
+        case .waitingForInput, .waitingForApproval:
+            .waiting
+        case .completed:
+            .completed
+        case .error:
+            .error
+        case .idle:
+            .idle
         }
     }
 
@@ -320,66 +247,13 @@ struct ThreadRow: View {
         return agent.title
     }
 
-    private var providerBadgeTone: FXBadgeTone {
+    private var providerColor: Color {
         switch agent.providerID {
         case "claude":
-            .accentSecondary
+            FXColors.accentSecondary
         default:
-            .accent
+            FXColors.accent
         }
-    }
-
-    private var threadPreview: String {
-        if let nativePreview = agent.nativePreview {
-            return flattenedPreview(nativePreview)
-        }
-
-        guard let latestText = agent.messages.reversed().lazy
-            .map(\.textContent)
-            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
-            return agent.conversationState.sessionID == nil ? "Draft · not started" : "Provider thread"
-        }
-
-        return flattenedPreview(latestText)
-    }
-
-    private func flattenedPreview(_ text: String) -> String {
-        let flattened = text
-            .replacingOccurrences(of: "\n", with: " ")
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
-        return flattened.isEmpty ? "Provider thread" : flattened
-    }
-
-    private var activityLabel: String? {
-        guard let timestamp = agent.nativeUpdatedAt ?? agent.messages.last?.timestamp else {
-            return nil
-        }
-
-        let elapsed = max(0, currentDate.timeIntervalSince(timestamp))
-        switch elapsed {
-        case ..<60:
-            return "now"
-        case ..<3_600:
-            return "\(Int(elapsed / 60))m"
-        case ..<86_400:
-            return "\(Int(elapsed / 3_600))h"
-        case ..<604_800:
-            return "\(Int(elapsed / 86_400))d"
-        default:
-            return "\(Int(elapsed / 604_800))w"
-        }
-    }
-
-    private var activityAccessibilityLabel: String {
-        guard let timestamp = agent.nativeUpdatedAt ?? agent.messages.last?.timestamp else {
-            return ""
-        }
-        return "Updated \(timestamp.formatted(.relative(presentation: .numeric, unitsStyle: .wide)))"
-    }
-
-    private var activityColor: Color {
-        FXColors.fgQuaternary
     }
 
     private func selectThread() {
