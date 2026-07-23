@@ -25,6 +25,9 @@ struct MessageBubble: View {
     private let content: [MessageContent]
     private let isStreaming: Bool
     private let historicalClaudeQuestionsByIndex: [Int: HistoricalClaudeQuestionPayload]
+    private let presentedTextByIndex: [Int: String]
+    private let attachmentFilenames: [String]
+    private let directives: [TranscriptDirective]
 
     init(message: ConversationMessage) {
         messageID = message.id
@@ -32,6 +35,10 @@ struct MessageBubble: View {
         content = message.content
         isStreaming = false
         historicalClaudeQuestionsByIndex = Self.parseHistoricalClaudeQuestions(in: message.content)
+        let presentation = Self.presentation(for: message.content, role: message.role)
+        presentedTextByIndex = presentation.textByIndex
+        attachmentFilenames = presentation.attachmentFilenames
+        directives = presentation.directives
     }
 
     init(streamingText: String) {
@@ -40,6 +47,10 @@ struct MessageBubble: View {
         content = [.text(streamingText)]
         isStreaming = true
         historicalClaudeQuestionsByIndex = [:]
+        let presentation = Self.presentation(for: content, role: .assistant)
+        presentedTextByIndex = presentation.textByIndex
+        attachmentFilenames = []
+        directives = presentation.directives
     }
 
     private var isUser: Bool { role == .user }
@@ -66,11 +77,27 @@ struct MessageBubble: View {
         HStack(alignment: .top, spacing: 0) {
             if isUser { Spacer(minLength: 80) }
 
-            VStack(alignment: isUser ? .trailing : .leading, spacing: FXSpacing.xs) {
-                ForEach(Array(content.enumerated()), id: \.offset) { index, item in
-                    contentView(for: item, index: index)
+            VStack(alignment: .leading, spacing: FXSpacing.xs) {
+                if isUser, !userImageEntries.isEmpty {
+                    UserMessageAttachmentGrid(
+                        entries: userImageEntries,
+                        filenames: attachmentFilenames,
+                        messageID: messageID
+                    )
+                }
+
+                ForEach(displayContentEntries, id: \.offset) { entry in
+                    contentView(for: entry.element, index: entry.offset)
+                }
+
+                if !isUser, !directives.isEmpty {
+                    TranscriptActionSummaryView(directives: directives)
                 }
             }
+            .frame(
+                maxWidth: isUser ? FXLayout.userMessageMaxWidth : .infinity,
+                alignment: .leading
+            )
             .padding(.horizontal, isUser ? FXSpacing.xl : 0)
             .padding(.vertical, isUser ? FXSpacing.md : FXSpacing.xs)
             .background(isUser ? FXColors.accent.opacity(0.12) : Color.clear)
@@ -104,11 +131,21 @@ struct MessageBubble: View {
     private func contentView(for item: MessageContent, index: Int) -> some View {
         switch item {
         case .text(let text):
-            MessageTextView(
-                text: text,
-                cacheKey: messageID.map { "\($0.uuidString)-\(index)" },
-                isStreaming: isStreaming
-            )
+            let visibleText = presentedTextByIndex[index] ?? text
+            if !visibleText.isEmpty {
+                if isUser {
+                    CollapsibleUserMessageTextView(
+                        text: visibleText,
+                        cacheKey: messageID.map { "\($0.uuidString)-\(index)" }
+                    )
+                } else {
+                    MessageTextView(
+                        text: visibleText,
+                        cacheKey: messageID.map { "\($0.uuidString)-\(index)" },
+                        isStreaming: isStreaming
+                    )
+                }
+            }
 
         case .toolUse(_, let name, let input):
             if let payload = historicalClaudeQuestionsByIndex[index] {
@@ -154,6 +191,60 @@ struct MessageBubble: View {
                 cacheKey: "asset-\(reference.projectID.uuidString)-\(reference.agentID.uuidString)-\(reference.messageID.uuidString)-\(reference.contentIndex)"
             )
         }
+    }
+
+    private var userImageEntries: [(offset: Int, element: MessageContent)] {
+        guard isUser else { return [] }
+        return content.enumerated().filter { entry in
+            switch entry.element {
+            case .image, .imageAsset:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private var displayContentEntries: [(offset: Int, element: MessageContent)] {
+        content.enumerated().filter { entry in
+            guard isUser else { return true }
+            switch entry.element {
+            case .image, .imageAsset:
+                return false
+            default:
+                return true
+            }
+        }
+    }
+
+    private static func presentation(
+        for content: [MessageContent],
+        role: MessageRole
+    ) -> (
+        textByIndex: [Int: String],
+        attachmentFilenames: [String],
+        directives: [TranscriptDirective]
+    ) {
+        var textByIndex: [Int: String] = [:]
+        var attachmentFilenames: [String] = []
+        var directives: [TranscriptDirective] = []
+
+        for (index, item) in content.enumerated() {
+            guard case .text(let text) = item else { continue }
+            if role == .user {
+                let presentation = TranscriptPresentationParser.userMessage(text)
+                textByIndex[index] = presentation.visibleText
+                attachmentFilenames.append(contentsOf: presentation.attachmentFilenames)
+            } else if role == .assistant {
+                let presentation = TranscriptPresentationParser.assistantMessage(text)
+                textByIndex[index] = presentation.visibleText
+                directives.append(contentsOf: presentation.directives)
+            } else {
+                textByIndex[index] = text
+            }
+        }
+
+        return (textByIndex, attachmentFilenames, directives)
     }
 
     @ViewBuilder
@@ -434,10 +525,10 @@ struct MessageBubble: View {
     }
 
     private var copyableText: String {
-        content.compactMap { item -> String? in
+        content.enumerated().compactMap { index, item -> String? in
             switch item {
             case .text(let text):
-                text
+                presentedTextByIndex[index] ?? text
             case .code(_, let code):
                 code
             case .toolUse(_, let name, let input):
@@ -455,6 +546,250 @@ struct MessageBubble: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(copyableText, forType: .string)
     }
+}
+
+private struct CollapsibleUserMessageTextView: View {
+    private static let collapsedCharacterLimit = 600
+    private static let collapsedLineLimit = 8
+
+    let text: String
+    let cacheKey: String?
+
+    @State private var isExpanded = false
+
+    private var canCollapse: Bool {
+        text.count > Self.collapsedCharacterLimit
+            || text.components(separatedBy: .newlines).count > Self.collapsedLineLimit
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: FXSpacing.xs) {
+            MessageTextView(text: text, cacheKey: cacheKey, isStreaming: false)
+                .frame(
+                    maxHeight: canCollapse && !isExpanded
+                        ? FXLayout.collapsedUserMessageHeight
+                        : nil,
+                    alignment: .top
+                )
+                .clipped()
+
+            if canCollapse {
+                Button {
+                    isExpanded.toggle()
+                } label: {
+                    HStack(spacing: FXSpacing.xs) {
+                        Text(isExpanded ? "Show less" : "Show full message")
+                            .font(FXTypography.captionMedium)
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(FXTypography.icon(.micro))
+                    }
+                    .foregroundStyle(FXColors.fgSecondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isExpanded ? "Collapse message" : "Expand full message")
+                .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+            }
+        }
+    }
+}
+
+private struct UserMessageAttachmentGrid: View {
+    let entries: [(offset: Int, element: MessageContent)]
+    let filenames: [String]
+    let messageID: UUID?
+
+    private var columns: [GridItem] {
+        let column = GridItem(
+            .fixed(FXLayout.userAttachmentThumbnailWidth),
+            spacing: FXSpacing.sm
+        )
+        return entries.count == 1 ? [column] : [column, column]
+    }
+
+    var body: some View {
+        LazyVGrid(columns: columns, alignment: .trailing, spacing: FXSpacing.sm) {
+            ForEach(Array(entries.enumerated()), id: \.offset) { position, entry in
+                let filename = filenames.indices.contains(position)
+                    ? filenames[position]
+                    : nil
+
+                switch entry.element {
+                case .image(let data, let mimeType):
+                    MessageImageView(
+                        data: data,
+                        mimeType: mimeType,
+                        cacheKey: messageID.map {
+                            "message-\($0.uuidString)-\(entry.offset)"
+                        } ?? "user-image-\(entry.offset)",
+                        presentation: .thumbnail,
+                        accessibilityName: filename
+                    )
+
+                case .imageAsset(let reference):
+                    MessageAssetImageView(
+                        reference: reference,
+                        cacheKey: "asset-\(reference.projectID.uuidString)-\(reference.agentID.uuidString)-\(reference.messageID.uuidString)-\(reference.contentIndex)",
+                        presentation: .thumbnail,
+                        accessibilityName: filename
+                    )
+
+                default:
+                    EmptyView()
+                }
+            }
+        }
+        .frame(maxWidth: FXLayout.userAttachmentGridWidth, alignment: .trailing)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(
+            entries.count == 1
+                ? "1 image attachment"
+                : "\(entries.count) image attachments"
+        )
+    }
+}
+
+private struct TranscriptActionSummaryView: View {
+    let directives: [TranscriptDirective]
+
+    private var gitDirectives: [TranscriptDirective] {
+        directives.filter { $0.name.hasPrefix("git-") }
+    }
+
+    private var otherDirectives: [TranscriptDirective] {
+        directives.filter { !$0.name.hasPrefix("git-") }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: FXSpacing.xs) {
+            if !gitDirectives.isEmpty {
+                receiptRow(
+                    icon: "checkmark.circle.fill",
+                    tone: FXColors.success,
+                    title: "Git",
+                    detail: gitDetail
+                )
+            }
+
+            ForEach(Array(otherDirectives.enumerated()), id: \.offset) { _, directive in
+                receiptRow(
+                    icon: icon(for: directive),
+                    tone: FXColors.accentSecondary,
+                    title: title(for: directive),
+                    detail: detail(for: directive)
+                )
+            }
+        }
+        .padding(.top, FXSpacing.xxs)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Completed app actions")
+    }
+
+    private func receiptRow(
+        icon: String,
+        tone: Color,
+        title: String,
+        detail: String
+    ) -> some View {
+        HStack(spacing: FXSpacing.sm) {
+            Image(systemName: icon)
+                .font(FXTypography.icon(.regular))
+                .foregroundStyle(tone)
+                .frame(width: 18)
+
+            Text(title)
+                .font(FXTypography.captionMedium)
+                .foregroundStyle(FXColors.fg)
+
+            Text("·")
+                .font(FXTypography.caption)
+                .foregroundStyle(FXColors.fgQuaternary)
+
+            Text(detail)
+                .font(FXTypography.caption)
+                .foregroundStyle(FXColors.fgSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, FXSpacing.md)
+        .padding(.vertical, FXSpacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(FXColors.bgElevated)
+        .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
+        .overlay(
+            RoundedRectangle(cornerRadius: FXRadii.md)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+        )
+    }
+
+    private var gitDetail: String {
+        let names = Set(gitDirectives.map(\.name))
+        var parts: [String] = []
+
+        if names.contains("git-stage") {
+            parts.append("Staged")
+        }
+        if names.contains("git-commit") {
+            parts.append("Committed")
+        }
+        if let branch = gitDirectives.last(where: { $0.name == "git-push" })?["branch"] {
+            parts.append("Pushed \(branch)")
+        } else if names.contains("git-push") {
+            parts.append("Pushed")
+        }
+        if let branch = gitDirectives.last(where: { $0.name == "git-create-branch" })?["branch"] {
+            parts.append("Created \(branch)")
+        }
+        if names.contains("git-create-pr") {
+            parts.append("Opened pull request")
+        }
+
+        return parts.isEmpty ? "Completed repository action" : parts.joined(separator: " · ")
+    }
+
+    private func icon(for directive: TranscriptDirective) -> String {
+        switch directive.name {
+        case "created-thread":
+            "bubble.left.and.bubble.right.fill"
+        case "code-comment":
+            "text.bubble.fill"
+        default:
+            "checkmark.circle.fill"
+        }
+    }
+
+    private func title(for directive: TranscriptDirective) -> String {
+        switch directive.name {
+        case "created-thread":
+            "Task"
+        case "code-comment":
+            "Review"
+        default:
+            directive.name
+                .split(separator: "-")
+                .map { $0.capitalized }
+                .joined(separator: " ")
+        }
+    }
+
+    private func detail(for directive: TranscriptDirective) -> String {
+        switch directive.name {
+        case "created-thread":
+            "Created task"
+        case "code-comment":
+            directive["title"] ?? "Added code comment"
+        default:
+            "Completed"
+        }
+    }
+}
+
+enum MessageImagePresentation {
+    case full
+    case thumbnail
 }
 
 @MainActor
@@ -778,9 +1113,25 @@ struct MessageImageView: View {
     let data: Data
     let mimeType: String
     let cacheKey: String
+    let presentation: MessageImagePresentation
+    let accessibilityName: String?
 
     @State private var image: NSImage?
     @State private var decodeFailed = false
+
+    init(
+        data: Data,
+        mimeType: String,
+        cacheKey: String,
+        presentation: MessageImagePresentation = .full,
+        accessibilityName: String? = nil
+    ) {
+        self.data = data
+        self.mimeType = mimeType
+        self.cacheKey = cacheKey
+        self.presentation = presentation
+        self.accessibilityName = accessibilityName
+    }
 
     var body: some View {
         Group {
@@ -790,20 +1141,7 @@ struct MessageImageView: View {
                     detail: "The image was sent with this prompt but is not retained in conversation history."
                 )
             } else if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 520, maxHeight: 360)
-                    .background(FXColors.bgSurface)
-                    .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: FXRadii.lg)
-                            .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
-                    )
-                    .contextMenu {
-                        Button("Copy Image", systemImage: "doc.on.doc", action: copyImage)
-                    }
-                    .accessibilityLabel("Image attachment")
+                renderedImage(image)
             } else if decodeFailed {
                 imagePlaceholder(title: "Image unavailable", detail: "FlowX could not decode this \(mimeType) image.")
             } else {
@@ -813,8 +1151,9 @@ struct MessageImageView: View {
                     Text("Loading image…")
                         .font(FXTypography.caption)
                         .foregroundStyle(FXColors.fgTertiary)
+                        .lineLimit(1)
                 }
-                .frame(width: 180, height: 96)
+                .frame(width: placeholderWidth, height: placeholderHeight)
                 .background(FXColors.bgSurface)
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
             }
@@ -841,6 +1180,39 @@ struct MessageImageView: View {
         }
     }
 
+    @ViewBuilder
+    private func renderedImage(_ image: NSImage) -> some View {
+        Group {
+            switch presentation {
+            case .full:
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 520, maxHeight: 360)
+
+            case .thumbnail:
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(
+                        width: FXLayout.userAttachmentThumbnailWidth,
+                        height: FXLayout.userAttachmentThumbnailHeight
+                    )
+                    .clipped()
+            }
+        }
+        .background(FXColors.bgSurface)
+        .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+        .overlay(
+            RoundedRectangle(cornerRadius: FXRadii.lg)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+        )
+        .contextMenu {
+            Button("Copy Image", systemImage: "doc.on.doc", action: copyImage)
+        }
+        .accessibilityLabel(accessibilityLabel)
+    }
+
     private func imagePlaceholder(title: String, detail: String) -> some View {
         HStack(spacing: FXSpacing.md) {
             Image(systemName: "photo")
@@ -848,17 +1220,23 @@ struct MessageImageView: View {
                 .foregroundStyle(FXColors.fgTertiary)
 
             VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
-                Text(title)
+                Text(accessibilityName ?? title)
                     .font(FXTypography.bodyMedium)
                     .foregroundStyle(FXColors.fgSecondary)
+                    .lineLimit(1)
                 Text(detail)
                     .font(FXTypography.caption)
                     .foregroundStyle(FXColors.fgTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(presentation == .thumbnail ? 2 : nil)
             }
         }
         .padding(FXSpacing.md)
-        .frame(maxWidth: 420, alignment: .leading)
+        .frame(
+            width: presentation == .thumbnail ? FXLayout.userAttachmentThumbnailWidth : nil,
+            height: presentation == .thumbnail ? FXLayout.userAttachmentThumbnailHeight : nil,
+            alignment: .leading
+        )
+        .frame(maxWidth: presentation == .full ? 420 : nil, alignment: .leading)
         .background(FXColors.bgSurface)
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
         .overlay(
@@ -866,6 +1244,19 @@ struct MessageImageView: View {
                 .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
         )
         .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var placeholderWidth: CGFloat {
+        presentation == .thumbnail ? FXLayout.userAttachmentThumbnailWidth : 180
+    }
+
+    private var placeholderHeight: CGFloat {
+        presentation == .thumbnail ? FXLayout.userAttachmentThumbnailHeight : 96
+    }
+
+    private var accessibilityLabel: String {
+        accessibilityName.map { "Image attachment: \($0)" } ?? "Image attachment"
     }
 
     private func copyImage() {
@@ -878,30 +1269,29 @@ struct MessageImageView: View {
 struct MessageAssetImageView: View {
     let reference: ConversationImageAssetReference
     let cacheKey: String
+    let presentation: MessageImagePresentation
+    let accessibilityName: String?
 
     @State private var image: NSImage?
     @State private var assetURL: URL?
     @State private var loadFailed = false
 
+    init(
+        reference: ConversationImageAssetReference,
+        cacheKey: String,
+        presentation: MessageImagePresentation = .full,
+        accessibilityName: String? = nil
+    ) {
+        self.reference = reference
+        self.cacheKey = cacheKey
+        self.presentation = presentation
+        self.accessibilityName = accessibilityName
+    }
+
     var body: some View {
         Group {
             if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 520, maxHeight: 360)
-                    .background(FXColors.bgSurface)
-                    .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: FXRadii.lg)
-                            .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
-                    )
-                    .contextMenu {
-                        if assetURL != nil {
-                            Button("Copy Image File", systemImage: "doc.on.doc", action: copyImageFile)
-                        }
-                    }
-                    .accessibilityLabel("Image attachment")
+                renderedImage(image)
             } else if loadFailed {
                 assetPlaceholder(
                     icon: "photo.badge.exclamationmark",
@@ -915,8 +1305,9 @@ struct MessageAssetImageView: View {
                     Text("Loading saved image…")
                         .font(FXTypography.caption)
                         .foregroundStyle(FXColors.fgTertiary)
+                        .lineLimit(1)
                 }
-                .frame(width: 180, height: 96)
+                .frame(width: placeholderWidth, height: placeholderHeight)
                 .background(FXColors.bgSurface)
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
             }
@@ -950,6 +1341,41 @@ struct MessageAssetImageView: View {
         }
     }
 
+    @ViewBuilder
+    private func renderedImage(_ image: NSImage) -> some View {
+        Group {
+            switch presentation {
+            case .full:
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 520, maxHeight: 360)
+
+            case .thumbnail:
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(
+                        width: FXLayout.userAttachmentThumbnailWidth,
+                        height: FXLayout.userAttachmentThumbnailHeight
+                    )
+                    .clipped()
+            }
+        }
+        .background(FXColors.bgSurface)
+        .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+        .overlay(
+            RoundedRectangle(cornerRadius: FXRadii.lg)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+        )
+        .contextMenu {
+            if assetURL != nil {
+                Button("Copy Image File", systemImage: "doc.on.doc", action: copyImageFile)
+            }
+        }
+        .accessibilityLabel(accessibilityLabel)
+    }
+
     private func assetPlaceholder(icon: String, title: String, detail: String) -> some View {
         HStack(spacing: FXSpacing.md) {
             Image(systemName: icon)
@@ -957,16 +1383,23 @@ struct MessageAssetImageView: View {
                 .foregroundStyle(FXColors.fgTertiary)
 
             VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
-                Text(title)
+                Text(accessibilityName ?? title)
                     .font(FXTypography.bodyMedium)
                     .foregroundStyle(FXColors.fgSecondary)
+                    .lineLimit(1)
                 Text(detail)
                     .font(FXTypography.caption)
                     .foregroundStyle(FXColors.fgTertiary)
+                    .lineLimit(presentation == .thumbnail ? 2 : nil)
             }
         }
         .padding(FXSpacing.md)
-        .frame(maxWidth: 420, alignment: .leading)
+        .frame(
+            width: presentation == .thumbnail ? FXLayout.userAttachmentThumbnailWidth : nil,
+            height: presentation == .thumbnail ? FXLayout.userAttachmentThumbnailHeight : nil,
+            alignment: .leading
+        )
+        .frame(maxWidth: presentation == .full ? 420 : nil, alignment: .leading)
         .background(FXColors.bgSurface)
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
         .overlay(
@@ -974,6 +1407,19 @@ struct MessageAssetImageView: View {
                 .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
         )
         .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var placeholderWidth: CGFloat {
+        presentation == .thumbnail ? FXLayout.userAttachmentThumbnailWidth : 180
+    }
+
+    private var placeholderHeight: CGFloat {
+        presentation == .thumbnail ? FXLayout.userAttachmentThumbnailHeight : 96
+    }
+
+    private var accessibilityLabel: String {
+        accessibilityName.map { "Image attachment: \($0)" } ?? "Image attachment"
     }
 
     private func copyImageFile() {
