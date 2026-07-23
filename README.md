@@ -14,6 +14,7 @@ FlowX is a native macOS AI workspace for orchestrating conversations, browser pr
 - **Up to 3 terminal panes** per agent
 - **Git inspector** for changes, files, commit, and push
 - **Command palette** and keyboard-driven shell actions
+- **Steer or queue follow-ups while a turn is running** — choose the default in Settings, use Command-Return for it, and Control-Return for the opposite behavior
 - **Per-agent persistence** across app restarts
 
 ## Requirements

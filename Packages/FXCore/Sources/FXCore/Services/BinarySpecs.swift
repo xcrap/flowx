@@ -20,6 +20,13 @@ extension BinarySpec {
         id: "codex",
         displayName: "Codex",
         searchPaths: [
+            // Reuse the signed runtime already used by the desktop agent so
+            // FlowX sees the same native tasks and avoids a quarantined CLI
+            // download taking precedence when both installations exist.
+            "\(NSHomeDirectory())/Applications/ChatGPT.app/Contents/Resources/codex",
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
+            "\(NSHomeDirectory())/Applications/Codex.app/Contents/Resources/codex",
+            "/Applications/Codex.app/Contents/Resources/codex",
             "/opt/homebrew/bin/codex",
             "/usr/local/bin/codex",
             "\(NSHomeDirectory())/.local/bin/codex",

@@ -28,6 +28,7 @@ public final class ConversationService {
     private struct ActiveRequest {
         let task: Task<Void, Never>
         let cancel: @Sendable () async -> Void
+        let steer: @Sendable (String, [Attachment]) async throws -> Void
         let respondToApproval: @Sendable (UUID, Bool) async -> Void
         let respondToUserInput: @Sendable (UUID, ProviderUserInputAnswers) async -> Void
         let cancelUserInput: @Sendable (UUID) async -> Void
@@ -166,6 +167,77 @@ public final class ConversationService {
 
     public func clearPendingRequests(for agentID: UUID) {
         pendingRequests[agentID] = nil
+    }
+
+    /// Sends guidance into the provider's currently active turn.
+    ///
+    /// The caller should clear its composer only when this returns `true`.
+    /// Rejected guidance is neither queued nor appended to the transcript.
+    @discardableResult
+    public func steer(
+        prompt: String,
+        attachments: [Attachment] = [],
+        conversationState: ConversationState,
+        onAccepted: (() -> Void)? = nil
+    ) async -> Bool {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty || !attachments.isEmpty else {
+            let message = "Enter guidance or attach an image before steering the active turn."
+            conversationState.reportNonfatalError(message)
+            conversationState.recordRuntimeActivity(
+                kind: .note,
+                tone: .error,
+                summary: "Guidance not sent",
+                detail: message,
+                state: "rejected",
+                turnID: conversationState.activeTurnID
+            )
+            return false
+        }
+
+        guard let activeRequest = activeRequests[conversationState.agentID] else {
+            let message = "There is no active turn to steer. Send this as a new prompt or queue it instead."
+            conversationState.reportNonfatalError(message)
+            conversationState.recordRuntimeActivity(
+                kind: .note,
+                tone: .error,
+                summary: "Guidance not sent",
+                detail: message,
+                state: "rejected",
+                turnID: conversationState.activeTurnID
+            )
+            return false
+        }
+
+        do {
+            try await activeRequest.steer(prompt, attachments)
+            conversationState.appendUserMessage(prompt, attachments: attachments)
+            conversationState.dismissError()
+            conversationState.recordRuntimeActivity(
+                kind: .note,
+                tone: .success,
+                summary: "Guidance sent",
+                detail: Self.summarizedRuntimeText(prompt)
+                    ?? (attachments.count == 1 ? "1 image" : "\(attachments.count) images"),
+                state: "steered",
+                turnID: conversationState.activeTurnID
+            )
+            onAccepted?()
+            return true
+        } catch {
+            let detail = error.localizedDescription
+            let message = "Could not steer the active turn: \(detail) Your message was not sent; retry or queue it."
+            conversationState.reportNonfatalError(message)
+            conversationState.recordRuntimeActivity(
+                kind: .note,
+                tone: .error,
+                summary: "Guidance not sent",
+                detail: detail,
+                state: "rejected",
+                turnID: conversationState.activeTurnID
+            )
+            return false
+        }
     }
 
     public func releaseProviderSession(_ sessionID: String, providerID: String) async {
@@ -726,6 +798,7 @@ public final class ConversationService {
         activeRequests[agentID] = ActiveRequest(
             task: task,
             cancel: handle.cancel,
+            steer: handle.steer,
             respondToApproval: handle.respondToApproval,
             respondToUserInput: handle.respondToUserInput,
             cancelUserInput: handle.cancelUserInput

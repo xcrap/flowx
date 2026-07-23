@@ -715,6 +715,7 @@ final class AppPreferences {
         static let defaultEffort = "flowx.defaultEffort"
         static let defaultAccess = "flowx.defaultAccess"
         static let defaultMode = "flowx.defaultMode"
+        static let defaultFollowUpMode = "flowx.defaultFollowUpMode"
         static let appearanceMode = "flowx.appearanceMode"
         static let baseTone = "flowx.baseTone"
         static let accentColor = "flowx.accentColor"
@@ -744,6 +745,10 @@ final class AppPreferences {
 
     var defaultMode: AgentMode {
         didSet { defaults.set(defaultMode.rawValue, forKey: Keys.defaultMode) }
+    }
+
+    var defaultFollowUpMode: PromptFollowUpMode {
+        didSet { defaults.set(defaultFollowUpMode.rawValue, forKey: Keys.defaultFollowUpMode) }
     }
 
     var appearanceMode: FXAppearanceMode {
@@ -787,6 +792,9 @@ final class AppPreferences {
         defaultEffort = AgentInfo.normalizedEffort(defaults.string(forKey: Keys.defaultEffort))
         defaultAccess = AgentAccess(rawValue: defaults.string(forKey: Keys.defaultAccess) ?? "") ?? .fullAccess
         defaultMode = AgentMode(rawValue: defaults.string(forKey: Keys.defaultMode) ?? "") ?? .auto
+        defaultFollowUpMode = PromptFollowUpMode(
+            rawValue: defaults.string(forKey: Keys.defaultFollowUpMode) ?? ""
+        ) ?? .steer
         appearanceMode = FXAppearanceMode(rawValue: defaults.string(forKey: Keys.appearanceMode) ?? "") ?? .dark
         baseTone = FXBaseTone(rawValue: defaults.string(forKey: Keys.baseTone) ?? "") ?? .zinc
         accentColor = FXAccentColorOption(rawValue: defaults.string(forKey: Keys.accentColor) ?? "") ?? .violet
@@ -914,6 +922,8 @@ final class AppState {
     private var nativeActiveProjectPollingTask: Task<Void, Never>?
     private var nativeTranscriptTasks: [UUID: Task<Void, Never>] = [:]
     private var nativeTranscriptLoadIDs: [UUID: UUID] = [:]
+    @ObservationIgnored private var steeringPromptTasks: [UUID: Task<Void, Never>] = [:]
+    private var steeringPromptSubmissionIDs: [UUID: UUID] = [:]
     private var prunedNativePresentations: [UUID: [NativeThreadIdentity: AgentInfo]] = [:]
     private var isShuttingDown = false
 
@@ -933,6 +943,10 @@ final class AppState {
 
     var activeProjectCanShowGitPanel: Bool {
         canShowGitPanel(for: activeProject)
+    }
+
+    func isSubmittingSteer(for agentID: UUID) -> Bool {
+        steeringPromptSubmissionIDs[agentID] != nil
     }
 
     var windowTitle: String {
@@ -1071,6 +1085,7 @@ final class AppState {
         guard let removedProject = projects.first(where: { $0.id == projectID }) else { return }
 
         for agent in removedProject.agents {
+            cancelSteeringSubmission(for: agent.id)
             nativeTranscriptTasks[agent.id]?.cancel()
             nativeTranscriptTasks[agent.id] = nil
             nativeTranscriptLoadIDs[agent.id] = nil
@@ -1148,6 +1163,7 @@ final class AppState {
             return
         }
 
+        cancelSteeringSubmission(for: agentID)
         conversationService.cancelStreaming(for: agentID)
         conversationService.clearPendingRequests(for: agentID)
         nativeTranscriptTasks[agentID]?.cancel()
@@ -1282,7 +1298,11 @@ final class AppState {
         return errors.isEmpty ? nil : Self.attachmentErrorSummary(errors)
     }
 
-    func sendPrompt(for agent: AgentInfo) {
+    func sendPrompt(
+        for agent: AgentInfo,
+        followUpMode: PromptFollowUpMode? = nil
+    ) {
+        guard !isSubmittingSteer(for: agent.id) else { return }
         let prompt = agent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         let attachments = agent.conversationState.pendingAttachments
         guard !prompt.isEmpty || !attachments.isEmpty else { return }
@@ -1305,6 +1325,17 @@ final class AppState {
             agent.conversationState.inputText = ""
             agent.conversationState.clearAttachments()
             handleSlashCommand(slashCommand, attachments: attachments, for: agent)
+            return
+        }
+
+        let resolvedFollowUpMode = followUpMode ?? preferences.defaultFollowUpMode
+        if agent.isStreaming, resolvedFollowUpMode == .steer {
+            submitSteeringPrompt(
+                prompt,
+                draftText: agent.conversationState.inputText,
+                attachments: attachments,
+                for: agent
+            )
             return
         }
 
@@ -1368,6 +1399,7 @@ final class AppState {
     }
 
     func resetConversation(for agent: AgentInfo) {
+        cancelSteeringSubmission(for: agent.id)
         conversationService.cancelStreaming(for: agent.id)
         conversationService.clearPendingRequests(for: agent.id)
         releaseProviderSession(for: agent)
@@ -1415,6 +1447,7 @@ final class AppState {
     }
 
     func restartConversationSession(for agent: AgentInfo) {
+        cancelSteeringSubmission(for: agent.id)
         conversationService.cancelStreaming(for: agent.id)
         releaseProviderSession(for: agent)
 
@@ -2507,6 +2540,64 @@ final class AppState {
         return project.agents.first?.id
     }
 
+    private func submitSteeringPrompt(
+        _ prompt: String,
+        draftText: String,
+        attachments: [Attachment],
+        for agent: AgentInfo
+    ) {
+        guard let project = preflightPromptDispatch(for: agent) else { return }
+
+        let agentID = agent.id
+        let projectID = project.id
+        let attachmentIDs = attachments.map(\.id)
+        let submissionID = UUID()
+        steeringPromptSubmissionIDs[agentID] = submissionID
+
+        let task = Task { @MainActor [weak self, weak agent] in
+            guard let self else { return }
+            guard let agent else {
+                if self.steeringPromptSubmissionIDs[agentID] == submissionID {
+                    self.steeringPromptTasks[agentID] = nil
+                    self.steeringPromptSubmissionIDs[agentID] = nil
+                }
+                return
+            }
+            let accepted = await self.conversationService.steer(
+                prompt: prompt,
+                attachments: attachments,
+                conversationState: agent.conversationState,
+                onAccepted: {
+                    ConversationPersistence.save(agent: agent, projectID: projectID)
+                }
+            )
+
+            // Removal/reset can invalidate an in-flight submission. In that
+            // case its owner already canceled and cleaned the UI state.
+            guard self.steeringPromptSubmissionIDs[agentID] == submissionID else { return }
+            self.steeringPromptTasks[agentID] = nil
+            self.steeringPromptSubmissionIDs[agentID] = nil
+
+            guard self.project(for: agentID)?.id == projectID else { return }
+            if accepted {
+                // The composer is disabled while awaiting provider acceptance,
+                // but keep this identity check so programmatic changes can
+                // never erase a newer draft or newly attached images.
+                if agent.conversationState.inputText == draftText,
+                   agent.conversationState.pendingAttachments.map(\.id) == attachmentIDs {
+                    agent.conversationState.inputText = ""
+                    agent.conversationState.clearAttachments()
+                }
+                agent.markConversationStarted()
+                ConversationPersistence.save(agent: agent, projectID: projectID)
+                self.scheduleSave()
+            } else {
+                self.persistConversation(for: agent)
+            }
+        }
+        steeringPromptTasks[agentID] = task
+    }
+
     @discardableResult
     private func dispatchPrompt(
         _ prompt: String,
@@ -2688,6 +2779,11 @@ final class AppState {
         scheduleSave()
     }
 
+    private func cancelSteeringSubmission(for agentID: UUID) {
+        steeringPromptTasks.removeValue(forKey: agentID)?.cancel()
+        steeringPromptSubmissionIDs[agentID] = nil
+    }
+
     private func releaseProviderSession(for agent: AgentInfo) {
         guard let sessionID = agent.conversationState.sessionID, !sessionID.isEmpty else { return }
         let providerID = agent.providerID
@@ -2707,6 +2803,11 @@ final class AppState {
         }
         nativeTranscriptTasks.removeAll()
         nativeTranscriptLoadIDs.removeAll()
+        for task in steeringPromptTasks.values {
+            task.cancel()
+        }
+        steeringPromptTasks.removeAll()
+        steeringPromptSubmissionIDs.removeAll()
 
         for project in projects {
             for agent in project.agents {

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import FXAgent
 import FXDesign
 import FXTerminal
 
@@ -65,19 +66,32 @@ struct FlowXCommands: Commands {
         }
 
         CommandMenu("Conversation") {
-            Button(activeAgent?.isStreaming == true ? "Queue Prompt" : "Send Prompt") {
+            Button(primaryPromptActionTitle) {
                 guard let agent = activeAgent else { return }
-                appState.sendPrompt(for: agent)
+                appState.sendPrompt(
+                    for: agent,
+                    followUpMode: defaultFollowUpMode
+                )
             }
             .keyboardShortcut(.return, modifiers: .command)
-            .disabled(!hasSendableDraft)
+            .disabled(!hasSendableDraft || activeAgentIsSubmittingSteer)
+
+            Button(alternatePromptActionTitle) {
+                guard let agent = activeAgent else { return }
+                appState.sendPrompt(
+                    for: agent,
+                    followUpMode: defaultFollowUpMode.opposite
+                )
+            }
+            .keyboardShortcut(.return, modifiers: .control)
+            .disabled(!hasSendableDraft || activeAgentIsSubmittingSteer)
 
             Button("Attach Images…") {
                 guard let agent = activeAgent else { return }
                 appState.attachFiles(to: agent)
             }
             .keyboardShortcut("a", modifiers: [.command, .shift])
-            .disabled(activeAgent == nil || !activeModelSupportsVision)
+            .disabled(activeAgent == nil || !activeModelSupportsVision || activeAgentIsSubmittingSteer)
 
             if activeAgent?.isStreaming == true {
                 Divider()
@@ -159,10 +173,29 @@ struct FlowXCommands: Commands {
         appState.activeAgent
     }
 
+    private var defaultFollowUpMode: PromptFollowUpMode {
+        appState.preferences.defaultFollowUpMode
+    }
+
+    private var primaryPromptActionTitle: String {
+        guard activeAgent?.isStreaming == true else { return "Send Prompt" }
+        return defaultFollowUpMode == .steer ? "Steer Active Run" : "Queue Follow-Up"
+    }
+
+    private var alternatePromptActionTitle: String {
+        guard activeAgent?.isStreaming == true else { return "Send Prompt (Alternate Shortcut)" }
+        return defaultFollowUpMode.opposite == .steer ? "Steer Active Run" : "Queue Follow-Up"
+    }
+
     private var hasSendableDraft: Bool {
         guard let activeAgent else { return false }
         return !activeAgent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !activeAgent.conversationState.pendingAttachments.isEmpty
+    }
+
+    private var activeAgentIsSubmittingSteer: Bool {
+        guard let activeAgent else { return false }
+        return appState.isSubmittingSteer(for: activeAgent.id)
     }
 
     private var activeModelSupportsVision: Bool {

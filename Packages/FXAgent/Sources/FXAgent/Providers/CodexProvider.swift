@@ -278,6 +278,7 @@ private actor CodexSession {
     private var stderrPipe: Pipe?
     private var stderrCapture: CodexStderrCapture?
     private var stdoutReaderTask: Task<Void, Never>?
+    private var serverExecutableURL: URL?
     private var threadID: String?
     private var threadReady = false
     private var serverInitialized = false
@@ -300,6 +301,7 @@ private actor CodexSession {
     private var pendingJSONTimeoutTasks: [Int: Task<Void, Never>] = [:]
     private var supportsThreadTurnsList: Bool?
     private var activeAttachments: PreparedProviderAttachments = .empty
+    private var activeFollowUpAttachments: [PreparedProviderAttachments] = []
 
     fileprivate static let controlRequestTimeoutSeconds: UInt64 = 30
 
@@ -599,6 +601,69 @@ private actor CodexSession {
         return resolvedThreadID
     }
 
+    func steer(prompt: String, attachments: [Attachment]) async throws {
+        try Task.checkCancellation()
+        guard activeContinuation != nil,
+              let resolvedThreadID = threadID,
+              let expectedTurnID = activeTurnID else {
+            throw ProviderSteeringError.unavailable(
+                "Codex has not started a steerable turn yet, or the active turn has already ended."
+            )
+        }
+
+        let preparedAttachments = try ProviderAttachmentStore.prepare(attachments)
+        var retainedAttachments = false
+        defer {
+            if !retainedAttachments {
+                preparedAttachments.remove()
+            }
+        }
+
+        let params = Self.turnSteerParameters(
+            threadID: resolvedThreadID,
+            expectedTurnID: expectedTurnID,
+            prompt: prompt,
+            imagePaths: preparedAttachments.files
+        )
+        let payload = try await requestJSON(method: "turn/steer", params: params)
+        let result = payload["result"] as? [String: Any]
+        guard result?["turnId"] as? String == expectedTurnID else {
+            throw ProviderSteeringError.unavailable(
+                "Codex did not confirm guidance for the expected active turn."
+            )
+        }
+        guard activeContinuation != nil, activeTurnID == expectedTurnID else {
+            throw ProviderSteeringError.unavailable(
+                "The Codex turn ended before the guidance could be accepted."
+            )
+        }
+
+        activeFollowUpAttachments.append(preparedAttachments)
+        retainedAttachments = true
+    }
+
+    fileprivate static func turnSteerParameters(
+        threadID: String,
+        expectedTurnID: String,
+        prompt: String,
+        imagePaths: [URL]
+    ) -> [String: Any] {
+        var input = imagePaths.map { path in
+            [
+                "type": "localImage",
+                "path": path.path,
+            ]
+        }
+        if !prompt.isEmpty {
+            input.append(["type": "text", "text": prompt])
+        }
+        return [
+            "threadId": threadID,
+            "expectedTurnId": expectedTurnID,
+            "input": input,
+        ]
+    }
+
     func setGoal(
         objective: String?,
         status: ConversationGoalStatus?,
@@ -695,6 +760,9 @@ private actor CodexSession {
 
         for _ in 0..<100 {
             try await Task.sleep(for: .milliseconds(50))
+            if let startupError {
+                throw Self.makeError(startupError)
+            }
             if process?.isRunning == true, writer != nil {
                 return
             }
@@ -712,10 +780,18 @@ private actor CodexSession {
         try await ensureServerStarted()
         for _ in 0..<200 {
             if serverInitialized { return }
-            if let startupError { throw Self.makeError(startupError) }
+            if let startupError {
+                let failure = currentStartupFailureMessage(summary: startupError)
+                await shutdown()
+                throw Self.makeError(failure)
+            }
             try await Task.sleep(for: .milliseconds(50))
         }
-        throw Self.makeError("Codex app-server did not complete initialization.")
+        let failure = currentStartupFailureMessage(
+            summary: "Codex app-server did not complete initialization."
+        )
+        await shutdown()
+        throw Self.makeError(failure)
     }
 
     private func requestGoal(method: String, params: [String: Any]) async throws -> ConversationGoal? {
@@ -858,15 +934,17 @@ private actor CodexSession {
                 return threadID
             }
             if let startupError {
-                throw NSError(domain: "CodexProvider", code: 2, userInfo: [
-                    NSLocalizedDescriptionKey: startupError,
-                ])
+                let failure = currentStartupFailureMessage(summary: startupError)
+                await shutdown()
+                throw Self.makeError(failure)
             }
         }
 
-        throw NSError(domain: "CodexProvider", code: 3, userInfo: [
-            NSLocalizedDescriptionKey: "Codex thread was not ready in time.",
-        ])
+        let failure = currentStartupFailureMessage(
+            summary: "Codex app-server did not make the thread ready."
+        )
+        await shutdown()
+        throw Self.makeError(failure)
     }
 
     private func nextRequestID() -> Int {
@@ -908,6 +986,7 @@ private actor CodexSession {
         writer = stdinPipe.fileHandleForWriting
         self.stderrPipe = stderrPipe
         self.stderrCapture = stderrCapture
+        serverExecutableURL = executableURL
         self.process = process
 
         let outputStream = AsyncStream<Data> { streamContinuation in
@@ -1029,6 +1108,16 @@ private actor CodexSession {
             stderrCapture?.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
         }
         let stderrText = stderrCapture?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !serverInitialized, startupError == nil {
+            startupError = Self.initializationFailureMessage(
+                summary: "Codex app-server exited before initialization completed.",
+                executableURL: serverExecutableURL,
+                stderr: stderrText,
+                terminationStatus: Self.terminationStatus(for: process),
+                terminatedBySignal: Self.terminatedBySignal(process),
+                isQuarantined: serverExecutableURL.map(Self.isQuarantinedExecutable) ?? false
+            )
+        }
 
         if let activeContinuation {
             if let stderrText, !stderrText.isEmpty {
@@ -1053,6 +1142,74 @@ private actor CodexSession {
         stderrCapture = nil
         process = nil
         stdoutReaderTask = nil
+    }
+
+    private static func terminationStatus(for process: Process?) -> Int32? {
+        guard let process, !process.isRunning else { return nil }
+        return process.terminationStatus
+    }
+
+    private static func terminatedBySignal(_ process: Process?) -> Bool {
+        guard let process, !process.isRunning else { return false }
+        return process.terminationReason == .uncaughtSignal
+    }
+
+    private static func isQuarantinedExecutable(_ url: URL) -> Bool {
+        let executableURL = url.resolvingSymlinksInPath()
+        let values = try? executableURL.resourceValues(forKeys: [.quarantinePropertiesKey])
+        return values?.quarantineProperties != nil
+    }
+
+    private func currentStartupFailureMessage(summary: String) -> String {
+        Self.initializationFailureMessage(
+            summary: summary,
+            executableURL: serverExecutableURL,
+            stderr: stderrCapture?.text,
+            terminationStatus: Self.terminationStatus(for: process),
+            terminatedBySignal: Self.terminatedBySignal(process),
+            isQuarantined: serverExecutableURL.map(Self.isQuarantinedExecutable) ?? false
+        )
+    }
+
+    fileprivate static func initializationFailureMessage(
+        summary: String,
+        executableURL: URL?,
+        stderr: String?,
+        terminationStatus: Int32?,
+        terminatedBySignal: Bool,
+        isQuarantined: Bool
+    ) -> String {
+        let path = executableURL?.path
+        var details: [String] = [summary]
+
+        if isQuarantined, let path {
+            details.append(
+                "macOS may have blocked the quarantined Codex executable at '\(path)'. "
+                    + "Resolve the macOS security warning or reinstall Codex, then retry; "
+                    + "FlowX does not bypass Gatekeeper or remove quarantine attributes."
+            )
+        } else if let path {
+            details.append("Executable: \(path).")
+        }
+
+        if let terminationStatus {
+            if terminatedBySignal {
+                details.append("The process was terminated by signal \(terminationStatus).")
+            } else {
+                details.append("The process exited with status \(terminationStatus).")
+            }
+        }
+
+        let stderr = stderr?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let stderr, !stderr.isEmpty {
+            let maximumScalars = 4_096
+            let bounded = stderr.unicodeScalars.count > maximumScalars
+                ? String(stderr.unicodeScalars.suffix(maximumScalars))
+                : stderr
+            details.append("Codex reported: \(bounded)")
+        }
+
+        return details.joined(separator: " ")
     }
 
     private func processLine(_ line: String) {
@@ -1088,7 +1245,7 @@ private actor CodexSession {
             if failPendingResponse(id: id, error: rpcError) {
                 return
             }
-            if id == 1 {
+            if id == 0 || id == 1 {
                 startupError = message
             } else {
                 activeContinuation?.yield(.error(message))
@@ -2656,6 +2813,10 @@ private actor CodexSession {
     private func clearActiveAttachments() {
         activeAttachments.remove()
         activeAttachments = .empty
+        for attachments in activeFollowUpAttachments {
+            attachments.remove()
+        }
+        activeFollowUpAttachments.removeAll(keepingCapacity: false)
     }
 
     private func cancelPendingUserInputs(message: String) {
@@ -2690,6 +2851,9 @@ private actor CodexSession {
         activeTurnID = nil
         clearActiveAttachments()
         failPendingResponses(message: "The Codex session was closed.")
+        threadReady = false
+        serverInitialized = false
+        serverExecutableURL = nil
 
         guard let runningProcess = process else { return }
         (runningProcess.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
@@ -2701,8 +2865,6 @@ private actor CodexSession {
         process = nil
         stderrPipe = nil
         stderrCapture = nil
-        threadReady = false
-        serverInitialized = false
 
         guard runningProcess.isRunning else { return }
         runningProcess.interrupt()
@@ -2983,8 +3145,40 @@ public final class CodexProvider: AIProviderThreadControls, AIProviderSessionMan
         )
     }
 
+    static func turnSteerParametersForTesting(
+        threadID: String,
+        expectedTurnID: String,
+        prompt: String,
+        imagePaths: [URL]
+    ) -> [String: Any] {
+        CodexSession.turnSteerParameters(
+            threadID: threadID,
+            expectedTurnID: expectedTurnID,
+            prompt: prompt,
+            imagePaths: imagePaths
+        )
+    }
+
     static var controlRequestTimeoutSecondsForTesting: UInt64 {
         CodexSession.controlRequestTimeoutSeconds
+    }
+
+    static func initializationFailureMessageForTesting(
+        summary: String = "Codex app-server did not complete initialization.",
+        executableURL: URL?,
+        stderr: String?,
+        terminationStatus: Int32?,
+        terminatedBySignal: Bool,
+        isQuarantined: Bool
+    ) -> String {
+        CodexSession.initializationFailureMessage(
+            summary: summary,
+            executableURL: executableURL,
+            stderr: stderr,
+            terminationStatus: terminationStatus,
+            terminatedBySignal: terminatedBySignal,
+            isQuarantined: isQuarantined
+        )
     }
 
     static func preSessionCancellationIsRememberedForTesting() async -> Bool {
@@ -3084,6 +3278,14 @@ public final class CodexProvider: AIProviderThreadControls, AIProviderSessionMan
             stream: stream,
             cancel: {
                 await reference.requestCancellation()
+            },
+            steer: { prompt, attachments in
+                guard let session = await reference.get() else {
+                    throw ProviderSteeringError.unavailable(
+                        "Codex is still starting this turn. Wait for it to begin, then retry steering."
+                    )
+                }
+                try await session.steer(prompt: prompt, attachments: attachments)
             },
             respondToApproval: { approvalID, approved in
                 await reference.get()?.respondToApproval(approvalID, approved: approved)

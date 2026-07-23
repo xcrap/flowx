@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import FXAgent
 import FXDesign
 
 /// Enables window dragging from a specific view region
@@ -558,17 +559,42 @@ private struct CommandPaletteView: View {
             }
 
             if hasDraft {
-                items.append(
-                    PaletteAction(
-                        title: agent.isStreaming ? "Queue Prompt" : "Send Prompt",
-                        subtitle: agent.isStreaming ? "Add the current draft after this run" : "Run the current composer draft",
-                        systemImage: agent.isStreaming ? "plus.circle.fill" : "arrow.up.circle.fill",
-                        keywords: ["send", "queue", "prompt", "run"],
-                        shortcut: "⌘↩"
-                    ) {
-                        appState.sendPrompt(for: agent)
-                    }
-                )
+                let defaultMode = appState.preferences.defaultFollowUpMode
+
+                if agent.isStreaming {
+                    items.append(
+                        followUpPaletteAction(
+                            mode: defaultMode,
+                            shortcut: "⌘↩",
+                            isDefault: true,
+                            agent: agent
+                        )
+                    )
+                    items.append(
+                        followUpPaletteAction(
+                            mode: defaultMode.opposite,
+                            shortcut: "⌃↩",
+                            isDefault: false,
+                            agent: agent
+                        )
+                    )
+                } else {
+                    items.append(
+                        PaletteAction(
+                            id: "prompt:send",
+                            title: "Send Prompt",
+                            subtitle: "Run the current composer draft",
+                            systemImage: "arrow.up.circle.fill",
+                            keywords: ["send", "prompt", "run", "command return", "control return"],
+                            shortcut: "⌘↩ / ⌃↩"
+                        ) {
+                            appState.sendPrompt(
+                                for: agent,
+                                followUpMode: defaultMode
+                            )
+                        }
+                    )
+                }
             }
 
             if agent.isStreaming {
@@ -719,6 +745,29 @@ private struct CommandPaletteView: View {
         }
 
         return items
+    }
+
+    private func followUpPaletteAction(
+        mode: PromptFollowUpMode,
+        shortcut: String,
+        isDefault: Bool,
+        agent: AgentInfo
+    ) -> PaletteAction {
+        let isSteer = mode == .steer
+        return PaletteAction(
+            id: "prompt:follow-up:\(isDefault ? "default" : "alternate")",
+            title: isSteer ? "Steer Active Run" : "Queue Follow-Up",
+            subtitle: isSteer
+                ? "Guide the active run immediately\(isDefault ? " · default" : " · one message only")"
+                : "Run after the current turn\(isDefault ? " · default" : " · one message only")",
+            systemImage: isSteer ? "arrow.up.forward.circle.fill" : "plus.circle.fill",
+            keywords: isSteer
+                ? ["steer", "guide", "interrupt", "follow up", "prompt", "control return", "command return"]
+                : ["queue", "later", "after turn", "follow up", "prompt", "control return", "command return"],
+            shortcut: shortcut
+        ) {
+            appState.sendPrompt(for: agent, followUpMode: mode)
+        }
     }
 
     private var hasUsableProvider: Bool {

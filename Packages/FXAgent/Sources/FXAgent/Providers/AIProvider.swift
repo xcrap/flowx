@@ -1,6 +1,39 @@
 import Foundation
 import FXCore
 
+public enum PromptFollowUpMode: String, CaseIterable, Codable, Sendable {
+    case steer
+    case queue
+
+    public var label: String {
+        switch self {
+        case .steer: "Steer"
+        case .queue: "Queue"
+        }
+    }
+
+    public var opposite: Self {
+        switch self {
+        case .steer: .queue
+        case .queue: .steer
+        }
+    }
+}
+
+public enum ProviderSteeringError: LocalizedError, Sendable {
+    case unsupported
+    case unavailable(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unsupported:
+            "This provider does not support steering an active turn."
+        case .unavailable(let message):
+            message
+        }
+    }
+}
+
 public enum ProviderSessionPhase: String, Codable, Sendable {
     case idle
     case preparing
@@ -47,6 +80,7 @@ public enum ProviderLifecycleEvent: Sendable, Equatable {
 public struct ProviderStreamHandle: Sendable {
     public let stream: AsyncThrowingStream<StreamEvent, Error>
     public let cancel: @Sendable () async -> Void
+    public let steer: @Sendable (String, [Attachment]) async throws -> Void
     public let respondToApproval: @Sendable (UUID, Bool) async -> Void
     public let respondToUserInput: @Sendable (UUID, ProviderUserInputAnswers) async -> Void
     public let cancelUserInput: @Sendable (UUID) async -> Void
@@ -54,12 +88,16 @@ public struct ProviderStreamHandle: Sendable {
     public init(
         stream: AsyncThrowingStream<StreamEvent, Error>,
         cancel: @escaping @Sendable () async -> Void,
+        steer: @escaping @Sendable (String, [Attachment]) async throws -> Void = { _, _ in
+            throw ProviderSteeringError.unsupported
+        },
         respondToApproval: @escaping @Sendable (UUID, Bool) async -> Void = { _, _ in },
         respondToUserInput: @escaping @Sendable (UUID, ProviderUserInputAnswers) async -> Void = { _, _ in },
         cancelUserInput: @escaping @Sendable (UUID) async -> Void = { _ in }
     ) {
         self.stream = stream
         self.cancel = cancel
+        self.steer = steer
         self.respondToApproval = respondToApproval
         self.respondToUserInput = respondToUserInput
         self.cancelUserInput = cancelUserInput

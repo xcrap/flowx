@@ -80,6 +80,57 @@ private struct BlockingTestProvider: AIProvider {
     }
 }
 
+private actor SteeringInvocationStore {
+    let acceptsGuidance: Bool
+    private(set) var prompts: [String] = []
+
+    init(acceptsGuidance: Bool) {
+        self.acceptsGuidance = acceptsGuidance
+    }
+
+    func steer(prompt: String) throws {
+        prompts.append(prompt)
+        guard acceptsGuidance else {
+            throw ProviderSteeringError.unavailable("The test turn is not steerable.")
+        }
+    }
+}
+
+private struct SteeringTestProvider: AIProvider {
+    let id: String
+    let displayName = "Steering Test"
+    let availableModels: [AIModel] = []
+    let continuationStore: BlockingContinuationStore
+    let steeringStore: SteeringInvocationStore
+
+    func sendMessage(
+        prompt: String,
+        attachments: [FXCore.Attachment],
+        messages: [ConversationMessage],
+        model: String?,
+        effort: String?,
+        systemPrompt: String?,
+        agentMode: AgentMode?,
+        agentAccess: AgentAccess?,
+        workingDirectory: URL?,
+        resumeSessionID: String?
+    ) -> ProviderStreamHandle {
+        ProviderStreamHandle(
+            stream: AsyncThrowingStream { continuation in
+                continuationStore.set(continuation)
+                continuation.yield(.initialized(sessionID: "steering-session", model: nil))
+                continuation.yield(.lifecycle(.turnStarted(turnID: "turn-1")))
+            },
+            cancel: {
+                continuationStore.finish()
+            },
+            steer: { prompt, _ in
+                try await steeringStore.steer(prompt: prompt)
+            }
+        )
+    }
+}
+
 private actor CancellationFlag {
     private(set) var wasCancelled = false
 
@@ -226,6 +277,73 @@ private actor CleanupInvocationCounter {
 
     #expect(!service.send(prompt: "must remain in composer", to: state, providerID: "blocking-test", model: nil))
     #expect(state.queuedPromptCount == 20)
+
+    service.cancelStreaming(for: state.agentID)
+}
+
+@MainActor
+@Test func conversationSteerAppendsAndPersistsOnlyAfterProviderAcceptance() async {
+    let continuationStore = BlockingContinuationStore()
+    let steeringStore = SteeringInvocationStore(acceptsGuidance: true)
+    let provider = SteeringTestProvider(
+        id: "steering-accept",
+        continuationStore: continuationStore,
+        steeringStore: steeringStore
+    )
+    let registry = ProviderRegistry()
+    registry.register(provider)
+    let service = ConversationService(registry: registry)
+    let state = ConversationState(agentID: UUID())
+    var acceptedCallbacks = 0
+
+    #expect(service.send(prompt: "Initial", to: state, providerID: provider.id, model: nil))
+    let accepted = await service.steer(
+        prompt: "Use the smaller fix",
+        conversationState: state,
+        onAccepted: { acceptedCallbacks += 1 }
+    )
+
+    #expect(accepted)
+    #expect(state.messages.map(\.textContent) == ["Initial", "Use the smaller fix"])
+    #expect(state.queuedPromptCount == 0)
+    #expect(acceptedCallbacks == 1)
+    #expect(await steeringStore.prompts == ["Use the smaller fix"])
+    #expect(state.runtimeActivities.contains {
+        $0.summary == "Guidance sent" && $0.state == "steered"
+    })
+
+    service.cancelStreaming(for: state.agentID)
+}
+
+@MainActor
+@Test func conversationRejectedSteerLeavesTranscriptAndCallbackUntouched() async {
+    let continuationStore = BlockingContinuationStore()
+    let steeringStore = SteeringInvocationStore(acceptsGuidance: false)
+    let provider = SteeringTestProvider(
+        id: "steering-reject",
+        continuationStore: continuationStore,
+        steeringStore: steeringStore
+    )
+    let registry = ProviderRegistry()
+    registry.register(provider)
+    let service = ConversationService(registry: registry)
+    let state = ConversationState(agentID: UUID())
+    var acceptedCallbacks = 0
+
+    #expect(service.send(prompt: "Initial", to: state, providerID: provider.id, model: nil))
+    let accepted = await service.steer(
+        prompt: "Keep this draft",
+        conversationState: state,
+        onAccepted: { acceptedCallbacks += 1 }
+    )
+
+    #expect(!accepted)
+    #expect(state.messages.map(\.textContent) == ["Initial"])
+    #expect(state.queuedPromptCount == 0)
+    #expect(acceptedCallbacks == 0)
+    #expect(await steeringStore.prompts == ["Keep this draft"])
+    #expect(state.error?.contains("retry or queue it") == true)
+    #expect(state.runtimeActivities.contains { $0.summary == "Guidance not sent" })
 
     service.cancelStreaming(for: state.agentID)
 }
@@ -611,6 +729,38 @@ private actor CleanupInvocationCounter {
     #expect(CodexProvider.controlRequestTimeoutSecondsForTesting == 30)
 }
 
+@Test func codexRuntimePrefersTheDesktopAgentsSignedBinary() {
+    #expect(BinarySpec.codex.searchPaths.prefix(4).contains(
+        "/Applications/ChatGPT.app/Contents/Resources/codex"
+    ))
+    let desktopIndex = BinarySpec.codex.searchPaths.firstIndex(
+        of: "/Applications/ChatGPT.app/Contents/Resources/codex"
+    )
+    let homebrewIndex = BinarySpec.codex.searchPaths.firstIndex(of: "/opt/homebrew/bin/codex")
+    #expect(desktopIndex != nil)
+    #expect(homebrewIndex != nil)
+    if let desktopIndex, let homebrewIndex {
+        #expect(desktopIndex < homebrewIndex)
+    }
+}
+
+@Test func codexInitializationFailureExplainsQuarantineAndProcessExit() {
+    let message = CodexProvider.initializationFailureMessageForTesting(
+        executableURL: URL(fileURLWithPath: "/opt/homebrew/bin/codex"),
+        stderr: "Gatekeeper rejected the executable",
+        terminationStatus: 9,
+        terminatedBySignal: true,
+        isQuarantined: true
+    )
+
+    #expect(message.contains("did not complete initialization"))
+    #expect(message.contains("quarantined Codex executable"))
+    #expect(message.contains("/opt/homebrew/bin/codex"))
+    #expect(message.contains("does not bypass Gatekeeper"))
+    #expect(message.contains("signal 9"))
+    #expect(message.contains("Gatekeeper rejected the executable"))
+}
+
 @Test func codexCancellationBeforeSessionCreationIsRemembered() async {
     #expect(await CodexProvider.preSessionCancellationIsRememberedForTesting())
 }
@@ -849,6 +999,63 @@ private actor CleanupInvocationCounter {
     } else {
         Issue.record("Full access auto-answered AskUserQuestion")
     }
+}
+
+@Test func claudeControllerWritesASecondLiveUserMessageAndRejectsClosedInput() throws {
+    let controller = ClaudeTurnController()
+    let inputPipe = Pipe()
+    controller.setWriter(inputPipe.fileHandleForWriting)
+    try controller.sendInitialPrompt("First")
+    try controller.sendFollowUpPrompt("Steer this")
+    controller.closeInput()
+
+    let data = inputPipe.fileHandleForReading.readDataToEndOfFile()
+    let envelopes = String(decoding: data, as: UTF8.self)
+        .split(separator: "\n")
+        .compactMap { line -> [String: Any]? in
+            guard let lineData = line.data(using: .utf8) else { return nil }
+            return try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+        }
+    #expect(envelopes.count == 2)
+    let textMessages = envelopes.compactMap { envelope -> String? in
+        let message = envelope["message"] as? [String: Any]
+        let content = message?["content"] as? [[String: Any]]
+        return content?.first(where: { $0["type"] as? String == "text" })?["text"] as? String
+    }
+    #expect(textMessages == ["First", "Steer this"])
+
+    do {
+        try controller.sendFollowUpPrompt("Too late")
+        Issue.record("Closed Claude input accepted another message")
+    } catch {
+        #expect(error.localizedDescription.contains("closed"))
+    }
+}
+
+@Test func codexSteerParametersUseExpectedTurnAndNativeInputs() throws {
+    let image = URL(fileURLWithPath: "/tmp/flowx-steer.png")
+    let params = CodexProvider.turnSteerParametersForTesting(
+        threadID: "thread-1",
+        expectedTurnID: "turn-1",
+        prompt: "Change direction",
+        imagePaths: [image]
+    )
+
+    #expect(params["threadId"] as? String == "thread-1")
+    #expect(params["expectedTurnId"] as? String == "turn-1")
+    let input = try #require(params["input"] as? [[String: String]])
+    #expect(input == [
+        ["type": "localImage", "path": image.path],
+        ["type": "text", "text": "Change direction"],
+    ])
+}
+
+@Test func promptFollowUpModeProvidesStablePersistenceAndOppositeShortcut() {
+    #expect(PromptFollowUpMode.allCases == [.steer, .queue])
+    #expect(PromptFollowUpMode.steer.rawValue == "steer")
+    #expect(PromptFollowUpMode.steer.label == "Steer")
+    #expect(PromptFollowUpMode.steer.opposite == .queue)
+    #expect(PromptFollowUpMode.queue.opposite == .steer)
 }
 
 @Test func attachmentStoreWritesValidatedPrivateImage() throws {

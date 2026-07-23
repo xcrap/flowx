@@ -80,6 +80,32 @@ struct SettingsPanel: View {
                                 }
                             })
                         ])
+
+                        settingsMenuRow(
+                            "While responding",
+                            value: preferences.defaultFollowUpMode.label,
+                            panelWidth: 260,
+                            sections: [
+                                FXDropdownSection(items: [
+                                    FXDropdownItem(
+                                        id: "steer",
+                                        title: PromptFollowUpMode.steer.label,
+                                        subtitle: "Guide the active run immediately",
+                                        isSelected: preferences.defaultFollowUpMode == .steer
+                                    ) {
+                                        preferences.defaultFollowUpMode = .steer
+                                    },
+                                    FXDropdownItem(
+                                        id: "queue",
+                                        title: PromptFollowUpMode.queue.label,
+                                        subtitle: "Run after the current turn",
+                                        isSelected: preferences.defaultFollowUpMode == .queue
+                                    ) {
+                                        preferences.defaultFollowUpMode = .queue
+                                    },
+                                ])
+                            ]
+                        )
                     }
 
                     // Appearance
@@ -147,7 +173,8 @@ struct SettingsPanel: View {
                         shortcutRow("Toggle Browser", shortcut: "⌘P")
                         shortcutRow("Toggle Terminal", shortcut: "⌘T")
                         shortcutRow("Command Palette", shortcut: "⌘K")
-                        shortcutRow("Send Prompt", shortcut: "⌘↩")
+                        shortcutRow("Default follow-up / send", shortcut: "⌘↩")
+                        shortcutRow("Opposite follow-up / send", shortcut: "⌃↩")
                         shortcutRow("Settings", shortcut: "⌘,")
                     }
                 }

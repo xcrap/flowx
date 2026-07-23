@@ -6,6 +6,7 @@ import FXCore
 
 struct ChatInputBar: View {
     @Environment(AppState.self) private var appState
+    @Environment(AppPreferences.self) private var preferences
     @Bindable var agent: AgentInfo
     @FocusState private var composerFocused: Bool
     @State private var isDropTargeted = false
@@ -15,6 +16,7 @@ struct ChatInputBar: View {
 
     private enum ComposerAction {
         case send
+        case steer
         case queue
         case cancel
     }
@@ -42,6 +44,7 @@ struct ChatInputBar: View {
                         .padding(.top, FXSpacing.lg)
                         .padding(.bottom, FXSpacing.sm)
                         .focused($composerFocused)
+                        .disabled(isSubmittingSteer)
                         .accessibilityLabel("Prompt input")
                         .accessibilityHint("Type a request for \(agent.title)")
                 }
@@ -58,6 +61,7 @@ struct ChatInputBar: View {
                         .padding(.horizontal, FXSpacing.lg)
                         .padding(.bottom, FXSpacing.sm)
                     }
+                    .allowsHitTesting(!isSubmittingSteer)
                 }
 
                 if let attachmentFeedback {
@@ -76,7 +80,7 @@ struct ChatInputBar: View {
                             controlButton(
                                 icon: "paperclip",
                                 tooltip: attachmentControlTooltip,
-                                enabled: canAttachImages
+                                enabled: canAttachImages && !isSubmittingSteer
                             ) {
                                 appState.attachFiles(to: agent)
                             }
@@ -84,7 +88,7 @@ struct ChatInputBar: View {
                             controlButton(
                                 icon: "doc.on.clipboard",
                                 tooltip: canAttachImages ? "Attach image from clipboard (Command-Shift-V)" : attachmentControlTooltip,
-                                enabled: canAttachImages
+                                enabled: canAttachImages && !isSubmittingSteer
                             ) {
                                 pasteImageFromClipboard()
                             }
@@ -148,8 +152,11 @@ struct ChatInputBar: View {
 
                     Button(action: {
                         switch composerAction {
-                        case .send, .queue:
-                            appState.sendPrompt(for: agent)
+                        case .send, .steer, .queue:
+                            appState.sendPrompt(
+                                for: agent,
+                                followUpMode: preferences.defaultFollowUpMode
+                            )
                         case .cancel:
                             appState.cancelPrompt(for: agent)
                         }
@@ -159,7 +166,11 @@ struct ChatInputBar: View {
                             .foregroundStyle(sendButtonColor)
                     }
                     .buttonStyle(.plain)
-                    .disabled((composerAction == .send && !hasDraftInput) || hasUnsupportedAttachments)
+                    .disabled(
+                        (composerAction == .send && !hasDraftInput)
+                            || hasUnsupportedAttachments
+                            || isSubmittingSteer
+                    )
                     .help(composerHelpText)
                     .accessibilityLabel(composerAccessibilityLabel)
                     .accessibilityHint(composerHelpText)
@@ -189,7 +200,8 @@ struct ChatInputBar: View {
                 }
             }
             .dropDestination(for: URL.self) { urls, _ in
-                addDroppedImages(urls)
+                guard !isSubmittingSteer else { return false }
+                return addDroppedImages(urls)
             } isTargeted: { targeted in
                 isDropTargeted = targeted
             }
@@ -433,21 +445,31 @@ struct ChatInputBar: View {
         !trimmedInput.isEmpty || !agent.conversationState.pendingAttachments.isEmpty
     }
 
+    private var isSubmittingSteer: Bool {
+        appState.isSubmittingSteer(for: agent.id)
+    }
+
     private var composerAction: ComposerAction {
         if agent.isStreaming {
-            return hasDraftInput ? .queue : .cancel
+            guard hasDraftInput else { return .cancel }
+            return preferences.defaultFollowUpMode == .steer ? .steer : .queue
         }
         return .send
     }
 
     private var composerPlaceholder: String {
-        agent.isStreaming ? "Add a follow-up to the queue..." : "Ask to make changes..."
+        guard agent.isStreaming else { return "Ask to make changes..." }
+        return preferences.defaultFollowUpMode == .steer
+            ? "Steer the active run..."
+            : "Queue a follow-up..."
     }
 
     private var composerIcon: String {
         return switch composerAction {
         case .send:
             "arrow.up.circle.fill"
+        case .steer:
+            "arrow.up.forward.circle.fill"
         case .queue:
             "plus.circle.fill"
         case .cancel:
@@ -462,9 +484,11 @@ struct ChatInputBar: View {
 
         return switch composerAction {
         case .send:
-            "Send prompt (Command-Return)"
+            "Send prompt (Command-Return or Control-Return)"
+        case .steer:
+            "Steer the active run (Command-Return) · Queue instead (Control-Return)"
         case .queue:
-            "Queue prompt (Command-Return)"
+            "Queue after this turn (Command-Return) · Steer instead (Control-Return)"
         case .cancel:
             "Cancel current run"
         }
@@ -474,6 +498,8 @@ struct ChatInputBar: View {
         switch composerAction {
         case .send:
             "Send prompt"
+        case .steer:
+            "Steer active run"
         case .queue:
             "Queue prompt"
         case .cancel:
@@ -485,6 +511,8 @@ struct ChatInputBar: View {
         switch composerAction {
         case .cancel:
             return FXColors.error
+        case .steer:
+            return FXColors.accent
         case .queue:
             return FXColors.info
         case .send:
@@ -626,7 +654,7 @@ struct ChatInputBar: View {
     }
 
     private func addDroppedImages(_ urls: [URL]) -> Bool {
-        guard !urls.isEmpty else { return false }
+        guard !isSubmittingSteer, !urls.isEmpty else { return false }
 
         Task {
             if let message = await appState.attachFiles(at: urls, to: agent) {
@@ -640,6 +668,7 @@ struct ChatInputBar: View {
     }
 
     private func pasteImageFromClipboard() {
+        guard !isSubmittingSteer else { return }
         guard canAttachImages else {
             showAttachmentFeedback("Choose a vision-capable model before attaching images.")
             return
@@ -668,6 +697,7 @@ struct ChatInputBar: View {
     }
 
     private func attachClipboardData(_ data: Data, mimeType: String, filename: String) {
+        guard !isSubmittingSteer else { return }
         Task {
             if let message = await appState.attachImageData(
                 data,

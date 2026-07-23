@@ -129,6 +129,14 @@ final class ClaudeTurnController: @unchecked Sendable {
     }
 
     func sendInitialPrompt(_ prompt: String, imageFiles: [URL] = []) throws {
+        try sendUserMessage(prompt, imageFiles: imageFiles)
+    }
+
+    func sendFollowUpPrompt(_ prompt: String, imageFiles: [URL] = []) throws {
+        try sendUserMessage(prompt, imageFiles: imageFiles)
+    }
+
+    private func sendUserMessage(_ prompt: String, imageFiles: [URL]) throws {
         var content: [[String: Any]] = []
         if !prompt.isEmpty {
             content.append(["type": "text", "text": prompt])
@@ -391,10 +399,16 @@ final class ClaudeTurnController: @unchecked Sendable {
     }
 
     private func write(_ message: [String: Any]) throws {
-        guard JSONSerialization.isValidJSONObject(message) else { return }
+        guard JSONSerialization.isValidJSONObject(message) else {
+            throw ProviderSteeringError.unavailable("Claude could not encode the guidance message.")
+        }
         let data = try JSONSerialization.data(withJSONObject: message)
         try storage.withLock { state in
-            guard let writer = state.writer else { return }
+            guard let writer = state.writer else {
+                throw ProviderSteeringError.unavailable(
+                    "Claude's live input is closed, so this turn can no longer be steered."
+                )
+            }
             try writer.write(contentsOf: data + Data([0x0A]))
         }
     }
@@ -671,6 +685,11 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, Send
                 producerTaskReference.cancel()
                 controller.cancelPendingAndClose(message: "The FlowX turn was cancelled.")
                 processReference.stop()
+            },
+            steer: { prompt, attachments in
+                let prepared = try ProviderAttachmentStore.prepare(attachments)
+                defer { prepared.remove() }
+                try controller.sendFollowUpPrompt(prompt, imageFiles: prepared.files)
             },
             respondToApproval: { id, approved in
                 controller.respondToApproval(id, approved: approved)

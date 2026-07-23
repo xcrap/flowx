@@ -35,13 +35,20 @@ struct ProjectRow: View {
                         Text(project.project.name.uppercased())
                             .font(FXTypography.overline)
                             .foregroundStyle(FXColors.fgTertiary)
-                            .tracking(0.8)
+                            .tracking(0.35)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .allowsTightening(true)
+                            .layoutPriority(1)
 
                         Spacer(minLength: 0)
                     }
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(project.project.name)
+                .accessibilityLabel("Toggle \(project.project.name) project")
 
                 if project.isSyncingNativeThreads {
                     ProgressView()
