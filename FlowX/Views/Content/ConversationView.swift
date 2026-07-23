@@ -262,16 +262,25 @@ struct ConversationView: View {
                         containerHeight: geometry.containerSize.height
                     ).maxOffset
                 } action: { oldMaxOffset, newMaxOffset in
-                    guard
-                        agent.workspace.conversationPinnedToBottom,
-                        newMaxOffset > oldMaxOffset + 1
-                    else {
+                    guard ConversationScrollPolicy.shouldFollowContentGrowth(
+                        initialRestorePending: initialScrollRestorePending,
+                        userScrollInProgress: userScrollInProgress,
+                        pinnedToBottom: agent.workspace.conversationPinnedToBottom,
+                        oldMaxOffset: oldMaxOffset,
+                        newMaxOffset: newMaxOffset
+                    ) else {
                         return
                     }
                     scrollProxy.scrollTo(bottomScrollID, anchor: .bottom)
                 }
                 .onChange(of: contentVersion) { _, _ in
-                    guard agent.workspace.conversationPinnedToBottom else { return }
+                    guard ConversationScrollPolicy.shouldFollowContentUpdate(
+                        initialRestorePending: initialScrollRestorePending,
+                        userScrollInProgress: userScrollInProgress,
+                        pinnedToBottom: agent.workspace.conversationPinnedToBottom
+                    ) else {
+                        return
+                    }
                     scrollProxy.scrollTo(bottomScrollID, anchor: .bottom)
                 }
                 .task {
@@ -292,7 +301,16 @@ struct ConversationView: View {
         if restoresAtBottom {
             content
         } else {
-            content.scrollPosition($scrollPosition)
+            // The binding exists only to issue the one-time saved-position
+            // restore. Ignoring SwiftUI's continuous write-back keeps a long
+            // lazy transcript from invalidating this entire view on every
+            // trackpad frame; final offsets are captured once at scroll idle.
+            content.scrollPosition(
+                Binding(
+                    get: { scrollPosition },
+                    set: { _ in }
+                )
+            )
         }
     }
 
@@ -1246,7 +1264,16 @@ struct ConversationView: View {
         geometry: ScrollGeometry
     ) {
         switch phase {
-        case .tracking, .interacting, .decelerating:
+        case .tracking, .interacting:
+            userScrollInProgress = true
+            // A real user gesture must take control immediately. Waiting until
+            // the phase becomes idle leaves follow-to-bottom active while the
+            // lazy transcript is being remeasured, which fights the gesture
+            // and visibly jumps between distant sections.
+            if agent.workspace.conversationPinnedToBottom {
+                agent.workspace.conversationPinnedToBottom = false
+            }
+        case .decelerating:
             userScrollInProgress = true
         case .idle:
             let shouldPersist = ConversationScrollPolicy.shouldPersistUserScroll(

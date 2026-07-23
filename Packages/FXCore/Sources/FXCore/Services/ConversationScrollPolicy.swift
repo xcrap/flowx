@@ -23,6 +23,29 @@ public enum ConversationScrollPolicy {
         !initialRestorePending && userScrollInProgress
     }
 
+    public static func shouldFollowContentGrowth(
+        initialRestorePending: Bool,
+        userScrollInProgress: Bool,
+        pinnedToBottom: Bool,
+        oldMaxOffset: CGFloat,
+        newMaxOffset: CGFloat
+    ) -> Bool {
+        !initialRestorePending
+            && !userScrollInProgress
+            && pinnedToBottom
+            && newMaxOffset > oldMaxOffset + 1
+    }
+
+    public static func shouldFollowContentUpdate(
+        initialRestorePending: Bool,
+        userScrollInProgress: Bool,
+        pinnedToBottom: Bool
+    ) -> Bool {
+        !initialRestorePending
+            && !userScrollInProgress
+            && pinnedToBottom
+    }
+
     public static func metrics(
         contentOffsetY: CGFloat,
         contentHeight: CGFloat,

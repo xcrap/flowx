@@ -73,3 +73,47 @@ import Testing
         )
     )
 }
+
+@Test func conversationScrollFollowingStopsDuringRestoreAndUserNavigation() {
+    #expect(
+        ConversationScrollPolicy.shouldFollowContentGrowth(
+            initialRestorePending: false,
+            userScrollInProgress: false,
+            pinnedToBottom: true,
+            oldMaxOffset: 1_000,
+            newMaxOffset: 1_002
+        )
+    )
+    #expect(
+        !ConversationScrollPolicy.shouldFollowContentGrowth(
+            initialRestorePending: false,
+            userScrollInProgress: true,
+            pinnedToBottom: true,
+            oldMaxOffset: 1_000,
+            newMaxOffset: 1_200
+        )
+    )
+    #expect(
+        !ConversationScrollPolicy.shouldFollowContentGrowth(
+            initialRestorePending: true,
+            userScrollInProgress: false,
+            pinnedToBottom: true,
+            oldMaxOffset: 1_000,
+            newMaxOffset: 1_200
+        )
+    )
+    #expect(
+        !ConversationScrollPolicy.shouldFollowContentUpdate(
+            initialRestorePending: false,
+            userScrollInProgress: true,
+            pinnedToBottom: true
+        )
+    )
+    #expect(
+        ConversationScrollPolicy.shouldFollowContentUpdate(
+            initialRestorePending: false,
+            userScrollInProgress: false,
+            pinnedToBottom: true
+        )
+    )
+}

@@ -597,7 +597,7 @@ final class ClaudeStreamParser: @unchecked Sendable {
 
 public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIProviderNativeThreadTrashManaging, Sendable {
     public let id = "claude"
-    public let displayName = "Claude Code (Anthropic)"
+    public let displayName = "Claude Code"
     public var availableModels: [AIModel] { modelCatalog.models }
     public let capabilities = AIProviderCapabilities(
         supportedAttachments: [.image],
