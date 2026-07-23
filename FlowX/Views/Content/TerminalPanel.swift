@@ -4,13 +4,9 @@ import FXTerminal
 
 struct TerminalPanel: View {
     @Bindable var agent: AgentInfo
-    @State private var resizeStartHeight: CGFloat?
 
     var body: some View {
         VStack(spacing: 0) {
-            // Drag handle to resize height
-            resizeHandle
-
             // Header bar
             header
 
@@ -26,37 +22,6 @@ struct TerminalPanel: View {
                 }
             }
         }
-    }
-
-    // MARK: - Resize handle
-
-    private var resizeHandle: some View {
-        Rectangle()
-            .fill(Color.clear)
-            .frame(height: 6)
-            .contentShape(Rectangle())
-            .cursor(.resizeUpDown)
-            .gesture(
-                DragGesture(minimumDistance: 1)
-                    .onChanged { value in
-                        if resizeStartHeight == nil {
-                            resizeStartHeight = agent.workspace.terminalHeight
-                        }
-                        let startHeight = resizeStartHeight ?? agent.workspace.terminalHeight
-                        let proposedHeight = startHeight - value.translation.height
-                        agent.workspace.terminalHeight = min(
-                            max(proposedHeight, FXLayout.minimumTerminalHeight),
-                            FXLayout.maximumTerminalHeight
-                        )
-                    }
-                    .onEnded { _ in
-                        resizeStartHeight = nil
-                    }
-            )
-            .overlay(alignment: .top) { FXDivider() }
-            .background(FXColors.bgElevated)
-            .accessibilityLabel("Resize terminal")
-            .accessibilityHint("Drag up or down to change terminal height.")
     }
 
     // MARK: - Header
@@ -92,9 +57,7 @@ struct TerminalPanel: View {
             accessibilityLabel: "Add terminal split",
             tooltip: "Add split"
         ) {
-            withAnimation(FXAnimation.quick) {
-                agent.addTerminalPane()
-            }
+            agent.addTerminalPane()
         }
     }
 
@@ -190,9 +153,7 @@ struct TerminalPanel: View {
             }
 
             FXIconButton(icon: "xmark", label: agent.terminalPaneCount > 1 ? "Close \(paneTitle(index: index, session: session))" : "Hide terminal") {
-                withAnimation(FXAnimation.quick) {
-                    agent.closeTerminalPane(at: index)
-                }
+                agent.closeTerminalPane(at: index)
             }
         }
         .padding(.horizontal, FXSpacing.md)
@@ -235,15 +196,5 @@ struct TerminalPanel: View {
             return title
         }
         return agent.terminalPaneCount > 1 ? "Terminal \(index + 1)" : "Terminal"
-    }
-}
-
-// MARK: - Resize cursor
-
-private extension View {
-    func cursor(_ cursor: NSCursor) -> some View {
-        onHover { inside in
-            if inside { cursor.push() } else { NSCursor.pop() }
-        }
     }
 }

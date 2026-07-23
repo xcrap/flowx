@@ -428,6 +428,8 @@ public struct ProviderNativeThreadSummary: Identifiable, Sendable, Equatable {
     public var updatedAt: Date
     public var model: String?
     public var effort: String?
+    public var agentMode: AgentMode?
+    public var agentAccess: AgentAccess?
     public var status: String?
     public var source: String
 
@@ -441,6 +443,8 @@ public struct ProviderNativeThreadSummary: Identifiable, Sendable, Equatable {
         updatedAt: Date,
         model: String? = nil,
         effort: String? = nil,
+        agentMode: AgentMode? = nil,
+        agentAccess: AgentAccess? = nil,
         status: String? = nil,
         source: String
     ) {
@@ -453,6 +457,8 @@ public struct ProviderNativeThreadSummary: Identifiable, Sendable, Equatable {
         self.updatedAt = updatedAt
         self.model = model
         self.effort = effort
+        self.agentMode = agentMode
+        self.agentAccess = agentAccess
         self.status = status
         self.source = source
     }

@@ -165,6 +165,120 @@ private actor CleanupInvocationCounter {
     #expect(wasCancelled)
 }
 
+@Test func claudeSessionLeaseRejectsDuplicateResumeAndReleasesExactly() throws {
+    let lockDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("flowx-claude-lock-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: lockDirectory) }
+    let registry = ClaudeSessionLeaseRegistry(lockDirectoryURL: lockDirectory)
+    let sessionID = "A1111111-2222-4333-8444-555555555555"
+
+    try registry.acquire(sessionID)
+    do {
+        try registry.acquire(sessionID.lowercased())
+        Issue.record("A duplicate Claude session lease was accepted")
+    } catch let error as ClaudeSessionConcurrencyError {
+        #expect(error == .alreadyRunningInFlowX(sessionID: sessionID.lowercased()))
+        #expect(error.localizedDescription.contains("already has a turn running in FlowX"))
+    }
+
+    registry.release("  \(sessionID.lowercased())  ")
+    try registry.acquire(sessionID)
+    registry.release(sessionID)
+}
+
+@Test func claudeSessionLeaseSerializesIndependentRegistriesWithoutStaleFileBlocking() throws {
+    let lockDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("flowx-claude-lock-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: lockDirectory) }
+    let firstRegistry = ClaudeSessionLeaseRegistry(lockDirectoryURL: lockDirectory)
+    let secondRegistry = ClaudeSessionLeaseRegistry(lockDirectoryURL: lockDirectory)
+    let sessionID = "A1111111-2222-4333-8444-555555555555"
+
+    try firstRegistry.acquire(sessionID)
+    do {
+        try secondRegistry.acquire(sessionID)
+        Issue.record("A cross-registry Claude session lease was accepted")
+    } catch let error as ClaudeSessionConcurrencyError {
+        #expect(error == .alreadyRunningInFlowX(sessionID: sessionID))
+    }
+
+    firstRegistry.release(sessionID)
+    #expect(
+        FileManager.default.fileExists(
+            atPath: lockDirectory
+                .appendingPathComponent("\(sessionID.lowercased()).lock")
+                .path
+        )
+    )
+
+    // The file remains as a stable inode, but only the kernel lock represents
+    // activity, so a prior process exit/release cannot create a stale block.
+    try secondRegistry.acquire(sessionID)
+    secondRegistry.release(sessionID)
+}
+
+@Test func claudeSessionLeaseRejectsUnsafeSessionIdentifiers() {
+    let lockDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("flowx-claude-lock-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: lockDirectory) }
+    let registry = ClaudeSessionLeaseRegistry(lockDirectoryURL: lockDirectory)
+    let invalidSessionID = "../not-a-session"
+
+    do {
+        try registry.acquire(invalidSessionID)
+        Issue.record("An unsafe Claude session identifier was accepted")
+    } catch let error as ClaudeSessionConcurrencyError {
+        #expect(error == .invalidSessionID(sessionID: invalidSessionID))
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+@Test func claudeActiveSessionSnapshotRequiresAnExactProviderSessionID() throws {
+    let sessionID = "a1111111-2222-4333-8444-555555555555"
+    let rows: [[String: Any]] = [
+        [
+            "kind": "interactive",
+            "sessionId": sessionID.uppercased(),
+            "pid": 123,
+            "status": "idle",
+        ],
+        [
+            "kind": "background",
+            "sessionId": "b1111111-2222-4333-8444-555555555555",
+            "state": "blocked",
+            "waitingFor": "input needed",
+        ],
+        [
+            "kind": "interactive",
+            "name": "session-without-an-id",
+        ],
+    ]
+    let data = try JSONSerialization.data(withJSONObject: rows)
+
+    #expect(ClaudeSessionActivitySnapshot.contains(sessionID: sessionID, in: data) == true)
+    #expect(ClaudeSessionActivitySnapshot.contains(sessionID: "a1111111-2222-4333-8444-555555555556", in: data) == false)
+    #expect(ClaudeSessionActivitySnapshot.contains(sessionID: sessionID, in: Data("{}".utf8)) == nil)
+    #expect(
+        ClaudeSessionActivitySnapshot.helpAdvertisesJSONListing(
+            Data("  --json  Print active sessions as a JSON array".utf8)
+        )
+    )
+    #expect(
+        !ClaudeSessionActivitySnapshot.helpAdvertisesJSONListing(
+            Data("Manage background agents".utf8)
+        )
+    )
+    #expect(ClaudeSessionActivitySnapshot.versionSupportsJSONListing("2.1.145 (Claude Code)"))
+    #expect(ClaudeSessionActivitySnapshot.versionSupportsJSONListing("Claude Code 2.1.218"))
+    #expect(ClaudeSessionActivitySnapshot.versionSupportsJSONListing("3.0.0"))
+    #expect(!ClaudeSessionActivitySnapshot.versionSupportsJSONListing("2.1.144 (Claude Code)"))
+    #expect(!ClaudeSessionActivitySnapshot.versionSupportsJSONListing("unknown"))
+
+    let error = ClaudeSessionConcurrencyError.alreadyActiveInClaudeCode(sessionID: sessionID)
+    #expect(error.localizedDescription.contains("already active in another Claude Code process"))
+}
+
 @Test func codexUnregisteredSessionLeaseCleansOnceAndPreservesRegisteredSessions() async {
     let cleanupCounter = CleanupInvocationCounter()
     let unregisteredLease = CodexUnregisteredSessionLease(
@@ -364,6 +478,29 @@ private actor CleanupInvocationCounter {
     #expect(model.maxContextWindow == 200_000)
     #expect(model.inputModalities == [.text])
     #expect(model.supportedReasoningEfforts.isEmpty)
+}
+
+@Test func retainedLiveToolInputStaysValidJSONWhenBounded() throws {
+    let original: [String: Any] = [
+        "file_path": "/Users/test/project/Sources/LargeFile.swift",
+        "old_string": String(repeating: "old line\n", count: 8_000),
+        "new_string": String(repeating: "new line\n", count: 8_000),
+        "replace_all": false,
+    ]
+    let data = try JSONSerialization.data(withJSONObject: original)
+    let input = String(decoding: data, as: UTF8.self)
+
+    let retained = ConversationService.retainedToolInput(input, limit: 32_768)
+    #expect(retained.utf8.count <= 32_768)
+
+    let retainedData = try #require(retained.data(using: .utf8))
+    let decoded = try #require(
+        JSONSerialization.jsonObject(with: retainedData) as? [String: Any]
+    )
+    #expect(decoded["file_path"] as? String == original["file_path"] as? String)
+    #expect((decoded["old_string"] as? String)?.contains("retained field truncated") == true)
+    #expect((decoded["new_string"] as? String)?.contains("retained field truncated") == true)
+    #expect(decoded["replace_all"] as? Bool == false)
 }
 
 @Test func codexCatalogParsesRuntimeMetadata() throws {
@@ -820,6 +957,56 @@ private actor CleanupInvocationCounter {
     }
 }
 
+@Test func codexNativeMappingImportsImagesInProviderOrderAndRejectsUnsafeReferences() throws {
+    let manager = FileManager.default
+    let container = manager.temporaryDirectory
+        .appendingPathComponent("flowx-codex-native-images-\(UUID().uuidString)", isDirectory: true)
+    try manager.createDirectory(at: container, withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: container) }
+
+    let png = try #require(Data(base64Encoded:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    ))
+    let imageURL = container.appendingPathComponent("pixel.png")
+    let symlinkURL = container.appendingPathComponent("linked.png")
+    try png.write(to: imageURL)
+    try manager.createSymbolicLink(at: symlinkURL, withDestinationURL: imageURL)
+    let dataURL = "data:image/png;base64,\(png.base64EncodedString())"
+
+    let thread: [String: Any] = [
+        "id": "thread-images",
+        "turns": [[
+            "id": "turn-images",
+            "startedAt": 1,
+            "completedAt": 2,
+            "items": [[
+                "id": "user-images",
+                "type": "userMessage",
+                "content": [
+                    ["type": "text", "text": "Before"],
+                    ["type": "localImage", "path": imageURL.path],
+                    ["type": "text", "text": "Between"],
+                    ["type": "image", "url": dataURL],
+                    ["type": "localImage", "path": symlinkURL.path],
+                    ["type": "localImage", "path": "../relative.png"],
+                    ["type": "image", "url": "https://example.com/remote.png"],
+                    ["type": "text", "text": "After"],
+                ],
+            ]],
+        ]],
+    ]
+
+    let message = try #require(CodexProvider.mapNativeMessagesForTesting(thread).first)
+    #expect(message.content == [
+        .text("Before"),
+        .image(data: png, mimeType: "image/png"),
+        .text("Between"),
+        .image(data: png, mimeType: "image/png"),
+        .text("After"),
+    ])
+    #expect(!message.textContent.contains("[Image]"))
+}
+
 @Test func codexNativeMappingKeepsDialogueAheadOfLifecycleNoise() throws {
     let noise: [[String: Any]] = (0..<400).map { index in
         [
@@ -1144,6 +1331,261 @@ private actor CleanupInvocationCounter {
     #expect(thread.messages.last?.content.count == 2)
 }
 
+@Test func claudeNativeStoreImportsUserImagesInBlockOrderWithoutPlaceholders() async throws {
+    let manager = FileManager.default
+    let container = manager.temporaryDirectory
+        .appendingPathComponent("flowx-claude-native-user-image-\(UUID().uuidString)", isDirectory: true)
+    let workspace = container.appendingPathComponent("workspace", isDirectory: true)
+    let config = container.appendingPathComponent("claude-config", isDirectory: true)
+    try manager.createDirectory(at: workspace, withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: container) }
+
+    let canonical = workspace.standardizedFileURL.resolvingSymlinksInPath().path
+    let projectKey = canonical.unicodeScalars.map { scalar -> Character in
+        CharacterSet.alphanumerics.contains(scalar) ? Character(String(scalar)) : "-"
+    }
+    let project = config
+        .appendingPathComponent("projects", isDirectory: true)
+        .appendingPathComponent(String(projectKey), isDirectory: true)
+    try manager.createDirectory(at: project, withIntermediateDirectories: true)
+
+    let sessionID = "91111111-2222-4333-8444-555555555555"
+    let png = try #require(Data(base64Encoded:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    ))
+    let record: [String: Any] = [
+        "type": "user",
+        "uuid": "92222222-2222-4333-8444-555555555555",
+        "sessionId": sessionID,
+        "cwd": canonical,
+        "timestamp": "2026-07-23T01:00:00.000Z",
+        "message": [
+            "role": "user",
+            "content": [
+                ["type": "text", "text": "Before"],
+                [
+                    "type": "image",
+                    "source": [
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": png.base64EncodedString(),
+                    ],
+                ],
+                ["type": "text", "text": "After"],
+                [
+                    "type": "image",
+                    "source": [
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": png.base64EncodedString(),
+                    ],
+                ],
+            ],
+        ],
+    ]
+    let data = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
+    try (data + Data([0x0A])).write(
+        to: project.appendingPathComponent(sessionID).appendingPathExtension("jsonl")
+    )
+
+    let thread = try await ClaudeNativeThreadStore(configRoot: config).read(
+        id: sessionID,
+        workingDirectory: workspace
+    )
+    let message = try #require(thread.messages.first)
+    #expect(message.content == [
+        .text("Before"),
+        .image(data: png, mimeType: "image/png"),
+        .text("After"),
+    ])
+    #expect(!message.textContent.contains("[Image]"))
+}
+
+@Test func claudeNativeStoreHidesSyntheticImageMetadataAndPreservesStructuredEditPatch() async throws {
+    let manager = FileManager.default
+    let container = manager.temporaryDirectory
+        .appendingPathComponent("flowx-claude-native-image-meta-\(UUID().uuidString)", isDirectory: true)
+    let workspace = container.appendingPathComponent("workspace", isDirectory: true)
+    let config = container.appendingPathComponent("claude-config", isDirectory: true)
+    try manager.createDirectory(at: workspace, withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: container) }
+
+    let canonical = workspace.standardizedFileURL.resolvingSymlinksInPath().path
+    let projectKey = canonical.unicodeScalars.map { scalar -> Character in
+        CharacterSet.alphanumerics.contains(scalar) ? Character(String(scalar)) : "-"
+    }
+    let project = config
+        .appendingPathComponent("projects", isDirectory: true)
+        .appendingPathComponent(String(projectKey), isDirectory: true)
+    try manager.createDirectory(at: project, withIntermediateDirectories: true)
+
+    let sessionID = "81111111-2222-4333-8444-555555555555"
+    let editAssistantID = "82222222-2222-4333-8444-555555555555"
+    let readAssistantID = "83333333-2222-4333-8444-555555555555"
+    let imageResultID = "84444444-2222-4333-8444-555555555555"
+    let oversizedOldSource = String(repeating: "let before = true;\n", count: 4_000)
+    let oversizedNewSource = String(repeating: "let after = true;\n", count: 4_000)
+    let structuredPatch: [[String: Any]] = [[
+        "oldStart": 10,
+        "oldLines": 2,
+        "newStart": 10,
+        "newLines": 2,
+        "lines": [" context", "-let before = true;", "+let after = true;"],
+    ]]
+    let records: [[String: Any]] = [
+        [
+            "type": "user",
+            "uuid": "81111111-1111-4333-8444-555555555555",
+            "sessionId": sessionID,
+            "cwd": canonical,
+            "timestamp": "2026-07-23T01:00:00.000Z",
+            "message": ["role": "user", "content": "Change the implementation"],
+        ],
+        [
+            "type": "assistant",
+            "uuid": editAssistantID,
+            "sessionId": sessionID,
+            "cwd": canonical,
+            "timestamp": "2026-07-23T01:00:01.000Z",
+            "message": [
+                "model": "claude-fable-5",
+                "content": [[
+                    "type": "tool_use",
+                    "id": "tool-edit",
+                    "name": "Edit",
+                    "input": [
+                        "file_path": "/workspace/Sources/App.swift",
+                        "old_string": oversizedOldSource,
+                        "new_string": oversizedNewSource,
+                        "replace_all": false,
+                    ],
+                ]],
+            ],
+        ],
+        [
+            "type": "user",
+            "uuid": "85555555-2222-4333-8444-555555555555",
+            "parentUuid": editAssistantID,
+            "sessionId": sessionID,
+            "cwd": canonical,
+            "timestamp": "2026-07-23T01:00:02.000Z",
+            "message": [
+                "role": "user",
+                "content": [[
+                    "type": "tool_result",
+                    "tool_use_id": "tool-edit",
+                    "content": "Updated",
+                ]],
+            ],
+            "toolUseResult": ["structuredPatch": structuredPatch],
+        ],
+        [
+            "type": "assistant",
+            "uuid": readAssistantID,
+            "sessionId": sessionID,
+            "cwd": canonical,
+            "timestamp": "2026-07-23T01:00:03.000Z",
+            "message": [
+                "model": "claude-fable-5",
+                "content": [[
+                    "type": "tool_use",
+                    "id": "tool-image",
+                    "name": "Read",
+                    "input": ["file_path": "/tmp/capture.png"],
+                ]],
+            ],
+        ],
+        [
+            "type": "user",
+            "uuid": imageResultID,
+            "parentUuid": readAssistantID,
+            "sessionId": sessionID,
+            "cwd": canonical,
+            "timestamp": "2026-07-23T01:00:04.000Z",
+            "message": [
+                "role": "user",
+                "content": [[
+                    "type": "tool_result",
+                    "tool_use_id": "tool-image",
+                    "content": [[
+                        "type": "image",
+                        "source": [
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "AQID",
+                        ],
+                    ]],
+                ]],
+            ],
+        ],
+        [
+            "type": "user",
+            "uuid": "86666666-2222-4333-8444-555555555555",
+            "parentUuid": imageResultID,
+            "isMeta": true,
+            "userType": "external",
+            "sessionId": sessionID,
+            "cwd": canonical,
+            "timestamp": "2026-07-23T01:00:05.000Z",
+            "message": [
+                "role": "user",
+                "content": "[Image: original 2880x1800, displayed at 2000x1250.]",
+            ],
+        ],
+        [
+            "type": "assistant",
+            "uuid": "87777777-2222-4333-8444-555555555555",
+            "sessionId": sessionID,
+            "cwd": canonical,
+            "timestamp": "2026-07-23T01:00:06.000Z",
+            "message": [
+                "model": "claude-fable-5",
+                "content": [["type": "text", "text": "Done"]],
+            ],
+        ],
+    ]
+    let transcript = try records.map { record -> String in
+        let data = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
+    }.joined(separator: "\n") + "\n"
+    try Data(transcript.utf8).write(
+        to: project.appendingPathComponent(sessionID).appendingPathExtension("jsonl")
+    )
+
+    let store = ClaudeNativeThreadStore(configRoot: config)
+    let summary = try #require(try await store.list(workingDirectory: workspace, limit: 10).first)
+    #expect(summary.title == "Change the implementation")
+    #expect(summary.preview == "Change the implementation")
+
+    let thread = try await store.read(id: sessionID, workingDirectory: workspace)
+    #expect(thread.messages.first?.textContent == "Change the implementation")
+    #expect(thread.messages.last?.textContent == "Done")
+    #expect(!thread.messages.contains { $0.textContent.contains("[Image:") })
+
+    let flattenedContents = thread.messages.flatMap(\.content)
+    #expect(flattenedContents.contains { content in
+        guard case .toolResult(let id, _, _) = content else { return false }
+        return id == "tool-image"
+    })
+    let editInput = try #require(flattenedContents.compactMap { content -> String? in
+        guard case .toolUse(_, let name, let input) = content, name == "Edit" else { return nil }
+        return input
+    }.first)
+    #expect(editInput.utf8.count <= 32_768)
+    let editObject = try #require(
+        try JSONSerialization.jsonObject(with: Data(editInput.utf8)) as? [String: Any]
+    )
+    #expect(editObject["file_path"] as? String == "/workspace/Sources/App.swift")
+    let importedPatch = try #require(editObject["_flowxStructuredPatch"] as? [[String: Any]])
+    #expect(importedPatch.count == 1)
+    #expect(importedPatch.first?["oldStart"] as? Int == 10)
+    #expect(importedPatch.first?["newStart"] as? Int == 10)
+    #expect(
+        importedPatch.first?["lines"] as? [String]
+            == [" context", "-let before = true;", "+let after = true;"]
+    )
+}
+
 @Test func claudeNativeSessionDeletionMovesOnlyTheExactWorkspaceFileRecoverably() async throws {
     let manager = FileManager.default
     let container = manager.temporaryDirectory
@@ -1260,6 +1702,70 @@ private actor CleanupInvocationCounter {
     #expect(statistics.entries == 0)
 }
 
+@Test func claudeNativeTranscriptCacheAvoidsRepeatedParsesAndInvalidatesChangedFiles() async throws {
+    let manager = FileManager.default
+    let container = manager.temporaryDirectory
+        .appendingPathComponent("flowx-claude-transcript-cache-\(UUID().uuidString)", isDirectory: true)
+    let workspace = container.appendingPathComponent("workspace", isDirectory: true)
+    let config = container.appendingPathComponent("claude-config", isDirectory: true)
+    try manager.createDirectory(at: workspace, withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: container) }
+
+    let canonical = workspace.resolvingSymlinksInPath().standardizedFileURL.path
+    let projectKey = canonical.unicodeScalars.map { scalar -> Character in
+        CharacterSet.alphanumerics.contains(scalar) ? Character(String(scalar)) : "-"
+    }
+    let project = config.appendingPathComponent("projects", isDirectory: true)
+        .appendingPathComponent(String(projectKey), isDirectory: true)
+    try manager.createDirectory(at: project, withIntermediateDirectories: true)
+    let sessionID = "61111111-2222-4333-8444-555555555555"
+    let file = project.appendingPathComponent(sessionID).appendingPathExtension("jsonl")
+
+    func record(type: String, timestamp: String, content: String) -> String {
+        if type == "user" {
+            return #"{"type":"user","sessionId":"SESSION","cwd":"WORKSPACE","timestamp":"TIMESTAMP","message":{"content":"CONTENT"}}"#
+                .replacingOccurrences(of: "SESSION", with: sessionID)
+                .replacingOccurrences(of: "WORKSPACE", with: canonical)
+                .replacingOccurrences(of: "TIMESTAMP", with: timestamp)
+                .replacingOccurrences(of: "CONTENT", with: content)
+        }
+        return #"{"type":"assistant","sessionId":"SESSION","cwd":"WORKSPACE","timestamp":"TIMESTAMP","message":{"model":"claude-fable-5","content":[{"type":"text","text":"CONTENT"}]}}"#
+            .replacingOccurrences(of: "SESSION", with: sessionID)
+            .replacingOccurrences(of: "WORKSPACE", with: canonical)
+            .replacingOccurrences(of: "TIMESTAMP", with: timestamp)
+            .replacingOccurrences(of: "CONTENT", with: content)
+    }
+
+    let initial = [
+        record(type: "user", timestamp: "2026-07-23T01:00:00.000Z", content: "Original prompt"),
+        record(type: "assistant", timestamp: "2026-07-23T01:00:01.000Z", content: "First answer"),
+    ].joined(separator: "\n") + "\n"
+    try Data(initial.utf8).write(to: file)
+
+    let store = ClaudeNativeThreadStore(configRoot: config)
+    let first = try await store.read(id: sessionID, workingDirectory: workspace)
+    #expect(first.messages.last?.textContent == "First answer")
+    var statistics = await store.transcriptCacheStatisticsForTesting()
+    #expect(statistics.entries == 1)
+    #expect(statistics.parses == 1)
+
+    let second = try await store.read(id: sessionID, workingDirectory: workspace)
+    #expect(second.messages == first.messages)
+    statistics = await store.transcriptCacheStatisticsForTesting()
+    #expect(statistics.entries == 1)
+    #expect(statistics.parses == 1)
+
+    let changed = initial
+        + record(type: "assistant", timestamp: "2026-07-23T01:00:02.000Z", content: "Updated answer")
+        + "\n"
+    try Data(changed.utf8).write(to: file, options: [.atomic])
+    let refreshed = try await store.read(id: sessionID, workingDirectory: workspace)
+    #expect(refreshed.messages.last?.textContent == "Updated answer")
+    statistics = await store.transcriptCacheStatisticsForTesting()
+    #expect(statistics.entries == 1)
+    #expect(statistics.parses == 2)
+}
+
 @Test func claudeNativeSummaryCacheIsGloballyLRUBoundedAcrossWorkspaces() async throws {
     let manager = FileManager.default
     let container = manager.temporaryDirectory
@@ -1342,6 +1848,109 @@ private actor CleanupInvocationCounter {
     #expect(thread.summary.title == "Original task title")
     #expect(thread.messages.first?.textContent == "Later follow-up")
     #expect(thread.messages.last?.textContent == "Latest answer")
+}
+
+@Test func claudeNativeTranscriptTailKeepsOnlyCompleteBoundedRecords() throws {
+    let manager = FileManager.default
+    let file = manager.temporaryDirectory
+        .appendingPathComponent("flowx-claude-record-tail-\(UUID().uuidString)")
+        .appendingPathExtension("jsonl")
+    defer { try? manager.removeItem(at: file) }
+
+    let partialPrefix = String(repeating: "p", count: 8_000)
+    let completeTail = [
+        #"{"record":0}"#,
+        #"{"record":1}"#,
+        #"{"record":2}"#,
+        #"{"record":3}"#,
+    ].joined(separator: "\n") + "\n"
+    let transcript = partialPrefix + "\n" + completeTail
+    try Data(transcript.utf8).write(to: file)
+
+    let selected = try ClaudeNativeThreadStore.readTailDataForTesting(
+        from: file,
+        maximumBytes: completeTail.utf8.count + 64,
+        maximumRecords: 3
+    )
+    #expect(
+        String(decoding: selected, as: UTF8.self)
+            == #"{"record":1}"# + "\n"
+                + #"{"record":2}"# + "\n"
+                + #"{"record":3}"# + "\n"
+    )
+
+    let noTrailingNewline = [
+        #"{"record":0}"#,
+        #"{"record":1}"#,
+        #"{"record":2}"#,
+    ].joined(separator: "\n")
+    try Data(noTrailingNewline.utf8).write(to: file, options: [.atomic])
+    let unterminated = try ClaudeNativeThreadStore.readTailDataForTesting(
+        from: file,
+        maximumBytes: noTrailingNewline.utf8.count,
+        maximumRecords: 2
+    )
+    #expect(
+        String(decoding: unterminated, as: UTF8.self)
+            == #"{"record":1}"# + "\n"
+                + #"{"record":2}"#
+    )
+}
+
+@Test func claudeNativeLongTranscriptTailPreservesRecentToolUseResultPair() async throws {
+    let manager = FileManager.default
+    let container = manager.temporaryDirectory
+        .appendingPathComponent("flowx-claude-record-limit-\(UUID().uuidString)", isDirectory: true)
+    let workspace = container.appendingPathComponent("workspace", isDirectory: true)
+    let config = container.appendingPathComponent("claude-config", isDirectory: true)
+    try manager.createDirectory(at: workspace, withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: container) }
+
+    let canonical = workspace.standardizedFileURL.resolvingSymlinksInPath().path
+    let projectKey = canonical.unicodeScalars.map { scalar -> Character in
+        CharacterSet.alphanumerics.contains(scalar) ? Character(String(scalar)) : "-"
+    }
+    let project = config.appendingPathComponent("projects", isDirectory: true)
+        .appendingPathComponent(String(projectKey), isDirectory: true)
+    try manager.createDirectory(at: project, withIntermediateDirectories: true)
+
+    let sessionID = "91111111-2222-4333-8444-555555555555"
+    var records = [
+        #"{"type":"user","sessionId":"SESSION","cwd":"WORKSPACE","timestamp":"2026-07-23T01:00:00.000Z","message":{"content":"Long task"}}"#
+            .replacingOccurrences(of: "SESSION", with: sessionID)
+            .replacingOccurrences(of: "WORKSPACE", with: canonical),
+    ]
+    records += (0..<600).map { index in
+        #"{"type":"assistant","sessionId":"SESSION","cwd":"WORKSPACE","timestamp":"2026-07-23T01:00:01.000Z","message":{"model":"claude-fable-5","content":[{"type":"text","text":"Historic INDEX"}]}}"#
+            .replacingOccurrences(of: "SESSION", with: sessionID)
+            .replacingOccurrences(of: "WORKSPACE", with: canonical)
+            .replacingOccurrences(of: "INDEX", with: String(index))
+    }
+    records += [
+        #"{"type":"assistant","uuid":"92222222-2222-4333-8444-555555555555","sessionId":"SESSION","cwd":"WORKSPACE","timestamp":"2026-07-23T01:10:00.000Z","message":{"model":"claude-fable-5","content":[{"type":"tool_use","id":"tool-recent","name":"Read","input":{"file_path":"README.md"}}]}}"#,
+        #"{"type":"user","uuid":"93333333-2222-4333-8444-555555555555","parentUuid":"92222222-2222-4333-8444-555555555555","sessionId":"SESSION","cwd":"WORKSPACE","timestamp":"2026-07-23T01:10:01.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"tool-recent","content":"Recent result"}]}}"#,
+        #"{"type":"assistant","sessionId":"SESSION","cwd":"WORKSPACE","timestamp":"2026-07-23T01:10:02.000Z","message":{"model":"claude-fable-5","content":[{"type":"text","text":"Done"}]}}"#,
+    ].map {
+        $0.replacingOccurrences(of: "SESSION", with: sessionID)
+            .replacingOccurrences(of: "WORKSPACE", with: canonical)
+    }
+
+    let transcript = records.joined(separator: "\n") + "\n"
+    let file = project.appendingPathComponent(sessionID).appendingPathExtension("jsonl")
+    try Data(transcript.utf8).write(to: file)
+
+    let store = ClaudeNativeThreadStore(configRoot: config)
+    let thread = try await store.read(id: sessionID, workingDirectory: workspace)
+    let contents = thread.messages.flatMap(\.content)
+    #expect(contents.contains { content in
+        guard case .toolUse(let id, _, _) = content else { return false }
+        return id == "tool-recent"
+    })
+    #expect(contents.contains { content in
+        guard case .toolResult(let id, let output, _) = content else { return false }
+        return id == "tool-recent" && output == "Recent result"
+    })
+    #expect(thread.messages.last?.textContent == "Done")
 }
 
 @Test func claudeNativeStoreFindsSessionsWrittenUnderSymlinkSpelling() async throws {

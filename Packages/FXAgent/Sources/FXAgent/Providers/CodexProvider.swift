@@ -302,6 +302,7 @@ private actor CodexSession {
     private var supportsThreadTurnsList: Bool?
     private var activeAttachments: PreparedProviderAttachments = .empty
     private var activeFollowUpAttachments: [PreparedProviderAttachments] = []
+    private var rolloutMetadataStore = CodexRolloutMetadataStore()
 
     fileprivate static let controlRequestTimeoutSeconds: UInt64 = 30
 
@@ -371,7 +372,7 @@ private actor CodexSession {
             if page.isEmpty { break }
         } while cursor != nil && results.count < boundedLimit
 
-        return results
+        return rolloutMetadataStore.enrich(results)
     }
 
     fileprivate static func nativeThreadListParameters(
@@ -496,12 +497,13 @@ private actor CodexSession {
         )
         let summaryResult = summaryPayload["result"] as? [String: Any] ?? [:]
         guard let thread = summaryResult["thread"] as? [String: Any],
-              let summary = Self.nativeSummary(
+              let nativeSummary = Self.nativeSummary(
                 from: thread,
                 expectedCanonicalDirectory: canonicalDirectory?.path
               ) else {
             throw Self.makeError("Codex did not return thread '\(id)' for this workspace.")
         }
+        let summary = rolloutMetadataStore.enrich([nativeSummary]).first ?? nativeSummary
 
         let messages: [ConversationMessage]
         do {
@@ -565,12 +567,13 @@ private actor CodexSession {
         )
         let result = payload["result"] as? [String: Any] ?? [:]
         guard let thread = result["thread"] as? [String: Any],
-              let summary = Self.nativeSummary(
+              let nativeSummary = Self.nativeSummary(
                 from: thread,
                 expectedCanonicalDirectory: expectedCanonicalDirectory
               ) else {
             throw Self.makeError("Codex did not return thread '\(id)' for this workspace.")
         }
+        let summary = rolloutMetadataStore.enrich([nativeSummary]).first ?? nativeSummary
         return ProviderNativeThread(summary: summary, messages: Self.nativeMessages(from: thread))
     }
 
@@ -1755,7 +1758,7 @@ private actor CodexSession {
         systemPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    private static func nativeSummary(
+    fileprivate static func nativeSummary(
         from thread: [String: Any],
         expectedCanonicalDirectory: String?
     ) -> ProviderNativeThreadSummary? {
@@ -1784,6 +1787,7 @@ private actor CodexSession {
             .first
             .map { String($0.prefix(100)) }
             ?? "Codex thread"
+        let configuration = CodexNativeConfiguration.parse(thread)
 
         return ProviderNativeThreadSummary(
             providerID: "codex",
@@ -1793,8 +1797,10 @@ private actor CodexSession {
             workingDirectory: canonicalCWD,
             createdAt: Date(timeIntervalSince1970: TimeInterval(createdAt)),
             updatedAt: Date(timeIntervalSince1970: TimeInterval(updatedAt)),
-            model: nil,
-            effort: nil,
+            model: configuration.model,
+            effort: configuration.effort,
+            agentMode: configuration.agentMode,
+            agentAccess: configuration.agentAccess,
             status: statusString(thread["status"]),
             source: statusString(thread["source"]) ?? "codex"
         )
@@ -1802,6 +1808,7 @@ private actor CodexSession {
 
     fileprivate static func nativeMessages(from thread: [String: Any]) -> [ConversationMessage] {
         var messages: [ConversationMessage] = []
+        var remainingImageBytes = ProviderNativeImageImporter.maximumTranscriptImageBytes
         let threadID = thread["id"] as? String ?? "codex-thread"
         for (turnIndex, turn) in (thread["turns"] as? [[String: Any]] ?? []).enumerated() {
             let turnID = turn["id"] as? String ?? "turn-\(turnIndex)"
@@ -1819,23 +1826,42 @@ private actor CodexSession {
                 let nativeID = UUID(uuidString: itemID) ?? deterministicUUID(identityKey)
                 switch type {
                 case "userMessage":
-                    var parts: [String] = []
+                    var contents: [MessageContent] = []
                     for content in item["content"] as? [[String: Any]] ?? [] {
                         switch content["type"] as? String {
                         case "text":
-                            if let text = content["text"] as? String { parts.append(text) }
-                        case "image", "localImage":
-                            parts.append("[Image]")
+                            if let text = content["text"] as? String, !text.isEmpty {
+                                contents.append(.text(
+                                    boundedNativePayload(text, maximum: 256 * 1_024)
+                                ))
+                            }
+                        case "image":
+                            guard let url = content["url"] as? String,
+                                  let image = ProviderNativeImageImporter.dataURL(
+                                      url,
+                                      remainingBytes: &remainingImageBytes
+                                  ) else {
+                                continue
+                            }
+                            contents.append(image)
+                        case "localImage":
+                            guard let path = content["path"] as? String,
+                                  let image = ProviderNativeImageImporter.localFile(
+                                      atPath: path,
+                                      remainingBytes: &remainingImageBytes
+                                  ) else {
+                                continue
+                            }
+                            contents.append(image)
                         default:
                             continue
                         }
                     }
-                    let text = boundedNativePayload(parts.joined(separator: "\n"), maximum: 256 * 1_024)
-                    if !text.isEmpty {
+                    if !contents.isEmpty {
                         messages.append(ConversationMessage(
                             id: nativeID,
                             role: .user,
-                            content: [.text(boundedNativePayload(text, maximum: 256 * 1_024))],
+                            content: contents,
                             timestamp: startedAt
                         ))
                     }
@@ -3276,6 +3302,16 @@ public final class CodexProvider: AIProviderThreadControls, AIProviderSessionMan
 
     static func nativeThreadIsActiveForTesting(_ status: String?) -> Bool {
         CodexSession.isNativeThreadActive(status)
+    }
+
+    static func nativeThreadSummaryForTesting(
+        _ thread: [String: Any],
+        expectedCanonicalDirectory: String? = nil
+    ) -> ProviderNativeThreadSummary? {
+        CodexSession.nativeSummary(
+            from: thread,
+            expectedCanonicalDirectory: expectedCanonicalDirectory
+        )
     }
 
     static func turnSteerParametersForTesting(

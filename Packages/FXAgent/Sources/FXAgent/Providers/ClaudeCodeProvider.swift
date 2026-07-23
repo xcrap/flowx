@@ -609,6 +609,7 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
     private let discovery: RuntimeDiscovery
     private let modelCatalog = ProviderModelCatalog(ClaudeCodeProvider.fallbackModels)
     private let nativeStore = ClaudeNativeThreadStore()
+    private let sessionLeases = ClaudeSessionLeaseRegistry()
 
     public init(discovery: RuntimeDiscovery) {
         self.discovery = discovery
@@ -790,9 +791,22 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
         controller: ClaudeTurnController,
         continuation: AsyncThrowingStream<StreamEvent, Error>.Continuation
     ) async throws {
+        let resumedSessionID = Self.nonEmpty(resumeSessionID)
+        if let resumedSessionID {
+            try sessionLeases.acquire(resumedSessionID)
+        }
+        defer {
+            if let resumedSessionID {
+                sessionLeases.release(resumedSessionID)
+            }
+        }
+
         guard let executable = await discovery.resolvedPath(for: "claude") else {
             let hint = await discovery.spec(for: "claude")?.installHint ?? "npm install -g @anthropic-ai/claude-code"
             throw Self.error("Claude Code CLI not found. Install with: \(hint)")
+        }
+        if let resumedSessionID {
+            try await ensureSessionIsNotActiveElsewhere(resumedSessionID)
         }
         let prepared = try ProviderAttachmentStore.prepare(attachments)
         defer { prepared.remove() }
@@ -909,6 +923,79 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
             throw Self.error(detail.isEmpty ? "Claude Code exited with status \(terminationStatus)." : detail)
         }
         if !Task.isCancelled { continuation.finish() }
+    }
+
+    /// Claude Code 2.1.145+ exposes live foreground/background sessions through
+    /// this command. An exact full-session-ID match is authoritative. Older
+    /// versions remain compatible: when neither the query nor command help can
+    /// establish support, FlowX falls back to the cross-process lease alone.
+    /// Once command help demonstrates `agents --json` support, query, timeout,
+    /// truncation, and decode failures are closed rather than risking a second
+    /// writer for the same provider transcript.
+    private func ensureSessionIsNotActiveElsewhere(_ sessionID: String) async throws {
+        let result: RuntimeCommandResult?
+        do {
+            result = try await discovery.run(
+                binaryID: "claude",
+                arguments: ["agents", "--json"],
+                timeout: 3
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            result = nil
+        }
+
+        if let result,
+           result.terminationStatus == 0,
+           !result.timedOut,
+           !result.outputWasTruncated,
+           let containsSession = ClaudeSessionActivitySnapshot.contains(
+               sessionID: sessionID,
+               in: result.standardOutput
+           ) {
+            if containsSession {
+                throw ClaudeSessionConcurrencyError.alreadyActiveInClaudeCode(sessionID: sessionID)
+            }
+            return
+        }
+
+        guard try await claudeSupportsAgentJSONStatus() else {
+            // Compatibility fallback for Claude versions that predate the
+            // optional `agents --json` API or installations where capability
+            // support cannot be established.
+            return
+        }
+        throw ClaudeSessionConcurrencyError.activityStatusUnavailable(sessionID: sessionID)
+    }
+
+    private func claudeSupportsAgentJSONStatus() async throws -> Bool {
+        let installedVersion = await discovery.health(for: "claude").version
+        if ClaudeSessionActivitySnapshot.versionSupportsJSONListing(installedVersion) {
+            return true
+        }
+
+        let help: RuntimeCommandResult
+        do {
+            help = try await discovery.run(
+                binaryID: "claude",
+                arguments: ["agents", "--help"],
+                timeout: 3
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return false
+        }
+
+        guard help.terminationStatus == 0,
+              !help.timedOut,
+              !help.outputWasTruncated else {
+            return false
+        }
+        var output = help.standardOutput
+        output.append(help.standardError)
+        return ClaudeSessionActivitySnapshot.helpAdvertisesJSONListing(output)
     }
 
     private static var runtimeEnvironment: [String: String] {

@@ -728,7 +728,7 @@ private struct MessageRichBlock: Identifiable, Sendable {
     }
 }
 
-private struct MessageCodeBlock: View {
+struct MessageCodeBlock: View {
     let language: String
     let code: String
 
@@ -774,7 +774,7 @@ private struct MessageCodeBlock: View {
     }
 }
 
-private struct MessageImageView: View {
+struct MessageImageView: View {
     let data: Data
     let mimeType: String
     let cacheKey: String
@@ -875,7 +875,7 @@ private struct MessageImageView: View {
     }
 }
 
-private struct MessageAssetImageView: View {
+struct MessageAssetImageView: View {
     let reference: ConversationImageAssetReference
     let cacheKey: String
 

@@ -477,6 +477,17 @@ public actor RuntimeDiscovery {
         healthCache
     }
 
+    /// Waits for the inexpensive version probes launched after path discovery.
+    /// Registration intentionally returns as soon as an executable is usable;
+    /// callers that present version metadata can opt into this later barrier
+    /// without repeating binary discovery.
+    public func waitForVersionChecks() async {
+        let tasks = Array(versionTasks.values)
+        for task in tasks {
+            await task.value
+        }
+    }
+
     public func spec(for binaryID: String) -> BinarySpec? {
         specs[binaryID]
     }

@@ -142,6 +142,8 @@ struct NativeThreadBinding: Codable, Sendable, Equatable {
     var updatedAt: Date
     var model: String?
     var effort: String?
+    var agentMode: AgentMode?
+    var agentAccess: AgentAccess?
     var status: String?
 
     init(summary: ProviderNativeThreadSummary) {
@@ -157,8 +159,17 @@ struct NativeThreadBinding: Codable, Sendable, Equatable {
         updatedAt = summary.updatedAt
         model = summary.model
         effort = summary.effort
+        agentMode = summary.agentMode
+        agentAccess = summary.agentAccess
         status = summary.status
     }
+}
+
+struct EffectiveAgentConfiguration: Sendable, Equatable {
+    var modelID: String?
+    var effort: String?
+    var agentMode: AgentMode?
+    var agentAccess: AgentAccess?
 }
 
 private enum FlowXSlashCommand {
@@ -214,13 +225,13 @@ enum SplitContent: String, Codable, Sendable {
 @Observable
 @MainActor
 final class WorkspaceState {
-    var splitOpen: Bool = false { didSet { onChange?() } }
-    var splitContent: SplitContent = .diff { didSet { onChange?() } }
-    var splitRatio: CGFloat = 0.5 { didSet { onChange?() } }
-    var terminalVisible: Bool = false { didSet { onChange?() } }
-    var terminalHeight: CGFloat = 220 { didSet { onChange?() } }
-    var terminalCount: Int = 1 { didSet { onChange?() } }
-    var browserURLString: String = "" { didSet { onChange?() } }
+    var splitOpen: Bool = false { didSet { notifyIfChanged(from: oldValue, to: splitOpen) } }
+    var splitContent: SplitContent = .diff { didSet { notifyIfChanged(from: oldValue, to: splitContent) } }
+    var splitRatio: CGFloat = 0.5 { didSet { notifyIfChanged(from: oldValue, to: splitRatio) } }
+    var terminalVisible: Bool = false { didSet { notifyIfChanged(from: oldValue, to: terminalVisible) } }
+    var terminalHeight: CGFloat = 220 { didSet { notifyIfChanged(from: oldValue, to: terminalHeight) } }
+    var terminalCount: Int = 1 { didSet { notifyIfChanged(from: oldValue, to: terminalCount) } }
+    var browserURLString: String = "" { didSet { notifyIfChanged(from: oldValue, to: browserURLString) } }
     var conversationScrollOffset: CGFloat = 0
     var conversationPinnedToBottom: Bool = true
 
@@ -239,6 +250,11 @@ final class WorkspaceState {
         conversationScrollOffset = CGFloat(persisted.conversationScrollOffset)
         conversationPinnedToBottom = persisted.conversationPinnedToBottom
     }
+
+    private func notifyIfChanged<Value: Equatable>(from oldValue: Value, to newValue: Value) {
+        guard oldValue != newValue else { return }
+        onChange?()
+    }
 }
 
 @Observable
@@ -248,7 +264,7 @@ final class AgentInfo: Identifiable {
     var agent: Agent
     var conversationState: ConversationState
     let projectRootPath: String
-    var terminalSessions: [TerminalSession]
+    @ObservationIgnored var terminalSessions: [TerminalSession]
     var workspace: WorkspaceState
     var nativeThreadBinding: NativeThreadBinding?
     var nativeImageSidecar: [NativeImageSidecarEntry]
@@ -296,7 +312,6 @@ final class AgentInfo: Identifiable {
         self.nativeThreadBinding = nativeThreadBinding
         self.nativeImageSidecar = nativeImageSidecar
         terminalSessions = []
-        syncTerminalSessions(to: self.workspace.terminalCount)
         self.workspace.onChange = { [weak self] in
             self?.onChange?()
         }
@@ -307,7 +322,12 @@ final class AgentInfo: Identifiable {
     }
 
     var visibleTerminalSessions: [TerminalSession] {
-        Array(terminalSessions.prefix(terminalPaneCount))
+        // Provider discovery can materialize hundreds of task rows. A terminal
+        // session is only useful once its panel is actually visible, so avoid
+        // allocating one delegate/session graph for every dormant task during
+        // startup.
+        syncTerminalSessions(to: terminalPaneCount)
+        return Array(terminalSessions.prefix(terminalPaneCount))
     }
 
     var title: String {
@@ -372,6 +392,14 @@ final class AgentInfo: Identifiable {
 
     var nativeEffort: String? {
         nativeThreadBinding?.effort
+    }
+
+    var nativeAgentMode: AgentMode? {
+        nativeThreadBinding?.agentMode
+    }
+
+    var nativeAgentAccess: AgentAccess? {
+        nativeThreadBinding?.agentAccess
     }
 
     var isProviderNativeThread: Bool {
@@ -480,6 +508,12 @@ final class AgentInfo: Identifiable {
 
     var isStreaming: Bool {
         conversationState.isStreaming
+    }
+
+    var isTranscriptRunning: Bool {
+        conversationState.isStreaming
+            || agent.executionState == .running
+            || nativeThreadBinding?.status?.lowercased() == "active"
     }
 
     func setTerminalCount(_ count: Int) {
@@ -617,7 +651,6 @@ final class ProjectState: Identifiable {
     var selectedInspectorContentKind: InspectorContentKind = .message
     var inspectorComparisonMode: InspectorComparisonMode = .unstaged { didSet { onChange?() } }
     var inspectorDiffDisplayMode: InspectorDiffDisplayMode = .inline { didSet { onChange?() } }
-    var changedFilesRailWidth: CGFloat = FlowXLayoutDefaults.defaultChangedFilesRailWidth { didSet { onChange?() } }
     var commitComposerVisible = false
     var commitMessageDraft = ""
     var includeUntrackedInCommit = true
@@ -964,14 +997,28 @@ enum FlowXLayoutDefaults {
     static let defaultRightPanelWidth: CGFloat = 760
     static let minRightPanelWidth: CGFloat = 560
     static let maxRightPanelWidth: CGFloat = 1100
-    static let defaultChangedFilesRailWidth: CGFloat = 248
-    static let minChangedFilesRailWidth: CGFloat = 188
-    static let maxChangedFilesRailWidth: CGFloat = 360
 }
 
 @Observable
 @MainActor
 final class AppState {
+    private struct NativeWorkspaceSyncRequest {
+        var projectIDs: [UUID]
+        var forceTranscriptRefresh: Bool
+        var discoveryMode: ProviderNativeThreadDiscoveryMode
+
+        mutating func merge(_ request: NativeWorkspaceSyncRequest) {
+            for projectID in request.projectIDs where !projectIDs.contains(projectID) {
+                projectIDs.append(projectID)
+            }
+            forceTranscriptRefresh = forceTranscriptRefresh || request.forceTranscriptRefresh
+            if request.discoveryMode == .repair {
+                discoveryMode = .repair
+            }
+        }
+    }
+
+    @ObservationIgnored private let browserSessionCache = BrowserSessionCache(capacity: 3)
     let preferences: AppPreferences
     var projects: [ProjectState] = []
     var activeProjectID: UUID?
@@ -1004,6 +1051,9 @@ final class AppState {
     private var scheduledSaveTask: Task<Void, Never>?
     @ObservationIgnored private let terminationObserver = NotificationObserverToken()
     private var nativeWorkspaceSyncTask: Task<Void, Never>?
+    @ObservationIgnored private var activeNativeWorkspaceSyncRequest: NativeWorkspaceSyncRequest?
+    @ObservationIgnored private var pendingNativeWorkspaceSyncRequest: NativeWorkspaceSyncRequest?
+    @ObservationIgnored private var nativeSyncingProjectIDs: Set<UUID> = []
     private var nativeActiveProjectPollingTask: Task<Void, Never>?
     private var nativeTranscriptTasks: [UUID: Task<Void, Never>] = [:]
     private var nativeTranscriptLoadIDs: [UUID: UUID] = [:]
@@ -1026,6 +1076,52 @@ final class AppState {
     var activeAgent: AgentInfo? {
         guard let project = activeProject, let agentID = activeAgentID else { return nil }
         return project.agents.first { $0.id == agentID }
+    }
+
+    func effectiveConfiguration(for agent: AgentInfo) -> EffectiveAgentConfiguration {
+        resolvedConfiguration(for: agent, includeExplicitOverrides: true)
+    }
+
+    func inheritedConfiguration(for agent: AgentInfo) -> EffectiveAgentConfiguration {
+        resolvedConfiguration(for: agent, includeExplicitOverrides: false)
+    }
+
+    private func resolvedConfiguration(
+        for agent: AgentInfo,
+        includeExplicitOverrides: Bool
+    ) -> EffectiveAgentConfiguration {
+        let defaultModelID = preferences.resolvedDefaultModelID(
+            for: agent.providerID,
+            using: providerRegistry
+        )
+        let explicitModelID = includeExplicitOverrides ? agent.explicitModelID : nil
+        let explicitEffort = includeExplicitOverrides ? agent.explicitEffort : nil
+        let explicitMode = includeExplicitOverrides ? agent.explicitAgentMode : nil
+        let explicitAccess = includeExplicitOverrides ? agent.explicitAgentAccess : nil
+        let usesAppDefaults = !agent.isProviderNativeThread
+        let resolvedModelID = explicitModelID
+            ?? agent.nativeModelID
+            ?? (usesAppDefaults ? defaultModelID : nil)
+        let resolvedEffort = explicitEffort
+            ?? agent.nativeEffort
+            ?? (usesAppDefaults ? preferences.defaultEffort : nil)
+
+        return EffectiveAgentConfiguration(
+            modelID: resolvedModelID.map {
+                AgentInfo.normalizedModelID($0, providerID: agent.providerID)
+            },
+            effort: resolvedEffort.map(AgentInfo.normalizedEffort),
+            agentMode: explicitMode
+                ?? agent.nativeAgentMode
+                ?? (usesAppDefaults ? preferences.defaultMode : nil),
+            agentAccess: explicitAccess
+                ?? agent.nativeAgentAccess
+                ?? (usesAppDefaults ? preferences.defaultAccess : nil)
+        )
+    }
+
+    func browserViewModel(for agentID: UUID) -> BrowserViewModel {
+        browserSessionCache.model(for: agentID)
     }
 
     var activeProjectCanShowGitPanel: Bool {
@@ -1112,8 +1208,9 @@ final class AppState {
         isBootstrapped = true
         Task { @MainActor [weak self] in
             guard let self else { return }
-            await runtimeDiscovery.register(.codex)
-            await runtimeDiscovery.register(.claude)
+            async let codexRegistration: Void = runtimeDiscovery.register(.codex)
+            async let claudeRegistration: Void = runtimeDiscovery.register(.claude)
+            _ = await (codexRegistration, claudeRegistration)
             runtimeHealth = await runtimeDiscovery.allHealth()
 
             // Provider-native repair can begin as soon as executable paths are
@@ -1124,7 +1221,9 @@ final class AppState {
                 discoveryMode: .repair
             )
             startActiveProjectNativePolling()
-            await refreshRuntimeHealth()
+            await refreshProviderModelsUsingDiscoveredRuntimes()
+            await runtimeDiscovery.waitForVersionChecks()
+            runtimeHealth = await runtimeDiscovery.allHealth()
         }
 
         if normalizedLegacyTitles {
@@ -1171,6 +1270,7 @@ final class AppState {
     func removeProject(_ projectID: UUID) {
         guard let removedProject = projects.first(where: { $0.id == projectID }) else { return }
 
+        browserSessionCache.remove(removedProject.agents.map(\.id))
         for agent in removedProject.agents {
             cancelSteeringSubmission(for: agent.id)
             nativeTranscriptTasks[agent.id]?.cancel()
@@ -1607,6 +1707,7 @@ final class AppState {
     ) {
         let presentationID = project.nativePresentationAgentIDs.removeValue(forKey: identity)
             ?? Self.deterministicAgentID(for: identity)
+        browserSessionCache.remove(presentationID)
         ConversationPersistence.remove(agentID: presentationID, projectID: project.id)
         var cache = prunedNativePresentations[project.id] ?? [:]
         cache[identity] = nil
@@ -1659,6 +1760,7 @@ final class AppState {
         nativeTranscriptTasks[agentID] = nil
         nativeTranscriptLoadIDs[agentID] = nil
         releaseProviderSession(for: project.agents[agentIndex])
+        browserSessionCache.remove(agentID)
 
         let removedAgent = project.agents.remove(at: agentIndex)
         if removedAgent.nativeThreadBinding != nil {
@@ -2083,8 +2185,7 @@ final class AppState {
         for project: ProjectState,
         discoveryMode: ProviderNativeThreadDiscoveryMode = .repair
     ) {
-        guard projects.contains(where: { $0.id == project.id }),
-              !project.isSyncingNativeThreads else {
+        guard projects.contains(where: { $0.id == project.id }) else {
             return
         }
         scheduleNativeThreadSynchronization(
@@ -2113,8 +2214,7 @@ final class AppState {
     private func refreshActiveNativeThreadsIfIdle() {
         guard isBootstrapped,
               NSApplication.shared.isActive,
-              let project = activeProject,
-              !project.isSyncingNativeThreads else {
+              let project = activeProject else {
             return
         }
         scheduleNativeThreadSynchronization(
@@ -2138,8 +2238,6 @@ final class AppState {
         forceTranscriptRefresh: Bool = false,
         discoveryMode: ProviderNativeThreadDiscoveryMode = .indexed
     ) {
-        nativeWorkspaceSyncTask?.cancel()
-
         var projectIDs: [UUID] = []
         if let projectID, projects.contains(where: { $0.id == projectID }) {
             projectIDs.append(projectID)
@@ -2149,16 +2247,51 @@ final class AppState {
         }
         guard !projectIDs.isEmpty else { return }
 
+        var request = NativeWorkspaceSyncRequest(
+            projectIDs: projectIDs,
+            forceTranscriptRefresh: forceTranscriptRefresh,
+            discoveryMode: discoveryMode
+        )
+        if let activeRequest = activeNativeWorkspaceSyncRequest {
+            let upgradesActiveRequest = forceTranscriptRefresh && !activeRequest.forceTranscriptRefresh
+                || discoveryMode == .repair && activeRequest.discoveryMode != .repair
+            if !upgradesActiveRequest {
+                request.projectIDs.removeAll { activeRequest.projectIDs.contains($0) }
+            }
+            guard !request.projectIDs.isEmpty else { return }
+
+            if pendingNativeWorkspaceSyncRequest == nil {
+                pendingNativeWorkspaceSyncRequest = request
+            } else {
+                pendingNativeWorkspaceSyncRequest?.merge(request)
+            }
+            return
+        }
+
+        beginNativeThreadSynchronization(request)
+    }
+
+    private func beginNativeThreadSynchronization(_ request: NativeWorkspaceSyncRequest) {
+        activeNativeWorkspaceSyncRequest = request
         nativeWorkspaceSyncTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            for projectID in projectIDs {
-                guard !Task.isCancelled else { return }
+            for projectID in request.projectIDs {
+                guard !Task.isCancelled else { break }
                 await synchronizeNativeThreads(
                     projectID: projectID,
-                    forceTranscriptRefresh: forceTranscriptRefresh,
-                    discoveryMode: discoveryMode
+                    forceTranscriptRefresh: request.forceTranscriptRefresh,
+                    discoveryMode: request.discoveryMode
                 )
             }
+
+            nativeWorkspaceSyncTask = nil
+            activeNativeWorkspaceSyncRequest = nil
+            guard !Task.isCancelled, !isShuttingDown,
+                  let pendingRequest = pendingNativeWorkspaceSyncRequest else {
+                return
+            }
+            pendingNativeWorkspaceSyncRequest = nil
+            beginNativeThreadSynchronization(pendingRequest)
         }
     }
 
@@ -2167,17 +2300,34 @@ final class AppState {
         forceTranscriptRefresh: Bool,
         discoveryMode: ProviderNativeThreadDiscoveryMode
     ) async {
-        guard let project = projects.first(where: { $0.id == projectID }) else { return }
+        guard let project = projects.first(where: { $0.id == projectID }),
+              !nativeSyncingProjectIDs.contains(projectID) else {
+            return
+        }
+        nativeSyncingProjectIDs.insert(projectID)
         let projectRootURL = project.project.rootURL
         let expectedCanonicalPath = project.project.canonicalRootPath
         let providers = providerRegistry.allProviders
             .compactMap { $0 as? any AIProviderNativeThreads }
             .sorted { $0.displayName < $1.displayName }
 
-        project.isSyncingNativeThreads = true
-        project.nativeThreadSyncError = nil
+        let previousAgentIDs = project.agents.map(\.id)
+        let previousBindings = project.agents.compactMap(\.nativeThreadBinding)
+        let previousConfigurations = Dictionary(
+            uniqueKeysWithValues: project.agents.map { ($0.id, $0.agent.configuration) }
+        )
+        let previousArchivedBindings = project.archivedNativeThreadBindings
+        let previousPresentationIDs = project.nativePresentationAgentIDs
+        let previousSyncError = project.nativeThreadSyncError
+
+        let presentsSyncActivity = forceTranscriptRefresh || discoveryMode == .repair
+        if presentsSyncActivity {
+            project.isSyncingNativeThreads = true
+        }
         defer {
-            if let currentProject = projects.first(where: { $0.id == projectID }) {
+            nativeSyncingProjectIDs.remove(projectID)
+            if presentsSyncActivity,
+               let currentProject = projects.first(where: { $0.id == projectID }) {
                 currentProject.isSyncingNativeThreads = false
             }
         }
@@ -2269,16 +2419,22 @@ final class AppState {
                 archivedBindingsByIdentity[binding.identity] = binding
             }
         }
-        currentProject.archivedNativeThreadBindings = archivedBindingsByIdentity.values.sorted {
+        let resolvedArchivedBindings = archivedBindingsByIdentity.values.sorted {
             if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
             return Self.nativeIdentitySortKey($0.identity) < Self.nativeIdentitySortKey($1.identity)
+        }
+        if currentProject.archivedNativeThreadBindings != resolvedArchivedBindings {
+            currentProject.archivedNativeThreadBindings = resolvedArchivedBindings
         }
         await mergeNativeBindings(
             orderedBindings,
             successfullyListedProviderIDs: successfullyListedProviderIDs,
             into: currentProject
         )
-        currentProject.nativeThreadSyncError = errors.isEmpty ? nil : errors.joined(separator: "\n")
+        let resolvedSyncError = errors.isEmpty ? nil : errors.joined(separator: "\n")
+        if currentProject.nativeThreadSyncError != resolvedSyncError {
+            currentProject.nativeThreadSyncError = resolvedSyncError
+        }
 
         if activeProjectID == currentProject.id,
            let activeAgentID,
@@ -2289,7 +2445,17 @@ final class AppState {
                 force: forceTranscriptRefresh
             )
         }
-        scheduleSave()
+        let projectionChanged = previousAgentIDs != currentProject.agents.map(\.id)
+            || previousBindings != currentProject.agents.compactMap(\.nativeThreadBinding)
+            || previousConfigurations != Dictionary(
+                uniqueKeysWithValues: currentProject.agents.map { ($0.id, $0.agent.configuration) }
+            )
+            || previousArchivedBindings != currentProject.archivedNativeThreadBindings
+            || previousPresentationIDs != currentProject.nativePresentationAgentIDs
+            || previousSyncError != currentProject.nativeThreadSyncError
+        if projectionChanged {
+            scheduleSave()
+        }
     }
 
     private func mergeNativeBindings(
@@ -2336,13 +2502,20 @@ final class AppState {
 
             if let agent = matchingAgent {
                 let previousNativeTitle = agent.nativeThreadBinding?.title
-                if previousNativeTitle == nil || agent.agent.title == previousNativeTitle {
+                if (previousNativeTitle == nil || agent.agent.title == previousNativeTitle),
+                   agent.agent.title != binding.title {
                     agent.agent.title = binding.title
                 }
                 updateNativeThreadBinding(binding, for: agent)
-                agent.agent.configuration.providerID = binding.identity.providerID
-                agent.conversationState.sessionID = binding.identity.sessionID
-                project.nativePresentationAgentIDs[binding.identity] = agent.id
+                if agent.agent.configuration.providerID != binding.identity.providerID {
+                    agent.agent.configuration.providerID = binding.identity.providerID
+                }
+                if agent.conversationState.sessionID != binding.identity.sessionID {
+                    agent.conversationState.sessionID = binding.identity.sessionID
+                }
+                if project.nativePresentationAgentIDs[binding.identity] != agent.id {
+                    project.nativePresentationAgentIDs[binding.identity] = agent.id
+                }
                 reconcileConfiguration(for: agent)
                 agentsByIdentity[binding.identity] = agent
                 continue
@@ -2356,7 +2529,6 @@ final class AppState {
                 cachedAgent.agent.configuration.providerID = binding.identity.providerID
                 cachedAgent.conversationState.sessionID = binding.identity.sessionID
                 cachedAgent.terminalSessions.removeAll()
-                cachedAgent.setTerminalCount(cachedAgent.workspace.terminalCount)
                 configureAgent(cachedAgent)
                 reconcileConfiguration(for: cachedAgent)
                 project.agents.append(cachedAgent)
@@ -2408,12 +2580,18 @@ final class AppState {
                 let rhsIdentity = $1.nativeThreadBinding.map { Self.nativeIdentitySortKey($0.identity) } ?? ""
                 return lhsIdentity < rhsIdentity
             }
-        project.agents = project.agents.map { agent in
+        let reorderedAgents = project.agents.map { agent in
             guard agent.nativeThreadBinding != nil else { return agent }
             return nativeAgents.removeFirst()
         }
+        if reorderedAgents.map(\.id) != project.agents.map(\.id) {
+            project.agents = reorderedAgents
+        }
 
-        project.project.agentOrder = project.agents.map(\.id)
+        let orderedAgentIDs = project.agents.map(\.id)
+        if project.project.agentOrder != orderedAgentIDs {
+            project.project.agentOrder = orderedAgentIDs
+        }
         if project.lastSelectedAgentID == nil {
             project.lastSelectedAgentID = project.agents.first?.id
         }
@@ -2427,6 +2605,7 @@ final class AppState {
     }
 
     private func updateNativeThreadBinding(_ binding: NativeThreadBinding, for agent: AgentInfo) {
+        guard agent.nativeThreadBinding != binding else { return }
         let wasActive = agent.nativeThreadBinding?.status?.lowercased() == "active"
         let normalizedStatus = binding.status?.lowercased()
         let isActive = normalizedStatus == "active"
@@ -2671,7 +2850,7 @@ final class AppState {
                 currentAgent.conversationState.replaceMessages(restoredMessages)
                 currentAgent.conversationState.sessionID = refreshedBinding.identity.sessionID
                 currentAgent.conversationState.activeProviderID = refreshedBinding.identity.providerID
-                currentAgent.conversationState.activeModelID = currentAgent.explicitModelID ?? refreshedBinding.model
+                currentAgent.conversationState.activeModelID = effectiveConfiguration(for: currentAgent).modelID
                 currentAgent.nativeTranscriptLoadedAt = Date()
                 currentAgent.nativeTranscriptError = nil
                 currentAgent.isLoadingNativeTranscript = false
@@ -2726,6 +2905,8 @@ final class AppState {
             updatedAt: summary.updatedAt,
             model: summary.model?.trimmingCharacters(in: .whitespacesAndNewlines),
             effort: summary.effort?.trimmingCharacters(in: .whitespacesAndNewlines),
+            agentMode: summary.agentMode,
+            agentAccess: summary.agentAccess,
             status: summary.status,
             source: source
         )
@@ -2779,6 +2960,11 @@ final class AppState {
 
     func refreshRuntimeHealth() async {
         await runtimeDiscovery.refreshAll()
+        runtimeHealth = await runtimeDiscovery.allHealth()
+        await refreshProviderModelsUsingDiscoveredRuntimes()
+    }
+
+    private func refreshProviderModelsUsingDiscoveredRuntimes() async {
         runtimeHealth = await runtimeDiscovery.allHealth()
         let providers = providerRegistry.allProviders
         for provider in providers where runtimeHealth[provider.id]?.isUsable != false {
@@ -2978,7 +3164,7 @@ final class AppState {
         guard let provider = providerRegistry.provider(for: providerID) else {
             agent.agent.configuration.providerID = providerID
             agent.conversationState.activeProviderID = providerID
-            agent.conversationState.activeModelID = agent.explicitModelID ?? agent.nativeModelID
+            agent.conversationState.activeModelID = effectiveConfiguration(for: agent).modelID
             return
         }
         let availableModels = provider.availableModels
@@ -2992,7 +3178,7 @@ final class AppState {
             configuration.effort = AgentInfo.normalizedEffort(explicitEffort)
         }
 
-        let effectiveModelID = configuration.modelID ?? agent.nativeModelID
+        let effectiveModelID = effectiveConfiguration(for: agent).modelID
         let model = effectiveModelID.flatMap { effectiveModelID in
             availableModels.first(where: { $0.id == effectiveModelID })
         }
@@ -3006,10 +3192,18 @@ final class AppState {
                     .max() ?? model.contextWindow
             }
         }
-        agent.agent.configuration = configuration
-        agent.conversationState.activeProviderID = providerID
-        agent.conversationState.activeModelID = effectiveModelID
-        agent.conversationState.configuredContextWindow = configuration.contextWindowSize
+        if agent.agent.configuration != configuration {
+            agent.agent.configuration = configuration
+        }
+        if agent.conversationState.activeProviderID != providerID {
+            agent.conversationState.activeProviderID = providerID
+        }
+        if agent.conversationState.activeModelID != effectiveModelID {
+            agent.conversationState.activeModelID = effectiveModelID
+        }
+        if agent.conversationState.configuredContextWindow != configuration.contextWindowSize {
+            agent.conversationState.configuredContextWindow = configuration.contextWindowSize
+        }
     }
 
     private func applyGitInfo(_ gitInfo: GitStatusService.GitInfo, to projectID: UUID) {
@@ -3026,7 +3220,8 @@ final class AppState {
             project.gitActionMessage = nil
         }
 
-        for agent in project.agents where agent.workspace.splitContent == .diff {
+        for agent in project.agents
+        where agent.workspace.splitContent == .diff && agent.workspace.splitOpen {
             agent.workspace.splitOpen = false
         }
 
@@ -3051,24 +3246,20 @@ final class AppState {
     func toggleGitPanel() {
         guard activeProjectCanShowGitPanel else { return }
 
-        withAnimation(FXAnimation.panel) {
-            let shouldShowPanel = settingsVisible || !rightPanelVisible || rightPanelTab != .changes
-            settingsVisible = false
-            rightPanelTab = .changes
-            rightPanelVisible = shouldShowPanel
-        }
+        let shouldShowPanel = settingsVisible || !rightPanelVisible || rightPanelTab != .changes
+        settingsVisible = false
+        rightPanelTab = .changes
+        rightPanelVisible = shouldShowPanel
     }
 
     func toggleBrowserPreview() {
         guard let agent = activeAgent else { return }
 
-        withAnimation(FXAnimation.panel) {
-            if agent.workspace.splitOpen && agent.workspace.splitContent == .browser {
-                agent.workspace.splitOpen = false
-            } else {
-                agent.workspace.splitContent = .browser
-                agent.workspace.splitOpen = true
-            }
+        if agent.workspace.splitOpen && agent.workspace.splitContent == .browser {
+            agent.workspace.splitOpen = false
+        } else {
+            agent.workspace.splitContent = .browser
+            agent.workspace.splitOpen = true
         }
     }
 
@@ -3181,17 +3372,18 @@ final class AppState {
         guard !trimmedPrompt.isEmpty || !attachments.isEmpty else { return false }
 
         agent.markConversationStarted()
+        let configuration = effectiveConfiguration(for: agent)
 
         let accepted = conversationService.send(
             prompt: trimmedPrompt,
             attachments: attachments,
             to: agent.conversationState,
             providerID: agent.providerID,
-            model: agent.explicitModelID,
-            effort: agent.explicitEffort,
+            model: configuration.modelID,
+            effort: configuration.effort,
             systemPrompt: agent.systemPrompt,
-            agentMode: agent.explicitAgentMode,
-            agentAccess: agent.explicitAgentAccess,
+            agentMode: configuration.agentMode,
+            agentAccess: configuration.agentAccess,
             workingDirectory: project.project.rootURL,
             resumeSessionID: resumeSessionID,
             onStart: {
@@ -3246,6 +3438,7 @@ final class AppState {
 
         Task { @MainActor in
             do {
+                let configuration = effectiveConfiguration(for: agent)
                 switch command {
                 case .compact:
                     guard agent.conversationState.sessionID != nil else {
@@ -3265,8 +3458,8 @@ final class AppState {
                         for: agent.conversationState,
                         providerID: agent.providerID,
                         systemPrompt: agent.systemPrompt,
-                        agentMode: agent.explicitAgentMode,
-                        agentAccess: agent.explicitAgentAccess,
+                        agentMode: configuration.agentMode,
+                        agentAccess: configuration.agentAccess,
                         workingDirectory: project.project.rootURL,
                         resumeSessionID: agent.conversationState.sessionID
                     )
@@ -3277,8 +3470,8 @@ final class AppState {
                         for: agent.conversationState,
                         providerID: agent.providerID,
                         systemPrompt: agent.systemPrompt,
-                        agentMode: agent.explicitAgentMode,
-                        agentAccess: agent.explicitAgentAccess,
+                        agentMode: configuration.agentMode,
+                        agentAccess: configuration.agentAccess,
                         workingDirectory: project.project.rootURL,
                         resumeSessionID: agent.conversationState.sessionID
                     )
@@ -3294,8 +3487,8 @@ final class AppState {
                         for: agent.conversationState,
                         providerID: agent.providerID,
                         systemPrompt: agent.systemPrompt,
-                        agentMode: agent.explicitAgentMode,
-                        agentAccess: agent.explicitAgentAccess,
+                        agentMode: configuration.agentMode,
+                        agentAccess: configuration.agentAccess,
                         workingDirectory: project.project.rootURL,
                         resumeSessionID: agent.conversationState.sessionID
                     )
@@ -3312,8 +3505,8 @@ final class AppState {
                         for: agent.conversationState,
                         providerID: agent.providerID,
                         systemPrompt: agent.systemPrompt,
-                        agentMode: agent.explicitAgentMode,
-                        agentAccess: agent.explicitAgentAccess,
+                        agentMode: configuration.agentMode,
+                        agentAccess: configuration.agentAccess,
                         workingDirectory: project.project.rootURL,
                         resumeSessionID: agent.conversationState.sessionID
                     )
@@ -3324,8 +3517,8 @@ final class AppState {
                         for: agent.conversationState,
                         providerID: agent.providerID,
                         systemPrompt: agent.systemPrompt,
-                        agentMode: agent.explicitAgentMode,
-                        agentAccess: agent.explicitAgentAccess,
+                        agentMode: configuration.agentMode,
+                        agentAccess: configuration.agentAccess,
                         workingDirectory: project.project.rootURL,
                         resumeSessionID: agent.conversationState.sessionID
                     )
@@ -3370,6 +3563,9 @@ final class AppState {
         isShuttingDown = true
         scheduledSaveTask?.cancel()
         nativeWorkspaceSyncTask?.cancel()
+        activeNativeWorkspaceSyncRequest = nil
+        pendingNativeWorkspaceSyncRequest = nil
+        nativeSyncingProjectIDs.removeAll()
         nativeActiveProjectPollingTask?.cancel()
         for task in nativeTranscriptTasks.values {
             task.cancel()

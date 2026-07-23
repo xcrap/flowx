@@ -46,3 +46,8 @@ targets:
         ENABLE_APP_SANDBOX: false
         ENABLE_USER_SELECTED_FILES: readwrite
         NETWORK_CLIENT: true
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.flowx.app.dev
+          PRODUCT_NAME: FlowX-Dev
+          INFOPLIST_KEY_CFBundleDisplayName: FlowX Dev

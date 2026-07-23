@@ -7,6 +7,7 @@ public final class ConversationState {
     public static let maxRetainedMessages = 250
     private static let maxRuntimeActivities = 200
     private static let maxVisibleQueuedPromptPreviews = 3
+    private static let maxTrackedCompletedToolUses = 512
 
     public let agentID: UUID
     public var messages: [ConversationMessage] = []
@@ -15,6 +16,7 @@ public final class ConversationState {
     public var runtimePhase: ProviderSessionPhase = .idle
     public var streamingText: String = ""
     public var streamingRevision: Int = 0
+    public private(set) var completedToolUseIDs: Set<String> = []
     public var inputText: String = ""
     public var error: String?
     public var sessionID: String?
@@ -66,8 +68,20 @@ public final class ConversationState {
         messageRevision &+= 1
     }
 
+    public func beginToolTracking() {
+        guard !completedToolUseIDs.isEmpty else { return }
+        completedToolUseIDs.removeAll(keepingCapacity: true)
+    }
+
+    public func markToolCompleted(_ id: String) {
+        guard !id.isEmpty else { return }
+        completedToolUseIDs.insert(id)
+        trimCompletedToolUseIDsIfNeeded()
+    }
+
     public func replaceMessages(_ retainedMessages: [ConversationMessage]) {
         messages = Array(retainedMessages.suffix(Self.maxRetainedMessages))
+        completedToolUseIDs.removeAll(keepingCapacity: true)
         messageRevision &+= 1
     }
 
@@ -357,6 +371,7 @@ public final class ConversationState {
     public func resetConversation() {
         messages.removeAll()
         messageRevision &+= 1
+        completedToolUseIDs.removeAll(keepingCapacity: false)
         runtimePhase = .idle
         streamingText = ""
         streamingRevision &+= 1
@@ -468,6 +483,26 @@ public final class ConversationState {
     private func trimRetainedMessages() {
         guard messages.count > Self.maxRetainedMessages else { return }
         messages.removeFirst(messages.count - Self.maxRetainedMessages)
+    }
+
+    private func trimCompletedToolUseIDsIfNeeded() {
+        guard completedToolUseIDs.count > Self.maxTrackedCompletedToolUses else { return }
+
+        var retained: Set<String> = []
+        retained.reserveCapacity(Self.maxTrackedCompletedToolUses)
+        messageLoop: for message in messages.reversed() {
+            for content in message.content.reversed() {
+                guard case .toolUse(let id, _, _) = content,
+                      completedToolUseIDs.contains(id) else {
+                    continue
+                }
+                retained.insert(id)
+                if retained.count == Self.maxTrackedCompletedToolUses {
+                    break messageLoop
+                }
+            }
+        }
+        completedToolUseIDs = retained
     }
 }
 

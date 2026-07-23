@@ -43,12 +43,14 @@ public final class TerminalSession {
     public func makeView() -> LocalProcessTerminalView {
         if let terminalView {
             configure(terminalView)
+            enableAcceleratedRendererIfPossible(on: terminalView)
             return terminalView
         }
 
         let view = LocalProcessTerminalView(frame: .zero)
         view.processDelegate = delegateBridge
         configure(view)
+        enableAcceleratedRendererIfPossible(on: view)
         terminalView = view
         delegateBridge.activate(source: view, generation: terminalGeneration)
         return view
@@ -151,18 +153,34 @@ public final class TerminalSession {
     }
 
     private func configure(_ view: LocalProcessTerminalView) {
-        view.font = NSFont.monospacedSystemFont(
+        let targetFont = NSFont.monospacedSystemFont(
             ofSize: FXTypography.terminalPointSize,
             weight: .regular
         )
-        view.nativeBackgroundColor = NSColor(FXColors.terminalBg)
-        view.nativeForegroundColor = NSColor(FXColors.fg)
-        view.optionAsMetaKey = true
+        if view.font.fontName != targetFont.fontName
+            || abs(view.font.pointSize - targetFont.pointSize) > 0.01 {
+            view.font = targetFont
+        }
+
+        let targetBackgroundColor = NSColor(FXColors.terminalBg)
+        if !view.nativeBackgroundColor.isEqual(targetBackgroundColor) {
+            view.nativeBackgroundColor = targetBackgroundColor
+        }
+
+        let targetForegroundColor = NSColor(FXColors.fg)
+        if !view.nativeForegroundColor.isEqual(targetForegroundColor) {
+            view.nativeForegroundColor = targetForegroundColor
+        }
+
+        if !view.optionAsMetaKey {
+            view.optionAsMetaKey = true
+        }
     }
 
     private func enableAcceleratedRendererIfPossible(on view: LocalProcessTerminalView) {
-        guard view.window != nil, !view.isUsingMetalRenderer else {
-            isUsingAcceleratedRenderer = view.isUsingMetalRenderer
+        guard view.window != nil else { return }
+        if view.isUsingMetalRenderer {
+            isUsingAcceleratedRenderer = true
             return
         }
 

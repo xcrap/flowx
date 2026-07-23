@@ -31,9 +31,7 @@ struct FlowXCommands: Commands {
             .keyboardShortcut("k", modifiers: .command)
 
             Button("Toggle Sidebar") {
-                withAnimation(FXAnimation.panel) {
-                    appState.sidebarVisible.toggle()
-                }
+                appState.sidebarVisible.toggle()
             }
             .keyboardShortcut("b", modifiers: .command)
 
@@ -44,9 +42,7 @@ struct FlowXCommands: Commands {
             .disabled(!appState.activeProjectCanShowGitPanel)
 
             Button("Toggle Terminal") {
-                withAnimation(FXAnimation.panel) {
-                    appState.activeAgent?.workspace.terminalVisible.toggle()
-                }
+                appState.activeAgent?.workspace.terminalVisible.toggle()
             }
             .keyboardShortcut("t", modifiers: .command)
             .disabled(appState.activeAgent == nil)
@@ -58,9 +54,7 @@ struct FlowXCommands: Commands {
             .disabled(appState.activeAgent == nil)
 
             Button("Settings") {
-                withAnimation(FXAnimation.panel) {
-                    appState.settingsVisible = true
-                }
+                appState.settingsVisible = true
             }
             .keyboardShortcut(",", modifiers: .command)
         }

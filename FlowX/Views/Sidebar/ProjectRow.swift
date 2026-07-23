@@ -7,6 +7,7 @@ struct ProjectRow: View {
     @Environment(AppState.self) private var appState
     @Bindable var project: ProjectState
     let threadSearchQuery: String
+    let currentDate: Date
 
     @State private var visibleThreadLimit = Self.initialVisibleThreadLimit
     @State private var paginatedSearchQuery = ""
@@ -57,13 +58,6 @@ struct ProjectRow: View {
                         .controlSize(.mini)
                         .help("Syncing provider threads")
                         .accessibilityLabel("Syncing provider threads")
-                } else {
-                    FXIconButton(
-                        icon: "arrow.clockwise",
-                        label: "Refresh provider threads",
-                        size: 24,
-                        action: refreshThreads
-                    )
                 }
 
                 FXDropdown(
@@ -123,7 +117,11 @@ struct ProjectRow: View {
                     } else if !matchingAgents.isEmpty {
                         LazyVStack(spacing: FXSpacing.xxxs) {
                             ForEach(visibleAgents) { agent in
-                                ThreadRow(agent: agent, project: project)
+                                ThreadRow(
+                                    agent: agent,
+                                    project: project,
+                                    currentDate: currentDate
+                                )
                             }
                         }
 

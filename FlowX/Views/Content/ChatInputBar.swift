@@ -44,6 +44,7 @@ struct ChatInputBar: View {
                         .padding(.top, FXSpacing.lg)
                         .padding(.bottom, FXSpacing.sm)
                         .focused($composerFocused)
+                        .focusEffectDisabled()
                         .disabled(isSubmittingSteer)
                         .accessibilityLabel("Prompt input")
                         .accessibilityHint("Type a request for \(agent.title)")
@@ -227,9 +228,21 @@ struct ChatInputBar: View {
         providers.first(where: { $0.id == agent.providerID })
     }
 
+    private var effectiveConfiguration: EffectiveAgentConfiguration {
+        appState.effectiveConfiguration(for: agent)
+    }
+
+    private var inheritedConfiguration: EffectiveAgentConfiguration {
+        appState.inheritedConfiguration(for: agent)
+    }
+
+    private var inheritedSettingTitle: String {
+        agent.isProviderNativeThread ? "Task setting" : "App default"
+    }
+
     private var currentModel: AIModel? {
-        guard let effectiveModelIDForDisplay else { return nil }
-        return currentProvider?.availableModels.first(where: { $0.id == effectiveModelIDForDisplay })
+        guard let modelID = effectiveConfiguration.modelID else { return nil }
+        return currentProvider?.availableModels.first(where: { $0.id == modelID })
     }
 
     private var providerSections: [FXDropdownSection] {
@@ -256,20 +269,18 @@ struct ChatInputBar: View {
     }
 
     private var modelSections: [FXDropdownSection] {
-        let automatic = FXDropdownItem(
-            id: "provider-default",
-            title: "Provider default",
-            subtitle: agent.nativeModelID == nil
-                ? "Do not override this thread's model"
-                : "Use the model recorded by this provider thread",
+        let inherited = FXDropdownItem(
+            id: "inherited-model",
+            title: inheritedSettingTitle,
+            subtitle: "Effective: \(modelName(for: inheritedConfiguration.modelID))",
             isSelected: agent.explicitModelID == nil
         ) {
-            selectAutomaticModel()
+            selectInheritedModel()
         }
 
         return [
             FXDropdownSection(
-                items: [automatic] + (currentProvider?.availableModels ?? []).map { model in
+                items: [inherited] + (currentProvider?.availableModels ?? []).map { model in
                     FXDropdownItem(
                         id: model.id,
                         title: simplifiedModelName(for: model.name),
@@ -288,9 +299,9 @@ struct ChatInputBar: View {
             FXDropdownSection(
                 items: [
                     FXDropdownItem(
-                        id: "automatic",
-                        title: "Automatic",
-                        subtitle: "Use the provider thread's reasoning setting",
+                        id: "inherited-effort",
+                        title: inheritedSettingTitle,
+                        subtitle: "Effective: \(resolvedEffortLabel(inheritedConfiguration.effort))",
                         isSelected: agent.explicitEffort == nil
                     ) {
                         agent.explicitEffort = nil
@@ -313,9 +324,9 @@ struct ChatInputBar: View {
             FXDropdownSection(
                 items: [
                     FXDropdownItem(
-                        id: "provider-default-mode",
-                        title: "Provider default",
-                        subtitle: "Keep this thread's native conversation mode",
+                        id: "inherited-mode",
+                        title: inheritedSettingTitle,
+                        subtitle: "Effective: \(resolvedModeLabel(inheritedConfiguration.agentMode))",
                         isSelected: agent.explicitAgentMode == nil
                     ) {
                         agent.explicitAgentMode = nil
@@ -346,9 +357,9 @@ struct ChatInputBar: View {
             FXDropdownSection(
                 items: [
                     FXDropdownItem(
-                        id: "provider-default-access",
-                        title: "Provider default",
-                        subtitle: "Keep this thread's native permission policy",
+                        id: "inherited-access",
+                        title: inheritedSettingTitle,
+                        subtitle: "Effective: \(resolvedAccessLabel(inheritedConfiguration.agentAccess))",
                         isSelected: agent.explicitAgentAccess == nil
                     ) {
                         agent.explicitAgentAccess = nil
@@ -395,27 +406,19 @@ struct ChatInputBar: View {
     }
 
     private var modelLabel: String {
-        guard let effectiveModelIDForDisplay else { return "Provider default" }
-        return simplifiedModelName(for: currentModel?.name ?? effectiveModelIDForDisplay)
-    }
-
-    private var effectiveModelIDForDisplay: String? {
-        agent.explicitModelID ?? agent.nativeModelID
+        modelName(for: effectiveConfiguration.modelID)
     }
 
     private var effortMenuLabel: String {
-        guard let effectiveEffort = agent.explicitEffort ?? agent.nativeEffort else { return "Automatic" }
-        return effortLabel(for: effectiveEffort)
+        resolvedEffortLabel(effectiveConfiguration.effort)
     }
 
     private var modeMenuLabel: String {
-        guard let mode = agent.explicitAgentMode else { return "Mode: Default" }
-        return mode == .plan ? "Plan" : "Chat"
+        resolvedModeLabel(effectiveConfiguration.agentMode)
     }
 
     private var accessMenuLabel: String {
-        guard let access = agent.explicitAgentAccess else { return "Access: Default" }
-        return accessLabel(access)
+        resolvedAccessLabel(effectiveConfiguration.agentAccess)
     }
 
     private var providerLabel: String {
@@ -580,6 +583,28 @@ struct ChatInputBar: View {
         }
     }
 
+    private func resolvedAccessLabel(_ access: AgentAccess?) -> String {
+        access.map(accessLabel) ?? "Provider setting"
+    }
+
+    private func resolvedModeLabel(_ mode: AgentMode?) -> String {
+        guard let mode else { return "Provider setting" }
+        return mode == .plan ? "Plan" : "Chat"
+    }
+
+    private func modelName(for modelID: String?) -> String {
+        guard let modelID else { return "Provider setting" }
+        let advertisedName = currentProvider?.availableModels
+            .first(where: { $0.id == modelID })?
+            .name
+        return simplifiedModelName(for: advertisedName ?? modelID)
+    }
+
+    private func resolvedEffortLabel(_ effort: String?) -> String {
+        guard let effort else { return "Provider setting" }
+        return effortLabel(for: effort)
+    }
+
     private func simplifiedProviderName(for displayName: String) -> String {
         displayName
             .replacingOccurrences(of: " (OpenAI)", with: "")
@@ -633,14 +658,16 @@ struct ChatInputBar: View {
         }
     }
 
-    private func selectAutomaticModel() {
+    private func selectInheritedModel() {
         guard !agent.isStreaming else { return }
         agent.explicitModelID = nil
-        agent.conversationState.activeModelID = agent.nativeModelID
-        agent.conversationState.configuredContextWindow = currentProvider?
-            .availableModels
-            .first(where: { $0.id == agent.nativeModelID })?
-            .contextWindow
+        let resolvedModelID = appState.effectiveConfiguration(for: agent).modelID
+        agent.conversationState.activeModelID = resolvedModelID
+        agent.conversationState.configuredContextWindow = resolvedModelID.flatMap { modelID in
+            currentProvider?.availableModels
+                .first(where: { $0.id == modelID })?
+                .contextWindow
+        }
     }
 
     private func formattedContextWindow(_ count: Int) -> String {
@@ -724,7 +751,7 @@ struct ChatInputBar: View {
     private func focusComposer() {
         Task { @MainActor in
             composerFocused = false
-            try? await Task.sleep(for: .milliseconds(60))
+            await Task.yield()
             guard appState.activeAgentID == agent.id else { return }
             composerFocused = true
         }

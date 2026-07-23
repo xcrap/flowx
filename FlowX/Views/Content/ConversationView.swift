@@ -7,6 +7,87 @@ import FXCore
 private struct MessageRenderKey: Hashable {
     let agentID: UUID
     let revision: Int
+    let isRunning: Bool
+    let isLoadingNativeTranscript: Bool
+}
+
+@MainActor
+private final class ConversationRenderCache {
+    private struct Entry {
+        let key: MessageRenderKey
+        let items: [ConversationDisplayItem]
+        let cost: Int
+        var lastAccess: UInt64
+    }
+
+    private let maximumEntryCount: Int
+    private let maximumCost: Int
+    private var entriesByAgentID: [UUID: Entry] = [:]
+    private var totalCost = 0
+    private var accessCounter: UInt64 = 0
+
+    init(maximumEntryCount: Int, maximumCost: Int) {
+        self.maximumEntryCount = max(1, maximumEntryCount)
+        self.maximumCost = max(1, maximumCost)
+    }
+
+    func items(for key: MessageRenderKey) -> [ConversationDisplayItem]? {
+        guard var entry = entriesByAgentID[key.agentID] else { return nil }
+        guard entry.key == key else {
+            removeEntry(for: key.agentID)
+            return nil
+        }
+
+        entry.lastAccess = nextAccess()
+        entriesByAgentID[key.agentID] = entry
+        return entry.items
+    }
+
+    func insert(
+        _ items: [ConversationDisplayItem],
+        for key: MessageRenderKey,
+        messageCount: Int
+    ) {
+        removeEntry(for: key.agentID)
+
+        let cost = max(
+            1,
+            messageCount + items.reduce(into: 0) { total, item in
+                total += item.estimatedCacheCost
+            }
+        )
+        guard cost <= maximumCost else { return }
+
+        entriesByAgentID[key.agentID] = Entry(
+            key: key,
+            items: items,
+            cost: cost,
+            lastAccess: nextAccess()
+        )
+        totalCost += cost
+        evictIfNeeded()
+    }
+
+    private func nextAccess() -> UInt64 {
+        accessCounter &+= 1
+        return accessCounter
+    }
+
+    private func removeEntry(for agentID: UUID) {
+        guard let entry = entriesByAgentID.removeValue(forKey: agentID) else { return }
+        totalCost -= entry.cost
+    }
+
+    private func evictIfNeeded() {
+        while entriesByAgentID.count > maximumEntryCount || totalCost > maximumCost {
+            guard let leastRecentlyUsedAgentID = entriesByAgentID.min(
+                by: { $0.value.lastAccess < $1.value.lastAccess }
+            )?.key else {
+                return
+            }
+            removeEntry(for: leastRecentlyUsedAgentID)
+        }
+    }
 }
 
 struct ConversationView: View {
@@ -16,17 +97,117 @@ struct ConversationView: View {
     @State private var editingQueuedPromptIndex: Int?
     @State private var editingQueuedPromptText = ""
     @State private var initialScrollRestorePending = true
+    @State private var transcriptPrepared = false
     @State private var renderedItems: [ConversationDisplayItem] = []
 
     private let maxContentWidth: CGFloat = FXLayout.readableContentWidth
+    private static let renderExecutor = BoundedTaskExecutor(maxConcurrentTasks: 2)
+    private static let renderCache = ConversationRenderCache(
+        maximumEntryCount: 6,
+        maximumCost: 2_000
+    )
     private static let exactTokenFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         return formatter
     }()
 
+    init(agent: AgentInfo) {
+        self.agent = agent
+
+        let key = MessageRenderKey(
+            agentID: agent.id,
+            revision: agent.conversationState.messageRevision,
+            isRunning: agent.isTranscriptRunning,
+            isLoadingNativeTranscript: agent.isLoadingNativeTranscript
+        )
+        if let cachedItems = Self.renderCache.items(for: key) {
+            _renderedItems = State(initialValue: cachedItems)
+            _transcriptPrepared = State(initialValue: true)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            transcriptViewport
+
+            if !agent.conversationState.pendingUserInputRequests.isEmpty {
+                ProviderUserInputTray(
+                    requests: agent.conversationState.pendingUserInputRequests,
+                    onSubmit: { request, answers in
+                        appState.respondToUserInput(request.id, answers: answers, for: agent)
+                    },
+                    onCancel: { request in
+                        if request.cancellationBehavior == .respondToProvider {
+                            appState.cancelUserInput(request.id, for: agent)
+                        } else {
+                            appState.cancelPrompt(for: agent)
+                        }
+                    }
+                )
+            }
+
+            if agent.conversationState.pendingToolApprovalCount > 0 {
+                approvalTray
+            }
+
+            if agent.conversationState.queuedPromptCount > 0 {
+                queueTray
+            }
+
+            if showsContextBar {
+                contextBar
+            }
+
+            ChatInputBar(agent: agent)
+                .layoutPriority(1)
+        }
+        .background(FXColors.contentBg)
+        .task(id: renderKey) {
+            let key = renderKey
+            if let cachedItems = Self.renderCache.items(for: key) {
+                installRenderedItems(cachedItems)
+                return
+            }
+
+            let messages = agent.messages
+            if messages.isEmpty, key.isLoadingNativeTranscript {
+                transcriptPrepared = false
+                return
+            }
+
+            do {
+                let items = try await Self.renderExecutor.run(priority: .userInitiated) {
+                    try Self.makeDisplayItems(
+                        from: messages,
+                        isRunning: key.isRunning
+                    )
+                }
+                guard !Task.isCancelled, key == renderKey else { return }
+                Self.renderCache.insert(items, for: key, messageCount: messages.count)
+                installRenderedItems(items)
+            } catch {
+                return
+            }
+        }
+        .onDisappear {
+            if appState.isBootstrapped {
+                appState.scheduleSave()
+            }
+        }
+    }
+
+    private func installRenderedItems(_ items: [ConversationDisplayItem]) {
+        renderedItems = items
+        if !transcriptPrepared {
+            initialScrollRestorePending = true
+            transcriptPrepared = true
+        }
+    }
+
+    @ViewBuilder
+    private var transcriptViewport: some View {
+        if transcriptPrepared {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(renderedItems) { item in
@@ -39,7 +220,7 @@ struct ConversationView: View {
                         MessageBubble(streamingText: agent.conversationState.streamingText)
                             .id("streaming-message")
                             .padding(.bottom, FXSpacing.xl)
-                    } else if agent.isStreaming {
+                    } else if agent.isTranscriptRunning {
                         streamingIndicator
                             .id("streaming-indicator")
                             .padding(.bottom, FXSpacing.xl)
@@ -77,46 +258,32 @@ struct ConversationView: View {
             .scrollContentBackground(.hidden)
             .opacity(initialScrollRestorePending ? 0 : 1)
             .allowsHitTesting(!initialScrollRestorePending)
-
-            if !agent.conversationState.pendingUserInputRequests.isEmpty {
-                ProviderUserInputTray(
-                    requests: agent.conversationState.pendingUserInputRequests,
-                    onSubmit: { request, answers in
-                        appState.respondToUserInput(request.id, answers: answers, for: agent)
-                    },
-                    onCancel: { request in
-                        if request.cancellationBehavior == .respondToProvider {
-                            appState.cancelUserInput(request.id, for: agent)
-                        } else {
-                            appState.cancelPrompt(for: agent)
-                        }
-                    }
-                )
-            }
-
-            if agent.conversationState.pendingToolApprovalCount > 0 {
-                approvalTray
-            }
-
-            if agent.conversationState.queuedPromptCount > 0 {
-                queueTray
-            }
-
-            if showsContextBar {
-                contextBar
-            }
-
-            ChatInputBar(agent: agent)
+        } else {
+            transcriptLoadingView
         }
+    }
+
+    private var transcriptLoadingView: some View {
+        VStack(spacing: FXSpacing.sm) {
+            ProgressView()
+                .controlSize(.small)
+
+            Text("Opening task…")
+                .font(FXTypography.caption)
+                .foregroundStyle(FXColors.fgTertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(FXColors.contentBg)
-        .task(id: MessageRenderKey(agentID: agent.id, revision: agent.conversationState.messageRevision)) {
-            renderedItems = Self.makeDisplayItems(from: agent.messages)
-        }
-        .onDisappear {
-            if appState.isBootstrapped {
-                appState.scheduleSave()
-            }
-        }
+        .accessibilityLabel("Opening task")
+    }
+
+    private var renderKey: MessageRenderKey {
+        MessageRenderKey(
+            agentID: agent.id,
+            revision: agent.conversationState.messageRevision,
+            isRunning: agent.isTranscriptRunning,
+            isLoadingNativeTranscript: agent.isLoadingNativeTranscript
+        )
     }
 
     private var bottomScrollID: String { "conversation-bottom" }
@@ -124,7 +291,7 @@ struct ConversationView: View {
     private var contentVersion: Int {
         var version = agent.conversationState.messageRevision
         version = version &* 31 &+ agent.conversationState.streamingRevision
-        version += agent.isStreaming ? 1 : 0
+        version += agent.isTranscriptRunning ? 1 : 0
         version += agent.conversationState.error == nil ? 0 : 1
         if let activeGoal = agent.conversationState.activeGoal {
             version = version &* 31 &+ activeGoal.updatedAt
@@ -133,27 +300,221 @@ struct ConversationView: View {
         return version
     }
 
-    private static func makeDisplayItems(from messages: [ConversationMessage]) -> [ConversationDisplayItem] {
+    nonisolated private static func makeDisplayItems(
+        from messages: [ConversationMessage],
+        isRunning: Bool
+    ) throws -> [ConversationDisplayItem] {
         var items: [ConversationDisplayItem] = []
-        var toolGroup: [ConversationMessage] = []
+        var assistantTurn: [ConversationMessage] = []
 
-        func flushToolGroup() {
-            guard let first = toolGroup.first else { return }
-            items.append(.toolGroup(id: first.id, messages: toolGroup))
-            toolGroup.removeAll()
+        func flushAssistantTurn(isActiveTurn: Bool) throws {
+            guard !assistantTurn.isEmpty else { return }
+
+            let chunks = try Self.assistantTurnChunks(from: assistantTurn)
+            for (chunkIndex, chunk) in chunks.enumerated() {
+                if chunkIndex.isMultiple(of: 32) {
+                    try Task.checkCancellation()
+                }
+                switch chunk {
+                case .messages(let chunkMessages):
+                    try Self.appendAssistantSegment(
+                        chunkMessages,
+                        segmentIndex: chunkIndex,
+                        isActive: isActiveTurn && chunkIndex == chunks.count - 1,
+                        to: &items
+                    )
+                case .question(let id, let question, let result):
+                    items.append(
+                        .questionExchange(
+                            id: "question-\(id)",
+                            question: question,
+                            result: result
+                        )
+                    )
+                }
+            }
+            assistantTurn.removeAll(keepingCapacity: true)
         }
 
-        for message in messages {
-            if Self.isGroupedToolEventMessage(message) {
-                toolGroup.append(message)
-            } else {
-                flushToolGroup()
+        for (messageIndex, message) in messages.enumerated() {
+            if messageIndex.isMultiple(of: 32) {
+                try Task.checkCancellation()
+            }
+            if message.role == .user {
+                try flushAssistantTurn(isActiveTurn: false)
                 items.append(.message(message))
+            } else {
+                assistantTurn.append(message)
             }
         }
 
-        flushToolGroup()
+        try flushAssistantTurn(isActiveTurn: isRunning)
+        try Task.checkCancellation()
         return items
+    }
+
+    nonisolated private static func appendAssistantSegment(
+        _ messages: [ConversationMessage],
+        segmentIndex: Int,
+        isActive: Bool,
+        to items: inout [ConversationDisplayItem]
+    ) throws {
+        guard !messages.isEmpty else { return }
+        var lastWorkIndex: Int?
+        for (messageIndex, message) in messages.enumerated() {
+            if messageIndex.isMultiple(of: 32) {
+                try Task.checkCancellation()
+            }
+            if containsBackgroundToolActivity(message) {
+                lastWorkIndex = messageIndex
+            }
+        }
+        guard let lastWorkIndex else {
+            items.append(contentsOf: messages.map(ConversationDisplayItem.message))
+            return
+        }
+
+        let workMessages = Array(messages[...lastWorkIndex])
+        if let first = workMessages.first {
+            items.append(
+                .workGroup(
+                    id: "work-\(first.id.uuidString)-\(segmentIndex)",
+                    entries: try ConversationActivityEntry.makeEntries(from: workMessages),
+                    isActive: isActive,
+                    summary: try ConversationActivitySummary(messages: workMessages)
+                )
+            )
+        }
+
+        if lastWorkIndex < messages.index(before: messages.endIndex) {
+            let tailStart = messages.index(after: lastWorkIndex)
+            items.append(
+                contentsOf: messages[tailStart...].map(ConversationDisplayItem.message)
+            )
+        }
+    }
+
+    nonisolated private static func assistantTurnChunks(
+        from messages: [ConversationMessage]
+    ) throws -> [AssistantTurnChunk] {
+        var hasQuestions = false
+        var questionToolIDs: Set<String> = []
+        for (messageIndex, message) in messages.enumerated() {
+            if messageIndex.isMultiple(of: 32) {
+                try Task.checkCancellation()
+            }
+            for (contentIndex, content) in message.content.enumerated() {
+                if contentIndex.isMultiple(of: 64) {
+                    try Task.checkCancellation()
+                }
+                guard case .toolUse(let id, let name, _) = content,
+                      isAskUserQuestion(name) else {
+                    continue
+                }
+                hasQuestions = true
+                if !id.isEmpty {
+                    questionToolIDs.insert(id)
+                }
+            }
+        }
+        guard hasQuestions else { return [.messages(messages)] }
+
+        var resultByToolID: [String: ConversationMessage] = [:]
+        for (messageIndex, message) in messages.enumerated() {
+            if messageIndex.isMultiple(of: 32) {
+                try Task.checkCancellation()
+            }
+            for (contentIndex, content) in message.content.enumerated() {
+                if contentIndex.isMultiple(of: 64) {
+                    try Task.checkCancellation()
+                }
+                guard case .toolResult(let id, _, _) = content,
+                      questionToolIDs.contains(id) else {
+                    continue
+                }
+                resultByToolID[id] = ConversationMessage(
+                    id: message.id,
+                    role: message.role,
+                    content: [content],
+                    timestamp: message.timestamp
+                )
+            }
+        }
+
+        var chunks: [AssistantTurnChunk] = []
+        var ordinaryMessages: [ConversationMessage] = []
+
+        func flushOrdinaryMessages() {
+            guard !ordinaryMessages.isEmpty else { return }
+            chunks.append(.messages(ordinaryMessages))
+            ordinaryMessages.removeAll(keepingCapacity: true)
+        }
+
+        for (messageIndex, message) in messages.enumerated() {
+            if messageIndex.isMultiple(of: 32) {
+                try Task.checkCancellation()
+            }
+            var questionContents: [(Int, String, MessageContent)] = []
+            var residualContents: [MessageContent] = []
+            for (contentIndex, content) in message.content.enumerated() {
+                if contentIndex.isMultiple(of: 64) {
+                    try Task.checkCancellation()
+                }
+                switch content {
+                case .toolUse(let id, let name, _) where isAskUserQuestion(name):
+                    questionContents.append((contentIndex, id, content))
+                case .toolResult(let id, _, _):
+                    if !questionToolIDs.contains(id) {
+                        residualContents.append(content)
+                    }
+                default:
+                    residualContents.append(content)
+                }
+            }
+
+            guard !questionContents.isEmpty
+                    || residualContents.count != message.content.count else {
+                ordinaryMessages.append(message)
+                continue
+            }
+
+            if !residualContents.isEmpty {
+                ordinaryMessages.append(
+                    ConversationMessage(
+                        id: message.id,
+                        role: message.role,
+                        content: residualContents,
+                        timestamp: message.timestamp
+                    )
+                )
+            }
+            flushOrdinaryMessages()
+
+            for (contentIndex, toolID, content) in questionContents {
+                let stableID = toolID.isEmpty
+                    ? "\(message.id.uuidString)-\(contentIndex)"
+                    : toolID
+                chunks.append(
+                    .question(
+                        id: stableID,
+                        question: ConversationMessage(
+                            id: message.id,
+                            role: message.role,
+                            content: [content],
+                            timestamp: message.timestamp
+                        ),
+                        result: resultByToolID[toolID]
+                    )
+                )
+            }
+        }
+
+        flushOrdinaryMessages()
+        return chunks
+    }
+
+    nonisolated private static func isAskUserQuestion(_ name: String) -> Bool {
+        name.caseInsensitiveCompare("AskUserQuestion") == .orderedSame
     }
 
     @ViewBuilder
@@ -161,8 +522,15 @@ struct ConversationView: View {
         switch item {
         case .message(let message):
             MessageBubble(message: message)
-        case .toolGroup(_, let messages):
-            ToolActivityGroup(messages: messages)
+        case .workGroup(_, let entries, let isActive, let summary):
+            ConversationActivityGroup(
+                entries: entries,
+                isActive: isActive,
+                summary: summary,
+                completedToolUseIDs: agent.conversationState.completedToolUseIDs
+            )
+        case .questionExchange(_, let question, let result):
+            ConversationQuestionExchange(question: question, result: result)
         }
     }
 
@@ -170,8 +538,10 @@ struct ConversationView: View {
         switch item {
         case .message(let message):
             return messageSpacing(for: message)
-        case .toolGroup:
+        case .workGroup:
             return FXSpacing.sm
+        case .questionExchange:
+            return FXSpacing.xl
         }
     }
 
@@ -192,16 +562,15 @@ struct ConversationView: View {
         }
     }
 
-    private static func isGroupedToolEventMessage(_ message: ConversationMessage) -> Bool {
-        !message.content.isEmpty && message.content.allSatisfy { item in
+    nonisolated private static func containsBackgroundToolActivity(
+        _ message: ConversationMessage
+    ) -> Bool {
+        message.content.contains { item in
             switch item {
             case .toolUse(_, let name, _):
-                // Questions are conversation content, not background tool
-                // noise. Keep them as full transcript cards so the exact
-                // thread always shows what Claude asked.
                 name != "AskUserQuestion"
-            case .toolResult(_, _, let isError):
-                !isError
+            case .toolResult:
+                true
             default:
                 false
             }
@@ -910,16 +1279,23 @@ private struct ConversationScrollBridge: NSViewRepresentable {
         private weak var scrollView: NSScrollView?
         private weak var clipView: NSClipView?
         private weak var documentView: NSView?
+        private weak var anchorView: NSView?
         private var observingScrollBounds = false
         private var observingDocumentFrame = false
+        private var documentPostedFrameChangesBeforeObservation = false
         private var isApplyingProgrammaticScroll = false
         private var activeRestoreKey: UUID?
         private var pendingInitialRestore = false
         private var pendingLayoutScroll = false
+        private var scrollReportTask: Task<Void, Never>?
+        private var viewportResizeTask: Task<Void, Never>?
+        private var documentReflowTask: Task<Void, Never>?
+        private var initialRestoreTask: Task<Void, Never>?
         private var desiredOffset: CGFloat = 0
         private var stickToBottom = true
         private var lastContentVersion: Int?
         private var lastClipHeight: CGFloat?
+        private var lastDocumentHeight: CGFloat?
         fileprivate var hasCompletedInitialRestore = false
 
         init(onScrollChange: @escaping (CGFloat, CGFloat) -> Void) {
@@ -929,41 +1305,54 @@ private struct ConversationScrollBridge: NSViewRepresentable {
         func prepareForRestore(_ restoreKey: UUID) {
             guard activeRestoreKey != restoreKey else { return }
             activeRestoreKey = restoreKey
+            documentReflowTask?.cancel()
+            initialRestoreTask?.cancel()
             pendingInitialRestore = false
             hasCompletedInitialRestore = false
+            lastContentVersion = nil
+            lastDocumentHeight = documentView?.frame.height
         }
 
         func attachIfNeeded(to view: NSView) {
-            guard scrollView == nil else { return }
-            guard let scrollView = enclosingScrollView(from: view) else { return }
+            anchorView = view
+            guard let enclosingScrollView = enclosingScrollView(from: view) else { return }
+            if let scrollView {
+                if scrollView === enclosingScrollView {
+                    attachDocumentFrameObserverIfNeeded(to: scrollView.documentView)
+                    return
+                }
+                detach()
+                anchorView = view
+            }
 
-            self.scrollView = scrollView
-            clipView = scrollView.contentView
-            lastClipHeight = scrollView.contentView.bounds.height
-            scrollView.contentView.postsBoundsChangedNotifications = true
-            attachDocumentObserverIfNeeded()
+            self.scrollView = enclosingScrollView
+            clipView = enclosingScrollView.contentView
+            lastClipHeight = enclosingScrollView.contentView.bounds.height
+            enclosingScrollView.contentView.postsBoundsChangedNotifications = true
 
             NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(handleScrollBoundsDidChange),
                 name: NSView.boundsDidChangeNotification,
-                object: scrollView.contentView
+                object: enclosingScrollView.contentView
             )
             observingScrollBounds = true
+            attachDocumentFrameObserverIfNeeded(to: enclosingScrollView.documentView)
         }
 
         func detach() {
             if observingScrollBounds {
                 NotificationCenter.default.removeObserver(self, name: NSView.boundsDidChangeNotification, object: clipView)
             }
-            if observingDocumentFrame {
-                NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: documentView)
-            }
+            detachDocumentFrameObserver()
+            scrollReportTask?.cancel()
+            viewportResizeTask?.cancel()
+            documentReflowTask?.cancel()
+            initialRestoreTask?.cancel()
             observingScrollBounds = false
-            observingDocumentFrame = false
             scrollView = nil
             clipView = nil
-            documentView = nil
+            anchorView = nil
             lastClipHeight = nil
         }
 
@@ -971,7 +1360,6 @@ private struct ConversationScrollBridge: NSViewRepresentable {
             self.desiredOffset = desiredOffset
             let becamePinned = stickToBottom && !self.stickToBottom
             self.stickToBottom = stickToBottom
-            attachDocumentObserverIfNeeded()
 
             let didChangeContent = lastContentVersion != contentVersion
             lastContentVersion = contentVersion
@@ -992,27 +1380,49 @@ private struct ConversationScrollBridge: NSViewRepresentable {
             self.desiredOffset = desiredOffset
             self.stickToBottom = stickToBottom
 
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.activeRestoreKey == restoreKey else { return }
-                guard self.scrollView != nil, self.clipView != nil else {
-                    self.pendingInitialRestore = false
-                    return
-                }
-                self.applyScrollPosition(desiredOffset: desiredOffset, stickToBottom: stickToBottom)
+            initialRestoreTask?.cancel()
+            initialRestoreTask = Task { @MainActor [weak self] in
+                guard let self else { return }
 
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.activeRestoreKey == restoreKey else { return }
-                    guard self.scrollView != nil, self.clipView != nil else {
-                        self.pendingInitialRestore = false
+                for _ in 0..<12 {
+                    guard !Task.isCancelled, self.activeRestoreKey == restoreKey else { return }
+                    if let anchorView = self.anchorView {
+                        self.attachIfNeeded(to: anchorView)
+                    }
+
+                    if self.scrollView != nil, self.clipView != nil {
+                        self.applyScrollPosition(
+                            desiredOffset: desiredOffset,
+                            stickToBottom: stickToBottom
+                        )
+                        await Task.yield()
+                        guard !Task.isCancelled, self.activeRestoreKey == restoreKey else { return }
+                        self.applyScrollPosition(
+                            desiredOffset: desiredOffset,
+                            stickToBottom: stickToBottom
+                        )
+                        self.finishInitialRestore(onInitialRestoreCompleted)
                         return
                     }
-                    self.applyScrollPosition(desiredOffset: desiredOffset, stickToBottom: stickToBottom)
-                    self.pendingInitialRestore = false
-                    self.hasCompletedInitialRestore = true
-                    self.attachDocumentObserverIfNeeded()
-                    onInitialRestoreCompleted()
+
+                    do {
+                        try await Task.sleep(for: .milliseconds(10))
+                    } catch {
+                        return
+                    }
                 }
+
+                // Never leave the task invisible because AppKit attachment lagged.
+                // A later content/layout update still applies the pinned scroll intent.
+                self.finishInitialRestore(onInitialRestoreCompleted)
             }
+        }
+
+        private func finishInitialRestore(_ onInitialRestoreCompleted: @escaping () -> Void) {
+            guard !hasCompletedInitialRestore else { return }
+            pendingInitialRestore = false
+            hasCompletedInitialRestore = true
+            onInitialRestoreCompleted()
         }
 
         func applyScrollPosition(desiredOffset: CGFloat, stickToBottom: Bool) {
@@ -1020,16 +1430,12 @@ private struct ConversationScrollBridge: NSViewRepresentable {
             let maxOffset = maximumOffset(for: scrollView)
             let targetOffset = stickToBottom ? maxOffset : max(0, min(desiredOffset, maxOffset))
 
-            guard abs(clipView.bounds.origin.y - targetOffset) > 1 else {
-                reportScrollPosition()
-                return
-            }
+            guard abs(clipView.bounds.origin.y - targetOffset) > 1 else { return }
 
             isApplyingProgrammaticScroll = true
             clipView.setBoundsOrigin(NSPoint(x: 0, y: targetOffset))
             scrollView.reflectScrolledClipView(clipView)
             isApplyingProgrammaticScroll = false
-            reportScrollPosition()
         }
 
         @objc
@@ -1040,22 +1446,27 @@ private struct ConversationScrollBridge: NSViewRepresentable {
             let didResizeViewport = lastClipHeight.map { abs($0 - currentClipHeight) > 0.5 } ?? false
             lastClipHeight = currentClipHeight
 
-            if stickToBottom, didResizeViewport {
-                scheduleLayoutScroll()
+            if didResizeViewport {
+                if stickToBottom {
+                    scheduleViewportResizeAdjustment()
+                } else {
+                    scheduleScrollReport()
+                }
                 return
             }
 
-            reportScrollPosition()
+            scheduleScrollReport()
         }
 
         @objc
         private func handleDocumentFrameDidChange() {
-            attachDocumentObserverIfNeeded()
-            if stickToBottom {
-                scheduleLayoutScroll()
-            } else {
-                reportScrollPosition()
-            }
+            guard let documentView else { return }
+            let documentHeight = documentView.frame.height
+            defer { lastDocumentHeight = documentHeight }
+
+            guard lastDocumentHeight.map({ abs($0 - documentHeight) > 0.5 }) ?? true else { return }
+            guard stickToBottom || pendingInitialRestore || !hasCompletedInitialRestore else { return }
+            scheduleDocumentReflowAdjustment()
         }
 
         private func scheduleLayoutScroll() {
@@ -1074,6 +1485,55 @@ private struct ConversationScrollBridge: NSViewRepresentable {
             }
         }
 
+        private func scheduleViewportResizeAdjustment() {
+            guard stickToBottom else { return }
+            viewportResizeTask?.cancel()
+            viewportResizeTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: .milliseconds(90))
+                } catch {
+                    return
+                }
+                guard let self else { return }
+                self.applyScrollPosition(
+                    desiredOffset: self.desiredOffset,
+                    stickToBottom: self.stickToBottom
+                )
+            }
+        }
+
+        private func scheduleDocumentReflowAdjustment() {
+            let restoreKey = activeRestoreKey
+            documentReflowTask?.cancel()
+            documentReflowTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: .milliseconds(75))
+                } catch {
+                    return
+                }
+                guard let self, self.activeRestoreKey == restoreKey else { return }
+                guard self.stickToBottom || self.pendingInitialRestore || !self.hasCompletedInitialRestore else {
+                    return
+                }
+                self.applyScrollPosition(
+                    desiredOffset: self.desiredOffset,
+                    stickToBottom: self.stickToBottom
+                )
+            }
+        }
+
+        private func scheduleScrollReport() {
+            scrollReportTask?.cancel()
+            scrollReportTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(for: .milliseconds(140))
+                } catch {
+                    return
+                }
+                self?.reportScrollPosition()
+            }
+        }
+
         private func reportScrollPosition() {
             guard let scrollView, let clipView else { return }
             let maxOffset = maximumOffset(for: scrollView)
@@ -1082,32 +1542,51 @@ private struct ConversationScrollBridge: NSViewRepresentable {
             onScrollChange(offset, maxOffset)
         }
 
-        private func maximumOffset(for scrollView: NSScrollView) -> CGFloat {
-            guard let documentView = scrollView.documentView else { return 0 }
-            return max(0, documentView.frame.height - scrollView.contentView.bounds.height)
-        }
-
-        private func attachDocumentObserverIfNeeded() {
-            guard let scrollView else { return }
-            let currentDocumentView = scrollView.documentView
-            guard documentView !== currentDocumentView else { return }
-
-            if observingDocumentFrame {
-                NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: documentView)
-                observingDocumentFrame = false
+        private func attachDocumentFrameObserverIfNeeded(to candidate: NSView?) {
+            guard let candidate else {
+                detachDocumentFrameObserver()
+                return
+            }
+            if let documentView, documentView === candidate {
+                return
             }
 
-            documentView = currentDocumentView
-
-            guard let currentDocumentView else { return }
-            currentDocumentView.postsFrameChangedNotifications = true
+            detachDocumentFrameObserver()
+            documentView = candidate
+            lastDocumentHeight = candidate.frame.height
+            documentPostedFrameChangesBeforeObservation = candidate.postsFrameChangedNotifications
+            candidate.postsFrameChangedNotifications = true
             NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(handleDocumentFrameDidChange),
                 name: NSView.frameDidChangeNotification,
-                object: currentDocumentView
+                object: candidate
             )
             observingDocumentFrame = true
+        }
+
+        private func detachDocumentFrameObserver() {
+            guard observingDocumentFrame else {
+                documentView = nil
+                lastDocumentHeight = nil
+                return
+            }
+            if let documentView {
+                NotificationCenter.default.removeObserver(
+                    self,
+                    name: NSView.frameDidChangeNotification,
+                    object: documentView
+                )
+                documentView.postsFrameChangedNotifications = documentPostedFrameChangesBeforeObservation
+            }
+            observingDocumentFrame = false
+            documentView = nil
+            lastDocumentHeight = nil
+        }
+
+        private func maximumOffset(for scrollView: NSScrollView) -> CGFloat {
+            guard let documentView = scrollView.documentView else { return 0 }
+            return max(0, documentView.frame.height - scrollView.contentView.bounds.height)
         }
 
         private func enclosingScrollView(from view: NSView) -> NSScrollView? {
@@ -1123,117 +1602,50 @@ private struct ConversationScrollBridge: NSViewRepresentable {
     }
 }
 
-private enum ConversationDisplayItem: Identifiable {
+private enum AssistantTurnChunk: Sendable {
+    case messages([ConversationMessage])
+    case question(
+        id: String,
+        question: ConversationMessage,
+        result: ConversationMessage?
+    )
+}
+
+private enum ConversationDisplayItem: Identifiable, Sendable {
     case message(ConversationMessage)
-    case toolGroup(id: UUID, messages: [ConversationMessage])
+    case workGroup(
+        id: String,
+        entries: [ConversationActivityEntry],
+        isActive: Bool,
+        summary: ConversationActivitySummary
+    )
+    case questionExchange(
+        id: String,
+        question: ConversationMessage,
+        result: ConversationMessage?
+    )
 
     var id: String {
         switch self {
         case .message(let message):
             "message-\(message.id.uuidString)"
-        case .toolGroup(let id, _):
-            "tool-group-\(id.uuidString)"
+        case .workGroup(let id, _, _, _):
+            id
+        case .questionExchange(let id, _, _):
+            id
         }
     }
 
     var scrollID: String { id }
-}
 
-private struct ToolActivityGroup: View {
-    let messages: [ConversationMessage]
-
-    var body: some View {
-        HStack(spacing: FXSpacing.sm) {
-            Image(systemName: "terminal")
-                .font(FXTypography.icon(.small))
-                .foregroundStyle(FXColors.fgTertiary)
-                .frame(width: 14)
-
-            Text(title)
-                .font(FXTypography.captionMedium)
-                .foregroundStyle(FXColors.fgTertiary)
-
-            if let detail {
-                Text("·")
-                    .font(FXTypography.caption)
-                    .foregroundStyle(FXColors.fgQuaternary)
-
-                Text(detail)
-                    .font(FXTypography.caption)
-                    .foregroundStyle(FXColors.fgTertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-
-            Spacer(minLength: 0)
+    var estimatedCacheCost: Int {
+        switch self {
+        case .message(let message):
+            1 + message.content.count
+        case .workGroup(_, let entries, _, _):
+            1 + entries.count
+        case .questionExchange(_, let question, let result):
+            1 + question.content.count + (result?.content.count ?? 0)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, FXSpacing.xxxs)
-        .opacity(0.68)
-        .accessibilityElement(children: .combine)
-    }
-
-    private var title: String {
-        let count = toolSummaries.count
-        guard count > 0 else { return "Used tools" }
-        return count == 1 ? "Used \(toolSummaries[0].name)" : "Used \(count) tools"
-    }
-
-    private var detail: String? {
-        let parts = toolSummaries
-            .compactMap(\.detail)
-            .prefix(3)
-
-        guard !parts.isEmpty else { return nil }
-        return parts.joined(separator: ", ")
-    }
-
-    private var toolSummaries: [(name: String, detail: String?)] {
-        messages.flatMap { message in
-            message.content.compactMap { content -> (name: String, detail: String?)? in
-                guard case .toolUse(_, let name, let input) = content else { return nil }
-                return (name, summarizedToolInput(name: name, input: input))
-            }
-        }
-    }
-
-    private func summarizedToolInput(name: String, input: String) -> String? {
-        guard !input.isEmpty, input != "{}" else { return nil }
-        guard let data = input.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return summarizedSingleLine(input)
-        }
-
-        switch name {
-        case "Read", "Edit", "Write":
-            return (json["file_path"] as? String).map(shortPathForDisplay)
-        case "Grep":
-            return json["pattern"] as? String
-        case "Glob":
-            return json["pattern"] as? String
-        case "Bash", "Command", "Shell", "commandExecution":
-            return (json["command"] as? String).map { summarizedSingleLine($0, limit: 96) }
-        default:
-            return summarizedSingleLine(input)
-        }
-    }
-
-    private func summarizedSingleLine(_ text: String, limit: Int = 96) -> String {
-        let flattened = text
-            .components(separatedBy: .newlines)
-            .first?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? text
-
-        if flattened.count <= limit {
-            return flattened
-        }
-
-        return String(flattened.prefix(limit - 1)) + "..."
-    }
-
-    private func shortPathForDisplay(_ path: String) -> String {
-        let components = path.split(separator: "/")
-        let tail = components.suffix(2)
-        return tail.isEmpty ? path : tail.joined(separator: "/")
     }
 }

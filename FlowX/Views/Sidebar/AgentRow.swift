@@ -10,8 +10,10 @@ struct ThreadRow: View {
     @Environment(AppState.self) private var appState
     @Bindable var agent: AgentInfo
     @Bindable var project: ProjectState
+    let currentDate: Date
 
     @State private var isHovered = false
+    @FocusState private var isFocused: Bool
 
     private var isSelected: Bool {
         appState.activeAgentID == agent.id
@@ -22,6 +24,8 @@ struct ThreadRow: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: selectThread)
         .focusable()
+        .focused($isFocused)
+        .focusEffectDisabled()
         .onKeyPress(.return) {
             selectThread()
             return .handled
@@ -84,13 +88,6 @@ struct ThreadRow: View {
             }
 
             HStack(alignment: .firstTextBaseline, spacing: FXSpacing.sm) {
-                Text(providerSourceLabel)
-                    .font(FXTypography.overline)
-                    .foregroundStyle(FXColors.fgQuaternary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: 72, alignment: .leading)
-
                 Text(threadPreview)
                     .font(FXTypography.caption)
                     .foregroundStyle(FXColors.fgTertiary)
@@ -100,10 +97,11 @@ struct ThreadRow: View {
 
                 if let activityLabel {
                     Text(activityLabel)
-                        .font(FXTypography.monoSmall)
+                        .font(FXTypography.caption)
                         .foregroundStyle(activityColor)
                         .lineLimit(1)
                         .fixedSize()
+                        .accessibilityLabel(activityAccessibilityLabel)
                 }
             }
 
@@ -116,7 +114,10 @@ struct ThreadRow: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.md)
-                .strokeBorder(isSelected ? FXColors.border : .clear, lineWidth: 0.5)
+                .strokeBorder(
+                    isFocused ? FXColors.accent : (isSelected ? FXColors.border : .clear),
+                    lineWidth: isFocused ? 1 : 0.5
+                )
         )
         .contentShape(Rectangle())
     }
@@ -314,18 +315,6 @@ struct ThreadRow: View {
         }
     }
 
-    private var providerSourceLabel: String {
-        guard let source = agent.nativeThreadBinding?.identity.providerSource,
-              !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return "DRAFT"
-        }
-
-        return source
-            .replacingOccurrences(of: "_", with: " ")
-            .replacingOccurrences(of: "-", with: " ")
-            .uppercased()
-    }
-
     private var displayTitle: String {
         let nativeTitle = agent.nativeThreadBinding?.title.trimmingCharacters(in: .whitespacesAndNewlines)
         if let nativeTitle, !nativeTitle.isEmpty {
@@ -370,7 +359,26 @@ struct ThreadRow: View {
             return nil
         }
 
-        return timestamp.formatted(.relative(presentation: .numeric, unitsStyle: .abbreviated))
+        let elapsed = max(0, currentDate.timeIntervalSince(timestamp))
+        switch elapsed {
+        case ..<60:
+            return "now"
+        case ..<3_600:
+            return "\(Int(elapsed / 60))m"
+        case ..<86_400:
+            return "\(Int(elapsed / 3_600))h"
+        case ..<604_800:
+            return "\(Int(elapsed / 86_400))d"
+        default:
+            return "\(Int(elapsed / 604_800))w"
+        }
+    }
+
+    private var activityAccessibilityLabel: String {
+        guard let timestamp = agent.nativeUpdatedAt ?? agent.messages.last?.timestamp else {
+            return ""
+        }
+        return "Updated \(timestamp.formatted(.relative(presentation: .numeric, unitsStyle: .wide)))"
     }
 
     private var activityColor: Color {
@@ -378,9 +386,7 @@ struct ThreadRow: View {
     }
 
     private func selectThread() {
-        withAnimation(FXAnimation.snappy) {
-            appState.activateAgent(agent.id, in: project.id)
-        }
+        appState.activateAgent(agent.id, in: project.id)
     }
 
     private func copyThreadID(_ sessionID: String) {

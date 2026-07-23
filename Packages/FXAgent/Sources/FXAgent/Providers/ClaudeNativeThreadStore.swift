@@ -8,28 +8,43 @@ actor ClaudeNativeThreadStore {
     private static let maximumSummaryBytes = 1 * 1_024 * 1_024
     static let defaultMaximumTranscriptBytes = 32 * 1_024 * 1_024
     static let defaultMaximumSummaryCacheEntries = 2_000
+    static let defaultMaximumTranscriptCacheEntries = 4
+    static let defaultMaximumTranscriptCacheBytes = 48 * 1_024 * 1_024
     private static let maximumJSONLineBytes = 4 * 1_024 * 1_024
+    private static let maximumTranscriptJSONLRecords = 512
+    private static let transcriptTailReadChunkBytes = 256 * 1_024
     private static let maximumMessages = 250
+    private static let maximumMessagesDuringParse = 512
+    private static let retainedMessagesAfterParseTrim = 320
     private let configuredRoot: URL?
     private let maximumTranscriptBytes: Int
     private let maximumThreadResults: Int
     private let maximumSummaryCacheEntries: Int
+    private let maximumTranscriptCacheEntries: Int
+    private let maximumTranscriptCacheBytes: Int
     private let trashHandler: TrashHandler
     private var summaryCache: [String: CachedSummary] = [:]
+    private var transcriptCache: [String: CachedTranscript] = [:]
     private var summaryParseCount = 0
+    private var transcriptParseCount = 0
     private var summaryAccessCounter: UInt64 = 0
+    private var transcriptAccessCounter: UInt64 = 0
 
     init(
         configRoot: URL? = nil,
         maximumTranscriptBytes: Int = ClaudeNativeThreadStore.defaultMaximumTranscriptBytes,
         maximumThreadResults: Int = ClaudeNativeThreadStore.defaultMaximumThreadResults,
         maximumSummaryCacheEntries: Int = ClaudeNativeThreadStore.defaultMaximumSummaryCacheEntries,
+        maximumTranscriptCacheEntries: Int = ClaudeNativeThreadStore.defaultMaximumTranscriptCacheEntries,
+        maximumTranscriptCacheBytes: Int = ClaudeNativeThreadStore.defaultMaximumTranscriptCacheBytes,
         trashHandler: @escaping TrashHandler = ClaudeNativeThreadStore.moveItemToTrash
     ) {
         configuredRoot = configRoot
         self.maximumTranscriptBytes = max(1, maximumTranscriptBytes)
         self.maximumThreadResults = max(1, maximumThreadResults)
         self.maximumSummaryCacheEntries = max(1, maximumSummaryCacheEntries)
+        self.maximumTranscriptCacheEntries = max(1, maximumTranscriptCacheEntries)
+        self.maximumTranscriptCacheBytes = max(1, maximumTranscriptCacheBytes)
         self.trashHandler = trashHandler
     }
 
@@ -44,6 +59,13 @@ actor ClaudeNativeThreadStore {
         var lastAccess: UInt64
     }
 
+    private struct CachedTranscript {
+        var fingerprint: FileFingerprint
+        var messages: [ConversationMessage]
+        var byteCost: Int
+        var lastAccess: UInt64
+    }
+
     private struct ParsedSession {
         var sessionID: String?
         var cwd: String?
@@ -51,6 +73,9 @@ actor ClaudeNativeThreadStore {
         var firstPrompt: String?
         var lastPrompt: String?
         var model: String?
+        var effort: String?
+        var agentMode: AgentMode?
+        var agentAccess: AgentAccess?
         var createdAt: Date?
         var updatedAt: Date?
         var messages: [ConversationMessage] = []
@@ -133,7 +158,11 @@ actor ClaudeNativeThreadStore {
         let configuredDirectory = try Self.standardizedDirectory(workingDirectory)
         let canonicalDirectory = configuredDirectory.resolvingSymlinksInPath().standardizedFileURL
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .creationDateKey, .contentModificationDateKey]
-        var match: (file: URL, summary: ProviderNativeThreadSummary)?
+        var match: (
+            file: URL,
+            summary: ProviderNativeThreadSummary,
+            fingerprint: FileFingerprint
+        )?
         for projectDirectory in projectDirectories(
             configuredDirectory: configuredDirectory,
             canonicalDirectory: canonicalDirectory
@@ -149,13 +178,34 @@ actor ClaudeNativeThreadStore {
                 continue
             }
             if match == nil || summary.updatedAt > match!.summary.updatedAt {
-                match = (file, summary)
+                match = (
+                    file,
+                    summary,
+                    FileFingerprint(
+                        size: values.fileSize ?? 0,
+                        modificationDate: values.contentModificationDate
+                    )
+                )
             }
         }
         guard let match else { throw Self.error("Claude Code session '\(id)' was not found for this workspace.") }
 
-        let data = try Self.readTailData(from: match.file, maximumBytes: maximumTranscriptBytes)
+        let cacheKey = match.file.standardizedFileURL.path
+        if var cached = transcriptCache[cacheKey],
+           cached.fingerprint == match.fingerprint {
+            transcriptAccessCounter &+= 1
+            cached.lastAccess = transcriptAccessCounter
+            transcriptCache[cacheKey] = cached
+            return ProviderNativeThread(summary: match.summary, messages: cached.messages)
+        }
+
+        let data = try Self.readTailData(
+            from: match.file,
+            maximumBytes: maximumTranscriptBytes,
+            maximumRecords: Self.maximumTranscriptJSONLRecords
+        )
         try Task.checkCancellation()
+        transcriptParseCount += 1
         let parsed = try Self.parse(data: data, includeMessages: true)
         if let parsedCWD = parsed.cwd,
            Self.canonicalPath(parsedCWD) != canonicalDirectory.path {
@@ -164,7 +214,9 @@ actor ClaudeNativeThreadStore {
         guard parsed.sessionID == nil || parsed.sessionID == id else {
             throw Self.error("Claude Code session '\(id)' does not belong to this workspace.")
         }
-        return ProviderNativeThread(summary: match.summary, messages: Array(parsed.messages.suffix(Self.maximumMessages)))
+        let messages = Array(parsed.messages.suffix(Self.maximumMessages))
+        cacheTranscript(messages, key: cacheKey, fingerprint: match.fingerprint)
+        return ProviderNativeThread(summary: match.summary, messages: messages)
     }
 
     func moveToTrash(
@@ -233,6 +285,7 @@ actor ClaudeNativeThreadStore {
         }
         for transcriptPath in matchedTranscriptPaths {
             summaryCache[transcriptPath] = nil
+            transcriptCache[transcriptPath] = nil
         }
     }
 
@@ -240,9 +293,17 @@ actor ClaudeNativeThreadStore {
         (summaryCache.count, summaryParseCount)
     }
 
+    func transcriptCacheStatisticsForTesting() -> (entries: Int, parses: Int) {
+        (transcriptCache.count, transcriptParseCount)
+    }
+
     private func pruneSummaryCache(in projectDirectory: URL, keeping paths: Set<String>) {
         let projectPath = projectDirectory.standardizedFileURL.path
         summaryCache = summaryCache.filter { path, _ in
+            URL(fileURLWithPath: path).deletingLastPathComponent().standardizedFileURL.path != projectPath
+                || paths.contains(path)
+        }
+        transcriptCache = transcriptCache.filter { path, _ in
             URL(fileURLWithPath: path).deletingLastPathComponent().standardizedFileURL.path != projectPath
                 || paths.contains(path)
         }
@@ -287,7 +348,9 @@ actor ClaudeNativeThreadStore {
                 createdAt: createdAt,
                 updatedAt: updatedAt,
                 model: parsed.model,
-                effort: nil,
+                effort: parsed.effort,
+                agentMode: parsed.agentMode,
+                agentAccess: parsed.agentAccess,
                 status: "native",
                 source: "claude-jsonl"
             )
@@ -321,8 +384,77 @@ actor ClaudeNativeThreadStore {
         }
     }
 
+    private func cacheTranscript(
+        _ messages: [ConversationMessage],
+        key: String,
+        fingerprint: FileFingerprint
+    ) {
+        let byteCost = Self.transcriptByteCost(messages)
+        guard byteCost <= maximumTranscriptCacheBytes else {
+            transcriptCache[key] = nil
+            return
+        }
+        transcriptAccessCounter &+= 1
+        transcriptCache[key] = CachedTranscript(
+            fingerprint: fingerprint,
+            messages: messages,
+            byteCost: byteCost,
+            lastAccess: transcriptAccessCounter
+        )
+        trimTranscriptCacheIfNeeded()
+    }
+
+    private func trimTranscriptCacheIfNeeded() {
+        var totalBytes = transcriptCache.values.reduce(0) { $0 + $1.byteCost }
+        guard transcriptCache.count > maximumTranscriptCacheEntries
+                || totalBytes > maximumTranscriptCacheBytes else {
+            return
+        }
+
+        let oldestKeys = transcriptCache.sorted {
+            if $0.value.lastAccess != $1.value.lastAccess {
+                return $0.value.lastAccess < $1.value.lastAccess
+            }
+            return $0.key < $1.key
+        }.map(\.key)
+
+        for key in oldestKeys {
+            guard transcriptCache.count > maximumTranscriptCacheEntries
+                    || totalBytes > maximumTranscriptCacheBytes else {
+                break
+            }
+            if let removed = transcriptCache.removeValue(forKey: key) {
+                totalBytes -= removed.byteCost
+            }
+        }
+    }
+
+    private static func transcriptByteCost(_ messages: [ConversationMessage]) -> Int {
+        messages.reduce(0) { total, message in
+            total + message.content.reduce(0) { contentTotal, content in
+                let byteCost: Int
+                switch content {
+                case .text(let text):
+                    byteCost = text.utf8.count
+                case .code(let language, let code):
+                    byteCost = language.utf8.count + code.utf8.count
+                case .image(let data, let mimeType):
+                    byteCost = data.count + mimeType.utf8.count
+                case .imageAsset(let reference):
+                    byteCost = reference.byteCount
+                case .toolUse(let id, let name, let input):
+                    byteCost = id.utf8.count + name.utf8.count + input.utf8.count
+                case .toolResult(let id, let content, _):
+                    byteCost = id.utf8.count + content.utf8.count
+                }
+                return contentTotal + byteCost
+            }
+        }
+    }
+
     private static func parse(data: Data, includeMessages: Bool) throws -> ParsedSession {
         var parsed = ParsedSession()
+        var remainingImageBytes = ProviderNativeImageImporter.maximumTranscriptImageBytes
         var lineStart = data.startIndex
         var lineCount = 0
         while lineStart < data.endIndex {
@@ -343,6 +475,18 @@ actor ClaudeNativeThreadStore {
                 parsed.createdAt = min(parsed.createdAt ?? timestamp, timestamp)
                 parsed.updatedAt = max(parsed.updatedAt ?? timestamp, timestamp)
             }
+            if object.keys.contains("model") {
+                parsed.model = nonEmpty(object["model"] as? String)
+            }
+            if object.keys.contains("effort") {
+                parsed.effort = nonEmpty(object["effort"] as? String)
+            }
+            if object.keys.contains("mode") {
+                parsed.agentMode = agentMode(fromClaudeMode: object["mode"])
+            }
+            if object.keys.contains("permissionMode") {
+                parsed.agentAccess = agentAccess(fromClaudePermissionMode: object["permissionMode"])
+            }
 
             switch type {
             case "ai-title":
@@ -358,8 +502,30 @@ actor ClaudeNativeThreadStore {
             case "last-prompt":
                 if let prompt = object["lastPrompt"] as? String { parsed.lastPrompt = prompt }
             case "user":
+                // Claude writes provider-owned context (image dimensions,
+                // local-command caveats, expanded skill text, and attachment
+                // payloads) as user-shaped records. They are linked into the
+                // native transcript for Claude's context, but are not prompts
+                // the user authored and Claude's own UI does not render them
+                // as dialogue.
+                guard object["isMeta"] as? Bool != true else { continue }
                 guard let message = object["message"] as? [String: Any] else { continue }
-                let contents = userContents(message["content"])
+                let contents = userContents(
+                    message["content"],
+                    importImages: includeMessages,
+                    remainingImageBytes: &remainingImageBytes
+                )
+                if includeMessages,
+                   let toolUseResult = object["toolUseResult"] as? [String: Any],
+                   let structuredPatch = toolUseResult["structuredPatch"] as? [Any],
+                   !structuredPatch.isEmpty {
+                    enrichMatchingEditToolUse(
+                        messages: &parsed.messages,
+                        resultContents: contents,
+                        parentUUID: object["parentUuid"] as? String,
+                        structuredPatch: structuredPatch
+                    )
+                }
                 let promptText = contents.compactMap { content -> String? in
                     if case .text(let text) = content { return text }
                     return nil
@@ -381,7 +547,9 @@ actor ClaudeNativeThreadStore {
                 ))
             case "assistant":
                 guard let message = object["message"] as? [String: Any] else { continue }
-                if let model = message["model"] as? String { parsed.model = model }
+                if message.keys.contains("model") {
+                    parsed.model = nonEmpty(message["model"] as? String)
+                }
                 guard includeMessages else { continue }
                 let contents = assistantContents(message["content"])
                 guard !contents.isEmpty else { continue }
@@ -394,12 +562,46 @@ actor ClaudeNativeThreadStore {
             default:
                 continue
             }
+
+            if includeMessages, parsed.messages.count > maximumMessagesDuringParse {
+                parsed.messages.removeFirst(
+                    parsed.messages.count - retainedMessagesAfterParseTrim
+                )
+            }
         }
         try Task.checkCancellation()
         return parsed
     }
 
-    private static func userContents(_ value: Any?) -> [MessageContent] {
+    private static func agentMode(fromClaudeMode value: Any?) -> AgentMode? {
+        switch value as? String {
+        case "normal", "default":
+            return .auto
+        case "plan":
+            return .plan
+        default:
+            return nil
+        }
+    }
+
+    private static func agentAccess(fromClaudePermissionMode value: Any?) -> AgentAccess? {
+        switch value as? String {
+        case "bypassPermissions":
+            return .fullAccess
+        case "acceptEdits":
+            return .acceptEdits
+        case "default", "supervised":
+            return .supervised
+        default:
+            return nil
+        }
+    }
+
+    private static func userContents(
+        _ value: Any?,
+        importImages: Bool,
+        remainingImageBytes: inout Int
+    ) -> [MessageContent] {
         if let text = value as? String {
             return nonEmpty(text).map { [.text(bounded($0, maximum: 256 * 1_024))] } ?? []
         }
@@ -418,7 +620,18 @@ actor ClaudeNativeThreadStore {
                     isError: block["is_error"] as? Bool ?? false
                 )
             case "image":
-                return .text("[Image]")
+                guard importImages,
+                      let source = block["source"] as? [String: Any],
+                      source["type"] as? String == "base64",
+                      let mimeType = source["media_type"] as? String,
+                      let encoded = source["data"] as? String else {
+                    return nil
+                }
+                return ProviderNativeImageImporter.base64(
+                    encoded,
+                    mimeType: mimeType,
+                    remainingBytes: &remainingImageBytes
+                )
             default:
                 return nil
             }
@@ -437,10 +650,49 @@ actor ClaudeNativeThreadStore {
                 return .toolUse(
                     id: block["id"] as? String ?? "",
                     name: block["name"] as? String ?? "Tool",
-                    input: bounded(jsonString(block["input"]) ?? "{}", maximum: 32_768)
+                    input: boundedJSONString(block["input"], maximum: 32_768)
                 )
             default:
                 return nil
+            }
+        }
+    }
+
+    private static func enrichMatchingEditToolUse(
+        messages: inout [ConversationMessage],
+        resultContents: [MessageContent],
+        parentUUID: String?,
+        structuredPatch: [Any]
+    ) {
+        let resultToolIDs = Set(resultContents.compactMap { content -> String? in
+            guard case .toolResult(let id, _, _) = content, !id.isEmpty else { return nil }
+            return id
+        })
+        let parentMessageID = parentUUID.flatMap(UUID.init(uuidString:))
+        guard !resultToolIDs.isEmpty || parentMessageID != nil else { return }
+
+        for messageIndex in messages.indices.reversed() {
+            if let parentMessageID,
+               messages[messageIndex].id != parentMessageID {
+                continue
+            }
+            for contentIndex in messages[messageIndex].content.indices.reversed() {
+                guard case .toolUse(let id, let name, let input) =
+                    messages[messageIndex].content[contentIndex],
+                    name.caseInsensitiveCompare("Edit") == .orderedSame,
+                    resultToolIDs.isEmpty || resultToolIDs.contains(id),
+                    let inputData = input.data(using: .utf8),
+                    var inputObject = try? JSONSerialization.jsonObject(with: inputData) as? [String: Any]
+                else {
+                    continue
+                }
+                inputObject["_flowxStructuredPatch"] = structuredPatch
+                messages[messageIndex].content[contentIndex] = .toolUse(
+                    id: id,
+                    name: name,
+                    input: boundedJSONString(inputObject, maximum: 32_768)
+                )
+                return
             }
         }
     }
@@ -457,16 +709,113 @@ actor ClaudeNativeThreadStore {
         return head + Data([0x0A]) + tail
     }
 
-    private static func readTailData(from url: URL, maximumBytes: Int) throws -> Data {
-        let values = try url.resourceValues(forKeys: [.fileSizeKey])
-        let size = values.fileSize ?? 0
-        guard size > maximumBytes else { return try Data(contentsOf: url, options: [.mappedIfSafe]) }
+    private static func readTailData(
+        from url: URL,
+        maximumBytes: Int,
+        maximumRecords: Int
+    ) throws -> Data {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
-        try handle.seek(toOffset: UInt64(size - maximumBytes))
-        var data = try handle.readToEnd() ?? Data()
-        if let newline = data.firstIndex(of: 0x0A) { data.removeSubrange(data.startIndex...newline) }
-        return data
+        let size = Int(try handle.seekToEnd())
+        guard size > 0, maximumBytes > 0, maximumRecords > 0 else { return Data() }
+
+        let earliestOffset = max(0, size - maximumBytes)
+        var readOffset = size
+        var newlineCount = 0
+        var reverseChunks: [Data] = []
+
+        // Read backward until there are enough delimiters to isolate the
+        // requested number of complete JSONL records. One extra delimiter
+        // supplies the boundary before the oldest retained record whether or
+        // not the file currently ends in a newline.
+        while readOffset > earliestOffset, newlineCount <= maximumRecords {
+            try Task.checkCancellation()
+            let chunkStart = max(
+                earliestOffset,
+                readOffset - Self.transcriptTailReadChunkBytes
+            )
+            try handle.seek(toOffset: UInt64(chunkStart))
+            let chunk = try handle.read(upToCount: readOffset - chunkStart) ?? Data()
+            guard !chunk.isEmpty else { break }
+            newlineCount += chunk.reduce(into: 0) { count, byte in
+                if byte == 0x0A { count += 1 }
+            }
+            reverseChunks.append(chunk)
+            readOffset = chunkStart
+        }
+
+        let byteCount = reverseChunks.reduce(0) { $0 + $1.count }
+        var data = Data()
+        data.reserveCapacity(byteCount)
+        for chunk in reverseChunks.reversed() {
+            data.append(chunk)
+        }
+
+        return completeJSONLRecordSuffix(
+            from: data,
+            maximumRecords: maximumRecords,
+            startsAtFileBeginning: readOffset == 0
+        )
+    }
+
+    private static func completeJSONLRecordSuffix(
+        from data: Data,
+        maximumRecords: Int,
+        startsAtFileBeginning: Bool
+    ) -> Data {
+        guard !data.isEmpty, maximumRecords > 0 else { return Data() }
+
+        // A byte-window or chunk boundary can land inside a large JSON object.
+        // Only the first segment is ambiguous; every segment after its newline
+        // is known to be a complete record.
+        let earliestCompleteStart: Data.Index
+        if startsAtFileBeginning {
+            earliestCompleteStart = data.startIndex
+        } else if let firstNewline = data.firstIndex(of: 0x0A) {
+            earliestCompleteStart = data.index(after: firstNewline)
+        } else {
+            return Data()
+        }
+
+        guard earliestCompleteStart < data.endIndex else { return Data() }
+
+        var selectedStart: Data.Index?
+        var recordCount = 0
+        var lineEnd = data.endIndex
+        var cursor = data.endIndex
+
+        while cursor > earliestCompleteStart {
+            let index = data.index(before: cursor)
+            if data[index] == 0x0A {
+                let lineStart = data.index(after: index)
+                if lineStart < lineEnd {
+                    selectedStart = lineStart
+                    recordCount += 1
+                    if recordCount == maximumRecords { break }
+                }
+                lineEnd = index
+            }
+            cursor = index
+        }
+
+        if recordCount < maximumRecords, earliestCompleteStart < lineEnd {
+            selectedStart = earliestCompleteStart
+        }
+
+        guard let selectedStart else { return Data() }
+        return Data(data[selectedStart..<data.endIndex])
+    }
+
+    static func readTailDataForTesting(
+        from url: URL,
+        maximumBytes: Int,
+        maximumRecords: Int
+    ) throws -> Data {
+        try readTailData(
+            from: url,
+            maximumBytes: maximumBytes,
+            maximumRecords: maximumRecords
+        )
     }
 
     private func projectDirectories(
@@ -552,6 +901,63 @@ actor ClaudeNativeThreadStore {
         guard let value, JSONSerialization.isValidJSONObject(value),
               let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) else { return nil }
         return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func boundedJSONString(_ value: Any?, maximum: Int) -> String {
+        guard let value, let serialized = jsonString(value) else { return "{}" }
+        guard serialized.utf8.count > maximum else { return serialized }
+
+        // Bound string fields before encoding instead of cutting an encoded
+        // JSON document in half. That keeps imported tool input parseable and
+        // preserves small structural fields such as paths and diff line
+        // numbers even when old/new source bodies are very large.
+        var fieldLimit = maximum
+        while fieldLimit > 0 {
+            let candidateValue = boundingJSONStrings(in: value, maximum: fieldLimit)
+            if let candidate = jsonString(candidateValue),
+               candidate.utf8.count <= maximum {
+                return candidate
+            }
+            fieldLimit /= 2
+        }
+        let minimalValue = boundingJSONStrings(in: value, maximum: 0)
+        if let candidate = jsonString(minimalValue), candidate.utf8.count <= maximum {
+            return candidate
+        }
+        return #"{"_flowxPayloadTruncated":true}"#
+    }
+
+    private static func boundingJSONStrings(in value: Any, maximum: Int) -> Any {
+        if let string = value as? String {
+            return boundedJSONField(string, maximum: maximum)
+        }
+        if let dictionary = value as? [String: Any] {
+            return dictionary.mapValues { boundingJSONStrings(in: $0, maximum: maximum) }
+        }
+        if let array = value as? [Any] {
+            return array.map { boundingJSONStrings(in: $0, maximum: maximum) }
+        }
+        return value
+    }
+
+    private static func boundedJSONField(_ value: String, maximum: Int) -> String {
+        guard value.utf8.count > maximum else { return value }
+        guard maximum > 0 else { return "" }
+        let marker = "… [historic provider field truncated]"
+        let markerBytes = marker.utf8.count
+        guard maximum > markerBytes else { return "" }
+
+        let prefixMaximum = maximum - markerBytes
+        var bytes = 0
+        var end = value.startIndex
+        while end < value.endIndex {
+            let next = value.index(after: end)
+            let characterBytes = value[end..<next].utf8.count
+            guard bytes + characterBytes <= prefixMaximum else { break }
+            bytes += characterBytes
+            end = next
+        }
+        return String(value[..<end]) + marker
     }
 
     private static func bounded(_ value: String, maximum: Int) -> String {

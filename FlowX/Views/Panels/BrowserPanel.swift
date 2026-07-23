@@ -3,6 +3,53 @@ import WebKit
 import FXDesign
 
 @MainActor
+final class BrowserSessionCache {
+    private let capacity: Int
+    private var models: [UUID: BrowserViewModel] = [:]
+    private var recency: [UUID] = []
+
+    init(capacity: Int = 3) {
+        self.capacity = max(1, capacity)
+    }
+
+    func model(for agentID: UUID) -> BrowserViewModel {
+        if let model = models[agentID] {
+            markRecentlyUsed(agentID)
+            return model
+        }
+
+        let model = BrowserViewModel()
+        models[agentID] = model
+        markRecentlyUsed(agentID)
+        evictIfNeeded()
+        return model
+    }
+
+    func remove(_ agentID: UUID) {
+        recency.removeAll { $0 == agentID }
+        models.removeValue(forKey: agentID)?.dispose()
+    }
+
+    func remove<S: Sequence>(_ agentIDs: S) where S.Element == UUID {
+        for agentID in agentIDs {
+            remove(agentID)
+        }
+    }
+
+    private func markRecentlyUsed(_ agentID: UUID) {
+        recency.removeAll { $0 == agentID }
+        recency.append(agentID)
+    }
+
+    private func evictIfNeeded() {
+        while models.count > capacity, let oldestID = recency.first {
+            recency.removeFirst()
+            models.removeValue(forKey: oldestID)?.dispose()
+        }
+    }
+}
+
+@MainActor
 final class BrowserViewModel: NSObject, ObservableObject {
     @Published var urlText: String = ""
     @Published var pageTitle: String = ""
@@ -11,10 +58,11 @@ final class BrowserViewModel: NSObject, ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
 
-    private weak var webView: WKWebView?
+    private var webView: WKWebView?
     private var attachedWebViewID: ObjectIdentifier?
     private var lastCommittedURLString = ""
     private var pendingURLString: String?
+    private var isClearingPage = false
     private var onCommittedURLChange: ((String) -> Void)?
 
     func setCommittedURLChangeHandler(_ onCommittedURLChange: @escaping (String) -> Void) {
@@ -64,6 +112,21 @@ final class BrowserViewModel: NSObject, ObservableObject {
         }
     }
 
+    func makeOrReuseWebView() -> WKWebView {
+        if let webView {
+            attach(webView: webView)
+            return webView
+        }
+
+        let configuration = WKWebViewConfiguration()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.underPageBackgroundColor = .clear
+        attach(webView: webView)
+        return webView
+    }
+
     func loadCurrentInput() {
         load(urlText)
     }
@@ -78,6 +141,7 @@ final class BrowserViewModel: NSObject, ObservableObject {
     }
 
     func clearPage(propagateChange: Bool = true) {
+        isClearingPage = true
         urlText = ""
         pageTitle = ""
         canGoBack = false
@@ -91,16 +155,32 @@ final class BrowserViewModel: NSObject, ObservableObject {
             onCommittedURLChange?("")
         }
 
-        guard let webView else { return }
+        guard let webView else {
+            isClearingPage = false
+            return
+        }
         webView.stopLoading()
         webView.loadHTMLString("", baseURL: nil)
     }
 
+    func dispose() {
+        webView?.stopLoading()
+        webView?.navigationDelegate = nil
+        webView?.removeFromSuperview()
+        webView = nil
+        attachedWebViewID = nil
+        pendingURLString = nil
+        isClearingPage = false
+        onCommittedURLChange = nil
+        isLoading = false
+    }
+
     var hasPage: Bool {
-        !urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !isClearingPage
+            && (!urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !lastCommittedURLString.isEmpty
-            || webView?.url != nil
-            || isLoading
+            || isPreviewURL(webView?.url)
+            || isLoading)
     }
 
     func goBack() {
@@ -124,6 +204,7 @@ final class BrowserViewModel: NSObject, ObservableObject {
         }
 
         let normalized = url.absoluteString
+        isClearingPage = false
         errorMessage = nil
         urlText = normalized
         pendingURLString = normalized
@@ -171,22 +252,41 @@ final class BrowserViewModel: NSObject, ObservableObject {
     }
 
     private func syncNavigationState() {
+        if isClearingPage {
+            canGoBack = false
+            canGoForward = false
+            urlText = ""
+            pageTitle = ""
+            lastCommittedURLString = ""
+            pendingURLString = nil
+            if webView?.isLoading != true, webView?.url?.absoluteString == "about:blank" {
+                isClearingPage = false
+            }
+            return
+        }
+
         canGoBack = webView?.canGoBack ?? false
         canGoForward = webView?.canGoForward ?? false
         pageTitle = webView?.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             ? webView?.title ?? ""
             : ""
 
-        if let currentURL = webView?.url?.absoluteString, !currentURL.isEmpty {
-            urlText = currentURL
-            if lastCommittedURLString != currentURL {
-                lastCommittedURLString = currentURL
-                onCommittedURLChange?(currentURL)
+        if let currentURL = webView?.url, isPreviewURL(currentURL) {
+            let currentURLString = currentURL.absoluteString
+            urlText = currentURLString
+            if lastCommittedURLString != currentURLString {
+                lastCommittedURLString = currentURLString
+                onCommittedURLChange?(currentURLString)
             }
         } else if webView?.isLoading != true {
             urlText = ""
             lastCommittedURLString = ""
         }
+    }
+
+    private func isPreviewURL(_ url: URL?) -> Bool {
+        guard let scheme = url?.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
     }
 
     private func presentNavigationError(_ error: Error) {
@@ -260,13 +360,7 @@ struct BrowserWebView: NSViewRepresentable {
     @ObservedObject var model: BrowserViewModel
 
     func makeNSView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.underPageBackgroundColor = .clear
-        model.attach(webView: webView)
-        return webView
+        model.makeOrReuseWebView()
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {}
@@ -275,7 +369,12 @@ struct BrowserWebView: NSViewRepresentable {
 struct BrowserPanel: View {
     let agent: AgentInfo
 
-    @StateObject private var browser = BrowserViewModel()
+    @ObservedObject private var browser: BrowserViewModel
+
+    init(agent: AgentInfo, browser: BrowserViewModel) {
+        self.agent = agent
+        _browser = ObservedObject(wrappedValue: browser)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -289,8 +388,12 @@ struct BrowserPanel: View {
             }
 
             ZStack(alignment: .topTrailing) {
-                BrowserWebView(model: browser)
-                    .background(FXColors.panelBg)
+                if browser.hasPage {
+                    BrowserWebView(model: browser)
+                        .background(FXColors.panelBg)
+                } else {
+                    emptyBrowserState
+                }
 
                 if browser.isLoading {
                     ProgressView()
@@ -328,6 +431,7 @@ struct BrowserPanel: View {
                 .padding(.vertical, FXSpacing.xxs)
                 .background(FXColors.bgSurface)
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
+                .focusEffectDisabled()
                 .accessibilityLabel("Browser address")
                 .onSubmit(browser.loadCurrentInput)
 
@@ -372,5 +476,26 @@ struct BrowserPanel: View {
         .padding(.vertical, FXSpacing.sm)
         .background(FXColors.warning.opacity(0.08))
         .accessibilityElement(children: .contain)
+    }
+
+    private var emptyBrowserState: some View {
+        VStack(spacing: FXSpacing.md) {
+            Image(systemName: "globe")
+                .font(FXTypography.icon(.illustration))
+                .foregroundStyle(FXColors.fgQuaternary)
+
+            VStack(spacing: FXSpacing.xs) {
+                Text("Open a preview")
+                    .font(FXTypography.bodyMedium)
+                    .foregroundStyle(FXColors.fgSecondary)
+
+                Text("Enter a local or web address above")
+                    .font(FXTypography.caption)
+                    .foregroundStyle(FXColors.fgTertiary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(FXColors.panelBg)
+        .accessibilityElement(children: .combine)
     }
 }

@@ -3,10 +3,14 @@ import FXCore
 
 @MainActor
 public final class ConversationService {
-    nonisolated private static let streamFlushInterval: TimeInterval = 1.0 / 30.0
-    nonisolated private static let streamFlushCharacterThreshold = 512
+    // Text remains visibly fluid while avoiding a full transcript relayout for
+    // every tiny provider delta. Twenty UI publications per second is faster
+    // than users can read and leaves substantially more main-thread headroom.
+    nonisolated private static let streamFlushInterval: TimeInterval = 1.0 / 20.0
+    nonisolated private static let streamFlushCharacterThreshold = 1_024
     nonisolated private static let maxQueuedRequestsPerConversation = 20
     nonisolated private static let maxQueuedAttachmentBytesPerConversation = 64 * 1_024 * 1_024
+    nonisolated private static let toolInputExecutor = BoundedTaskExecutor(maxConcurrentTasks: 2)
 
     private struct PendingRequest {
         var prompt: String
@@ -452,6 +456,7 @@ public final class ConversationService {
             request.onStart?()
         }
 
+        conversationState.beginToolTracking()
         conversationState.startStreaming(providerID: request.providerID, modelID: request.model)
 
         guard let provider = registry.provider(for: request.providerID) else {
@@ -612,11 +617,19 @@ public final class ConversationService {
 
                     case .toolUse(let id, let name, let input):
                         flushPendingStreamDelta()
+                        let retainedInput: String
+                        do {
+                            retainedInput = try await Self.toolInputExecutor.run(priority: .utility) {
+                                try Self.cancellableRetainedToolInput(input, limit: 32_768)
+                            }
+                        } catch {
+                            break
+                        }
                         conversationState.recordRuntimeActivity(
                             kind: .tool,
                             tone: .working,
                             summary: name,
-                            detail: Self.toolInputSummary(name: name, input: input),
+                            detail: Self.toolInputSummary(name: name, input: retainedInput),
                             state: "started",
                             turnID: conversationState.activeTurnID
                         )
@@ -632,11 +645,16 @@ public final class ConversationService {
                         conversationState.appendMessage(
                             ConversationMessage(
                                 role: .assistant,
-                                content: [.toolUse(id: id, name: name, input: Self.truncatedPayload(input, limit: 32_768))]
+                                content: [.toolUse(
+                                    id: id,
+                                    name: name,
+                                    input: retainedInput
+                                )]
                             )
                         )
 
                     case .toolResult(let id, let content, let isError):
+                        conversationState.markToolCompleted(id)
                         conversationState.recordRuntimeActivity(
                             kind: .tool,
                             tone: isError ? .error : .success,
@@ -881,6 +899,103 @@ public final class ConversationService {
 
         let endIndex = normalized.index(normalized.startIndex, offsetBy: limit)
         return String(normalized[..<endIndex]) + "…"
+    }
+
+    /// Keeps live tool input parseable after retention bounding. Cutting an
+    /// encoded JSON string at an arbitrary byte produced malformed Edit/Write
+    /// payloads, which meant the transcript could no longer render their code.
+    nonisolated static func retainedToolInput(_ text: String, limit: Int) -> String {
+        (try? cancellableRetainedToolInput(text, limit: limit))
+            ?? truncatedPayload(text, limit: limit)
+    }
+
+    nonisolated private static func cancellableRetainedToolInput(
+        _ text: String,
+        limit: Int
+    ) throws -> String {
+        try Task.checkCancellation()
+        guard text.utf8.count > limit else { return text }
+        guard let data = text.data(using: .utf8),
+              let value = try? JSONSerialization.jsonObject(with: data),
+              JSONSerialization.isValidJSONObject(value) else {
+            return truncatedPayload(text, limit: limit)
+        }
+        try Task.checkCancellation()
+
+        var fieldLimit = limit
+        while fieldLimit > 0 {
+            try Task.checkCancellation()
+            let boundedValue = try boundingJSONStrings(in: value, maximum: fieldLimit)
+            if let candidate = serializedJSONString(boundedValue),
+               candidate.utf8.count <= limit {
+                return candidate
+            }
+            fieldLimit /= 2
+        }
+
+        try Task.checkCancellation()
+        let minimalValue = try boundingJSONStrings(in: value, maximum: 0)
+        return serializedJSONString(minimalValue)
+            .flatMap { $0.utf8.count <= limit ? $0 : nil }
+            ?? #"{"_flowxPayloadTruncated":true}"#
+    }
+
+    nonisolated private static func serializedJSONString(_ value: Any) -> String? {
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) else {
+            return nil
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    nonisolated private static func boundingJSONStrings(in value: Any, maximum: Int) throws -> Any {
+        try Task.checkCancellation()
+        if let string = value as? String {
+            return try boundedJSONField(string, maximum: maximum)
+        }
+        if let dictionary = value as? [String: Any] {
+            var bounded: [String: Any] = [:]
+            bounded.reserveCapacity(dictionary.count)
+            for (key, nestedValue) in dictionary {
+                bounded[key] = try boundingJSONStrings(in: nestedValue, maximum: maximum)
+            }
+            return bounded
+        }
+        if let array = value as? [Any] {
+            var bounded: [Any] = []
+            bounded.reserveCapacity(array.count)
+            for nestedValue in array {
+                bounded.append(try boundingJSONStrings(in: nestedValue, maximum: maximum))
+            }
+            return bounded
+        }
+        return value
+    }
+
+    nonisolated private static func boundedJSONField(_ value: String, maximum: Int) throws -> String {
+        guard value.utf8.count > maximum else { return value }
+        guard maximum > 0 else { return "" }
+
+        let marker = "… [FlowX retained field truncated]"
+        let markerBytes = marker.utf8.count
+        guard maximum > markerBytes else { return "" }
+
+        let prefixMaximum = maximum - markerBytes
+        var byteCount = 0
+        var end = value.startIndex
+        var characterCount = 0
+        while end < value.endIndex {
+            if characterCount.isMultiple(of: 1_024) {
+                try Task.checkCancellation()
+            }
+            let next = value.index(after: end)
+            let characterBytes = value[end..<next].utf8.count
+            guard byteCount + characterBytes <= prefixMaximum else { break }
+            byteCount += characterBytes
+            end = next
+            characterCount += 1
+        }
+        return String(value[..<end]) + marker
     }
 
     nonisolated private static func truncatedPayload(_ text: String, limit: Int) -> String {

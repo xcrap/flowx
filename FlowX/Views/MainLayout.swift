@@ -16,9 +16,7 @@ struct DragHandle: NSViewRepresentable {
 
 struct MainLayout: View {
     @Environment(AppState.self) private var appState
-    @State private var rightPanelDragStartWidth: CGFloat?
-    @State private var liveRightPanelWidth: CGFloat?
-    @State private var rightPanelHandleHovered = false
+    @State private var rightPanelResizePreview: CGFloat?
 
     private let rightPanelHandleWidth: CGFloat = 5
     private let titleBarHeight: CGFloat = 44
@@ -36,26 +34,21 @@ struct MainLayout: View {
                         if appState.sidebarVisible {
                             SidebarView()
                                 .frame(width: 260)
-                                .transition(.move(edge: .leading))
                             FXDivider(.vertical)
                         }
 
                         ContentAreaView()
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                        if appState.activeProjectCanShowGitPanel || appState.rightPanelVisible {
+                        if appState.rightPanelVisible {
                             rightPanelContainer(totalWidth: geometry.size.width)
                         }
                     }
-                    .animation(FXAnimation.panel, value: appState.sidebarVisible)
-                    .animation(FXAnimation.panel, value: appState.rightPanelVisible)
-                    .animation(FXAnimation.panel, value: appState.settingsVisible)
                 }
 
                 if appState.settingsVisible {
                     settingsOverlay(totalSize: geometry.size)
                         .padding(.top, titleBarHeight)
-                        .transition(.move(edge: .trailing))
                         .zIndex(5)
                 }
 
@@ -73,6 +66,9 @@ struct MainLayout: View {
             }
         }
         .ignoresSafeArea()
+        .onDisappear {
+            clearRightPanelResizePreview()
+        }
     }
 
     private func rightPanel(totalWidth: CGFloat) -> some View {
@@ -86,17 +82,7 @@ struct MainLayout: View {
     }
 
     private func rightPanelContainer(totalWidth: CGFloat) -> some View {
-        let expandedWidth = displayedRightPanelWidth(in: totalWidth)
-        let sheetWidth = expandedWidth
-        let visibleWidth = appState.rightPanelVisible ? sheetWidth : 0
-
-        return rightPanel(totalWidth: totalWidth)
-        .frame(width: sheetWidth, alignment: .trailing)
-        .offset(x: appState.rightPanelVisible ? 0 : sheetWidth)
-        .frame(width: visibleWidth, alignment: .trailing)
-        .clipped()
-        .compositingGroup()
-        .allowsHitTesting(appState.rightPanelVisible)
+        rightPanel(totalWidth: totalWidth)
     }
 
     private func settingsOverlay(totalSize: CGSize) -> some View {
@@ -110,56 +96,35 @@ struct MainLayout: View {
     }
 
     private func rightPanelResizeHandle(totalWidth: CGFloat) -> some View {
-        Rectangle()
-            .fill(.clear)
-            .frame(width: rightPanelHandleWidth)
-            .overlay {
-                Rectangle()
-                    .fill(rightPanelHandleHovered ? FXColors.accent.opacity(0.8) : FXColors.borderSubtle)
-                    .frame(width: 1)
-            }
-            .contentShape(Rectangle())
-            .background(rightPanelHandleHovered ? FXColors.accent.opacity(0.08) : .clear)
-            .onHover { hovering in
-                rightPanelHandleHovered = hovering
-                if hovering {
-                    NSCursor.resizeLeftRight.set()
-                } else {
-                    NSCursor.arrow.set()
+        let bounds = rightPanelWidthBounds(in: totalWidth)
+        return LiveHorizontalResizeHandle(
+            width: rightPanelHandleWidth,
+            currentPanelWidth: displayedRightPanelWidth(in: totalWidth),
+            minimumPanelWidth: bounds.lowerBound,
+            maximumPanelWidth: bounds.upperBound,
+            lineColor: FXColors.borderSubtle,
+            hoverColor: FXColors.accent,
+            helpText: "Resize git panel",
+            onResizeChanged: { width in
+                setRightPanelResizePreview(width)
+            },
+            onResizeEnded: { width in
+                let resolvedWidth = clampRightPanelWidth(width, in: totalWidth)
+                if abs(appState.rightPanelWidth - resolvedWidth) > 0.5 {
+                    appState.rightPanelWidth = resolvedWidth
                 }
+                clearRightPanelResizePreview()
+            },
+            onResizeCancelled: {
+                clearRightPanelResizePreview()
             }
-            .gesture(
-                DragGesture(minimumDistance: 0, coordinateSpace: .global)
-                    .onChanged { value in
-                        if rightPanelDragStartWidth == nil {
-                            rightPanelDragStartWidth = displayedRightPanelWidth(in: totalWidth)
-                            liveRightPanelWidth = rightPanelDragStartWidth
-                        }
-
-                        let baseWidth = rightPanelDragStartWidth ?? displayedRightPanelWidth(in: totalWidth)
-                        let proposedWidth = baseWidth - value.translation.width
-                        liveRightPanelWidth = clampRightPanelWidth(proposedWidth, in: totalWidth)
-                    }
-                    .onEnded { _ in
-                        if let liveRightPanelWidth {
-                            appState.rightPanelWidth = liveRightPanelWidth
-                        }
-                        liveRightPanelWidth = nil
-                        rightPanelDragStartWidth = nil
-                        if rightPanelHandleHovered {
-                            NSCursor.resizeLeftRight.set()
-                        } else {
-                            NSCursor.arrow.set()
-                        }
-                    }
-            )
-            .help("Resize git panel")
+        )
     }
 
     private func displayedRightPanelWidth(in totalWidth: CGFloat) -> CGFloat {
         let bounds = rightPanelWidthBounds(in: totalWidth)
-        let sourceWidth = liveRightPanelWidth ?? appState.rightPanelWidth
-        return min(max(sourceWidth, bounds.lowerBound), bounds.upperBound)
+        let requestedWidth = rightPanelResizePreview ?? appState.rightPanelWidth
+        return min(max(requestedWidth, bounds.lowerBound), bounds.upperBound)
     }
 
     private func clampRightPanelWidth(_ width: CGFloat, in totalWidth: CGFloat) -> CGFloat {
@@ -169,13 +134,39 @@ struct MainLayout: View {
 
     private func rightPanelWidthBounds(in totalWidth: CGFloat) -> ClosedRange<CGFloat> {
         let reservedSidebarWidth: CGFloat = appState.sidebarVisible ? 260 : 0
-        let minimumContentWidth: CGFloat = 420
+        let minimumContentWidth = FXLayout.minimumConversationWidth
+            + (appState.activeAgent?.workspace.splitOpen == true
+                ? FXLayout.minimumBrowserPreviewWidth + FXLayout.splitPanelResizeHandleWidth
+                : 0)
         let maximumVisibleWidth = min(
             FlowXLayoutDefaults.maxRightPanelWidth,
             max(0, totalWidth - reservedSidebarWidth - minimumContentWidth)
         )
         let minimumVisibleWidth = min(FlowXLayoutDefaults.minRightPanelWidth, maximumVisibleWidth)
         return minimumVisibleWidth ... maximumVisibleWidth
+    }
+
+    private func setRightPanelResizePreview(_ width: CGFloat) {
+        if let currentWidth = rightPanelResizePreview,
+           abs(currentWidth - width) < 0.5 {
+            return
+        }
+        withoutResizeAnimation {
+            rightPanelResizePreview = width
+        }
+    }
+
+    private func clearRightPanelResizePreview() {
+        guard rightPanelResizePreview != nil else { return }
+        withoutResizeAnimation {
+            rightPanelResizePreview = nil
+        }
+    }
+
+    private func withoutResizeAnimation(_ update: () -> Void) {
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction, update)
     }
 
     private var titleBar: some View {
@@ -252,7 +243,7 @@ struct MainLayout: View {
                             label: "Toggle terminal",
                             active: appState.activeAgent?.workspace.terminalVisible == true
                         ) {
-                            withAnimation(FXAnimation.panel) { appState.activeAgent?.workspace.terminalVisible.toggle() }
+                            appState.activeAgent?.workspace.terminalVisible.toggle()
                         }
                         if appState.activeProjectCanShowGitPanel {
                             headerButton(
@@ -271,7 +262,7 @@ struct MainLayout: View {
                             appState.toggleBrowserPreview()
                         }
                         headerButton(icon: "gearshape", label: "Toggle settings", active: appState.settingsVisible) {
-                            withAnimation(FXAnimation.panel) { appState.settingsVisible.toggle() }
+                            appState.settingsVisible.toggle()
                         }
                     }
                 }
@@ -632,9 +623,7 @@ private struct CommandPaletteView: View {
                 keywords: ["sidebar", "navigation", "left"],
                 shortcut: "⌘B"
             ) {
-                withAnimation(FXAnimation.panel) {
-                    appState.sidebarVisible.toggle()
-                }
+                appState.sidebarVisible.toggle()
             },
             PaletteAction(
                 title: appState.rightPanelVisible ? "Hide Git Panel" : "Show Git Panel",
@@ -652,9 +641,7 @@ private struct CommandPaletteView: View {
                 keywords: ["settings", "preferences", "config"],
                 shortcut: "⌘,"
             ) {
-                withAnimation(FXAnimation.panel) {
-                    appState.settingsVisible.toggle()
-                }
+                appState.settingsVisible.toggle()
             },
         ]
 
@@ -778,9 +765,7 @@ private struct CommandPaletteView: View {
                     keywords: ["terminal", "console", "shell"],
                     shortcut: "⌘T"
                 ) {
-                    withAnimation(FXAnimation.panel) {
-                        agent.workspace.terminalVisible.toggle()
-                    }
+                    agent.workspace.terminalVisible.toggle()
                 }
             )
 

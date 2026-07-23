@@ -38,73 +38,6 @@ struct FlowXApp: App {
     }
 }
 
-/// Invisible view injected into the titlebar container.
-/// Its layout() fires every time macOS re-lays out the titlebar buttons.
-private final class TrafficLightGuard: NSView {
-    let barHeight: CGFloat = 44
-    private var observations: [NSObjectProtocol] = []
-    private var isRepositioning = false
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        guard let window else { return }
-
-        let nc = NotificationCenter.default
-        let names: [Notification.Name] = [
-            NSWindow.didResizeNotification,
-            NSWindow.didBecomeKeyNotification,
-            NSWindow.didChangeOcclusionStateNotification,
-            NSWindow.didEnterFullScreenNotification,
-            NSWindow.didExitFullScreenNotification,
-        ]
-        for name in names {
-            observations.append(
-                nc.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
-                    Task { @MainActor in
-                        self?.repositionButtons()
-                    }
-                }
-            )
-        }
-    }
-
-    override func removeFromSuperview() {
-        for obs in observations { NotificationCenter.default.removeObserver(obs) }
-        observations.removeAll()
-        super.removeFromSuperview()
-    }
-
-    override func layout() {
-        super.layout()
-        repositionButtons()
-    }
-
-    private func repositionButtons() {
-        guard !isRepositioning else { return }
-        isRepositioning = true
-        defer { isRepositioning = false }
-
-        guard let window,
-              let close = window.standardWindowButton(.closeButton),
-              let mini = window.standardWindowButton(.miniaturizeButton),
-              let zoom = window.standardWindowButton(.zoomButton),
-              let container = close.superview?.superview
-        else { return }
-
-        var cf = container.frame
-        cf.size.height = barHeight
-        cf.origin.y = window.frame.height - barHeight
-        container.frame = cf
-
-        let y = (barHeight - close.frame.height) / 2
-        let spacing = mini.frame.origin.x - close.frame.origin.x
-
-        for (i, button) in [close, mini, zoom].enumerated() {
-            button.setFrameOrigin(NSPoint(x: 13 + CGFloat(i) * spacing, y: y))
-        }
-    }
-}
-
 /// Bridges NSWindow configuration into SwiftUI.
 struct WindowAccessor: NSViewRepresentable {
     let title: String
@@ -140,15 +73,6 @@ struct WindowAccessor: NSViewRepresentable {
 
         killVibrancy(in: window.contentView?.superview)
         window.title = title
-
-        // Inject a layout guard into the titlebar container itself
-        if let closeButton = window.standardWindowButton(.closeButton),
-           let buttonContainer = closeButton.superview {
-            let guard_ = TrafficLightGuard()
-            guard_.frame = .zero
-            buttonContainer.addSubview(guard_)
-            buttonContainer.postsFrameChangedNotifications = true
-        }
     }
 
     private func killVibrancy(in view: NSView?) {

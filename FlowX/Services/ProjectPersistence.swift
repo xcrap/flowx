@@ -100,7 +100,6 @@ struct PersistedProjectRecord: Codable, Sendable {
     var selectedInspectorPath: String?
     var inspectorComparisonMode: InspectorComparisonMode
     var inspectorDiffDisplayMode: InspectorDiffDisplayMode
-    var changedFilesRailWidth: Double
     var workspaces: [PersistedWorkspace]
     var nativeThreadBindings: [PersistedNativeThreadBinding]
     var nativePresentationIDs: [PersistedNativePresentationID]
@@ -113,7 +112,6 @@ struct PersistedProjectRecord: Codable, Sendable {
         case selectedInspectorPath
         case inspectorComparisonMode
         case inspectorDiffDisplayMode
-        case changedFilesRailWidth
         case workspaces
         case nativeThreadBindings
         case nativePresentationIDs
@@ -127,7 +125,6 @@ struct PersistedProjectRecord: Codable, Sendable {
         selectedInspectorPath: String?,
         inspectorComparisonMode: InspectorComparisonMode,
         inspectorDiffDisplayMode: InspectorDiffDisplayMode,
-        changedFilesRailWidth: Double,
         workspaces: [PersistedWorkspace],
         nativeThreadBindings: [PersistedNativeThreadBinding],
         nativePresentationIDs: [PersistedNativePresentationID]
@@ -139,7 +136,6 @@ struct PersistedProjectRecord: Codable, Sendable {
         self.selectedInspectorPath = selectedInspectorPath
         self.inspectorComparisonMode = inspectorComparisonMode
         self.inspectorDiffDisplayMode = inspectorDiffDisplayMode
-        self.changedFilesRailWidth = changedFilesRailWidth
         self.workspaces = workspaces
         self.nativeThreadBindings = nativeThreadBindings
         self.nativePresentationIDs = nativePresentationIDs
@@ -161,14 +157,6 @@ struct PersistedProjectRecord: Codable, Sendable {
             InspectorDiffDisplayMode.self,
             forKey: .inspectorDiffDisplayMode
         )) ?? .inline
-        changedFilesRailWidth = min(
-            max(
-                (try? container.decode(Double.self, forKey: .changedFilesRailWidth))
-                    ?? Double(FlowXLayoutDefaults.defaultChangedFilesRailWidth),
-                Double(FlowXLayoutDefaults.minChangedFilesRailWidth)
-            ),
-            Double(FlowXLayoutDefaults.maxChangedFilesRailWidth)
-        )
         workspaces = (try? container.decode(
             [LossyProjectValue<PersistedWorkspace>].self,
             forKey: .workspaces
@@ -456,7 +444,6 @@ enum ProjectPersistence {
             projectState.selectedInspectorPath = Self.validatedRelativePath(persisted.selectedInspectorPath)
             projectState.inspectorComparisonMode = persisted.inspectorComparisonMode
             projectState.inspectorDiffDisplayMode = persisted.inspectorDiffDisplayMode
-            projectState.changedFilesRailWidth = CGFloat(persisted.changedFilesRailWidth)
             restoredProjects.append(projectState)
         }
 
@@ -482,7 +469,6 @@ enum ProjectPersistence {
                     selectedInspectorPath: Self.validatedRelativePath(project.selectedInspectorPath),
                     inspectorComparisonMode: project.inspectorComparisonMode,
                     inspectorDiffDisplayMode: project.inspectorDiffDisplayMode,
-                    changedFilesRailWidth: Double(project.changedFilesRailWidth),
                     workspaces: project.agents.map { agent in
                         PersistedWorkspace(
                             agentID: agent.id,

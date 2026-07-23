@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import FXTerminal
@@ -61,5 +62,46 @@ struct TerminalSessionTests {
         #expect(session.terminalTitle == "current")
         #expect(session.currentDirectory == "/")
         #expect(session.lastExitCode == 0)
+    }
+
+    @Test("A stale host cannot detach a terminal after it is remounted")
+    func staleHostCannotDetachRemountedTerminal() {
+        let session = TerminalSession(id: UUID(), currentDirectory: "/tmp")
+        let terminalView = session.makeView()
+        let staleHost = TerminalClippingHostView(terminalView: terminalView)
+        let currentHost = TerminalClippingHostView(terminalView: terminalView)
+
+        staleHost.detachTerminal()
+
+        #expect(terminalView.superview === currentHost)
+    }
+
+    @Test("Host activation waits for a real window and nonzero layout")
+    func hostActivationFollowsWindowAttachment() {
+        let session = TerminalSession(id: UUID(), currentDirectory: "/tmp")
+        let terminalView = session.makeView()
+        let host = TerminalClippingHostView(terminalView: terminalView)
+        var attachmentCount = 0
+        host.onAttachedToWindow = { _ in
+            attachmentCount += 1
+        }
+        host.frame = NSRect(x: 0, y: 0, width: 640, height: 320)
+
+        #expect(attachmentCount == 0)
+
+        let window = NSWindow(
+            contentRect: host.frame,
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+
+        #expect(terminalView.window === window)
+        #expect(attachmentCount == 1)
+
+        host.layoutSubtreeIfNeeded()
+        #expect(attachmentCount == 1)
     }
 }

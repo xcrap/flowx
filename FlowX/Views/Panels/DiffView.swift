@@ -3,6 +3,8 @@ import AppKit
 import FXCore
 import FXDesign
 
+private let maximumSplitDiffTextColumns = 160
+
 private struct ParsedDiffLine: Identifiable, Sendable {
     enum Kind: Sendable {
         case meta
@@ -54,10 +56,18 @@ private struct DiffSection: Identifiable, Sendable {
     let id: String
     let path: String?
     let title: String
-    let subtitle: String?
     let additions: Int
     let deletions: Int
+    let maximumLineNumber: Int
+    let estimatedCacheWeight: Int
     let parsedLines: [ParsedDiffLine]
+}
+
+private struct SplitSectionRows: Sendable {
+    let rows: [SplitDiffRow]
+    let maximumOldLine: Int
+    let maximumNewLine: Int
+    let maximumTextColumns: Int
 }
 
 private struct SplitRowsTaskKey: Hashable {
@@ -65,30 +75,63 @@ private struct SplitRowsTaskKey: Hashable {
     let displayMode: InspectorDiffDisplayMode
 }
 
-private struct DiffWorkspaceLayout {
-    let diffWidth: CGFloat
-    let railWidth: CGFloat
-}
-
 @MainActor
 private enum DiffSectionCache {
-    private static let maxEntries = 8
-    private static var sectionsByKey: [DiffTaskKey: [DiffSection]] = [:]
+    private struct Entry {
+        let sections: [DiffSection]
+        let estimatedWeight: Int
+        let lineCount: Int
+    }
+
+    private static let maxEntries = 4
+    private static let maxEstimatedWeight = 48 * 1_024 * 1_024
+    private static let maxLineCount = 160_000
+    private static var entriesByKey: [DiffTaskKey: Entry] = [:]
     private static var orderedKeys: [DiffTaskKey] = []
+    private static var estimatedWeight = 0
+    private static var lineCount = 0
 
     static func sections(for key: DiffTaskKey) -> [DiffSection]? {
-        sectionsByKey[key]
+        entriesByKey[key]?.sections
     }
 
     static func store(_ sections: [DiffSection], for key: DiffTaskKey) {
-        sectionsByKey[key] = sections
-        orderedKeys.removeAll { $0 == key }
-        orderedKeys.append(key)
+        remove(key)
 
-        while orderedKeys.count > maxEntries {
-            let removedKey = orderedKeys.removeFirst()
-            sectionsByKey.removeValue(forKey: removedKey)
+        let entryWeight = sections.reduce(into: 0) { result, section in
+            result += section.estimatedCacheWeight
         }
+        let entryLineCount = sections.reduce(into: 0) { result, section in
+            result += section.parsedLines.count
+        }
+
+        guard entryWeight <= maxEstimatedWeight, entryLineCount <= maxLineCount else {
+            return
+        }
+
+        entriesByKey[key] = Entry(
+            sections: sections,
+            estimatedWeight: entryWeight,
+            lineCount: entryLineCount
+        )
+        orderedKeys.append(key)
+        estimatedWeight += entryWeight
+        lineCount += entryLineCount
+
+        while orderedKeys.count > maxEntries
+            || estimatedWeight > maxEstimatedWeight
+            || lineCount > maxLineCount {
+            remove(orderedKeys[0])
+        }
+    }
+
+    private static func remove(_ key: DiffTaskKey) {
+        orderedKeys.removeAll { $0 == key }
+        guard let removedEntry = entriesByKey.removeValue(forKey: key) else {
+            return
+        }
+        estimatedWeight = max(0, estimatedWeight - removedEntry.estimatedWeight)
+        lineCount = max(0, lineCount - removedEntry.lineCount)
     }
 }
 
@@ -99,16 +142,12 @@ struct DiffView: View {
 
     @State private var diffSections: [DiffSection] = []
     @State private var isLoadingDiff = false
+    @State private var loadFailureKey: DiffTaskKey?
     @State private var activeLoadKey: DiffTaskKey?
     @State private var displayedDiffKey: DiffTaskKey?
     @State private var collapsedSectionIDs: Set<String> = []
-    @State private var showsChangedFiles = true
-    @State private var splitRowsBySectionID: [String: [SplitDiffRow]] = [:]
-    @State private var railDragStartWidth: CGFloat?
-    @State private var liveChangedFilesRailWidth: CGFloat?
-    @State private var changedFilesResizeHandleHovered = false
+    @State private var splitRowsBySectionID: [String: SplitSectionRows] = [:]
 
-    private let changedFilesResizeHandleWidth: CGFloat = 5
     private let diffSectionAccessoryWidth: CGFloat = 28
 
     var body: some View {
@@ -135,8 +174,7 @@ struct DiffView: View {
 
     private func header(_ project: ProjectState) -> some View {
         let visibleFiles = visibleDiffFiles(for: project)
-        let fileSectionCount = diffSections.filter { $0.path != nil }.count
-        let canToggleChangedFiles = fileSectionCount > 0
+        let fileSections = diffSections.filter { $0.path != nil }
 
         return HStack(spacing: FXSpacing.md) {
             VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
@@ -157,8 +195,8 @@ struct DiffView: View {
             comparisonModePicker(project)
             diffDisplayModePicker(project)
 
-            if canToggleChangedFiles {
-                changedFilesToggle
+            if fileSections.count > 1 {
+                changedFilePicker(project, sections: fileSections)
             }
         }
         .padding(.horizontal, FXSpacing.md)
@@ -170,6 +208,7 @@ struct DiffView: View {
     private func content(_ project: ProjectState) -> some View {
         let visibleFiles = visibleDiffFiles(for: project)
         let snapshot = diffTaskKey(for: project)
+        let canPreserveDisplayedCanvas = canPreserveDisplayedCanvas(for: snapshot)
 
         if !project.gitInfo.isGitRepo {
             messageView(
@@ -181,15 +220,37 @@ struct DiffView: View {
                 title: emptyStateTitle(for: project.inspectorComparisonMode),
                 body: emptyStateBody(for: project.inspectorComparisonMode)
             )
-        } else if displayedDiffKey != snapshot || (isLoadingDiff && diffSections.isEmpty) {
+        } else if displayedDiffKey == snapshot, !diffSections.isEmpty {
+            diffWorkspace(
+                project: project,
+                sections: diffSections,
+                scrollTargetPath: project.selectedInspectorPath
+            )
+        } else if canPreserveDisplayedCanvas {
+            diffWorkspace(
+                project: project,
+                sections: diffSections,
+                scrollTargetPath: project.selectedInspectorPath
+            )
+            .overlay(alignment: .topTrailing) {
+                if isLoadingDiff {
+                    refreshStatusBadge(title: "Refreshing", isError: false)
+                } else if loadFailureKey == snapshot {
+                    refreshStatusBadge(title: "Refresh failed", isError: true)
+                }
+            }
+        } else if loadFailureKey == snapshot {
+            messageView(
+                title: "Diff refresh failed",
+                body: "FlowX could not refresh the current project changes."
+            )
+        } else if displayedDiffKey != snapshot || isLoadingDiff {
             loadingView
-        } else if diffSections.isEmpty {
+        } else {
             messageView(
                 title: "Diff unavailable",
                 body: "FlowX could not build a git diff for the current project state."
             )
-        } else {
-            diffWorkspace(project: project, sections: diffSections, scrollTargetPath: project.selectedInspectorPath)
         }
     }
 
@@ -212,6 +273,44 @@ struct DiffView: View {
         .background(FXColors.panelBg)
     }
 
+    private func canPreserveDisplayedCanvas(for snapshot: DiffTaskKey) -> Bool {
+        guard !diffSections.isEmpty, let displayedDiffKey else {
+            return false
+        }
+        return displayedDiffKey.projectID == snapshot.projectID
+            && displayedDiffKey.mode == snapshot.mode
+    }
+
+    private func refreshStatusBadge(title: String, isError: Bool) -> some View {
+        HStack(spacing: FXSpacing.xs) {
+            if isError {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(FXTypography.icon(.small))
+                    .foregroundStyle(FXColors.error)
+            } else {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(FXColors.accent)
+            }
+
+            Text(title)
+                .font(FXTypography.captionMedium)
+                .foregroundStyle(isError ? FXColors.error : FXColors.fgSecondary)
+        }
+        .padding(.horizontal, FXSpacing.sm)
+        .padding(.vertical, FXSpacing.xs)
+        .background(FXColors.bgElevated)
+        .clipShape(RoundedRectangle(cornerRadius: FXRadii.sm))
+        .overlay(
+            RoundedRectangle(cornerRadius: FXRadii.sm)
+                .strokeBorder(FXColors.border, lineWidth: 0.5)
+        )
+        .padding(FXSpacing.md)
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(title)
+    }
+
     private func comparisonModePicker(_ project: ProjectState) -> some View {
         HStack(spacing: FXSpacing.xxs) {
             ForEach(InspectorComparisonMode.allCases, id: \.self) { mode in
@@ -230,6 +329,7 @@ struct DiffView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!project.gitInfo.isGitRepo)
+                .accessibilityAddTraits(project.inspectorComparisonMode == mode ? .isSelected : [])
             }
         }
     }
@@ -272,69 +372,106 @@ struct DiffView: View {
     }
 
     private func diffWorkspace(project: ProjectState, sections: [DiffSection], scrollTargetPath: String?) -> some View {
-        let fileSections = sections.filter { $0.path != nil }
-        let showsFilesRail = fileSections.count > 1 && showsChangedFiles
+        let canvasSections = selectedCanvasSections(from: sections, selectedPath: scrollTargetPath)
 
         return GeometryReader { geometry in
-            let layout = diffWorkspaceLayout(
-                totalWidth: geometry.size.width,
-                preferredRailWidth: liveChangedFilesRailWidth ?? project.changedFilesRailWidth,
-                showsFilesRail: showsFilesRail
+            diffCanvas(
+                project: project,
+                sections: canvasSections,
+                scrollTargetPath: scrollTargetPath,
+                viewportWidth: geometry.size.width
             )
-
-            HStack(spacing: 0) {
-                diffCanvas(project: project, sections: sections, scrollTargetPath: scrollTargetPath)
-                    .frame(width: layout.diffWidth, alignment: .leading)
-                    .frame(maxHeight: .infinity, alignment: .topLeading)
-                    .background(FXColors.panelBg)
-                    .clipped()
-
-                if showsFilesRail, layout.railWidth > 0 {
-                    changedFilesResizeHandle(totalWidth: geometry.size.width, project: project)
-
-                    changedFilesSidebar(project: project, sections: fileSections)
-                        .frame(width: layout.railWidth, alignment: .leading)
-                        .frame(maxHeight: .infinity, alignment: .topLeading)
-                        .background(FXColors.panelBg)
-                        .clipped()
-                }
-            }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .background(FXColors.panelBg)
+            .clipped()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
     }
 
     @ViewBuilder
-    private func diffCanvas(project: ProjectState, sections: [DiffSection], scrollTargetPath: String?) -> some View {
+    private func diffCanvas(
+        project: ProjectState,
+        sections: [DiffSection],
+        scrollTargetPath: String?,
+        viewportWidth: CGFloat
+    ) -> some View {
         if project.inspectorDiffDisplayMode == .split {
-            splitDiffView(project: project, sections: sections, scrollTargetPath: scrollTargetPath)
+            splitDiffView(
+                project: project,
+                sections: sections,
+                scrollTargetPath: scrollTargetPath,
+                viewportWidth: viewportWidth
+            )
         } else {
-            diffView(project: project, sections: sections, scrollTargetPath: scrollTargetPath)
+            diffView(
+                project: project,
+                sections: sections,
+                scrollTargetPath: scrollTargetPath,
+                viewportWidth: viewportWidth
+            )
         }
     }
 
-    private var changedFilesToggle: some View {
-        Button(action: {
-            withAnimation(FXAnimation.quick) {
-                showsChangedFiles.toggle()
+    private func changedFilePicker(_ project: ProjectState, sections: [DiffSection]) -> some View {
+        let selectedSection = sections.first { $0.path == project.selectedInspectorPath } ?? sections.first
+        let selectedValue = selectedSection.map(sectionDisplayPath) ?? "No file selected"
+
+        return FXDropdown(
+            sections: [
+                FXDropdownSection(
+                    id: "changed-files",
+                    title: "Changed files",
+                    items: sections.map { section in
+                        FXDropdownItem(
+                            id: section.id,
+                            title: sectionDisplayPath(section),
+                            subtitle: filePickerSubtitle(section),
+                            isSelected: section.path == selectedSection?.path
+                        ) {
+                            project.selectedInspectorPath = section.path
+                        }
+                    }
+                )
+            ],
+            panelWidth: 320,
+            maxPanelHeight: 360,
+            alignment: .trailing
+        ) { isExpanded in
+            HStack(spacing: FXSpacing.xs) {
+                Image(systemName: "list.bullet")
+                    .font(FXTypography.icon(.small))
+
+                Text("\(sections.count)")
+                    .font(FXTypography.captionMedium)
+
+                Image(systemName: "chevron.down")
+                    .font(FXTypography.icon(.micro))
+                    .rotationEffect(.degrees(isExpanded ? 180 : 0))
             }
-        }) {
-            Image(systemName: "sidebar.right")
-                .font(FXTypography.icon(.small))
-                .foregroundStyle(showsChangedFiles ? FXColors.fg : FXColors.fgTertiary)
-                .frame(width: 28, height: 28)
-                .background(showsChangedFiles ? FXColors.bgSelected : FXColors.bgSurface)
+            .foregroundStyle(isExpanded ? FXColors.fg : FXColors.fgSecondary)
+            .padding(.horizontal, FXSpacing.sm)
+            .frame(height: 28)
+            .background(isExpanded ? FXColors.bgSelected : FXColors.bgSurface)
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.sm))
         }
-        .buttonStyle(.plain)
-        .help(showsChangedFiles ? "Hide changed files" : "Show changed files")
+        .fixedSize()
+        .help("Choose from \(sections.count) changed files")
+        .accessibilityLabel("Changed file")
+        .accessibilityValue("\(selectedValue), \(sections.count) files")
     }
 
-    private func diffView(project: ProjectState, sections: [DiffSection], scrollTargetPath: String?) -> some View {
-        let allLines = sections.flatMap(\.parsedLines)
-        let maxLine = max(allLines.compactMap(\.oldLine).max() ?? 0, allLines.compactMap(\.newLine).max() ?? 0)
+    private func diffView(
+        project: ProjectState,
+        sections: [DiffSection],
+        scrollTargetPath: String?,
+        viewportWidth: CGFloat
+    ) -> some View {
+        let maxLine = sections.reduce(0) { current, section in
+            max(current, section.maximumLineNumber)
+        }
         let numberWidth = lineNumberWidth(maxLine: maxLine)
+        let cardViewportWidth = max(0, viewportWidth - (FXSpacing.md * 2))
 
         return ScrollViewReader { proxy in
             ScrollView(.vertical) {
@@ -344,7 +481,8 @@ struct DiffView: View {
                             section,
                             selectedPath: scrollTargetPath,
                             project: project,
-                            numberWidth: numberWidth
+                            numberWidth: numberWidth,
+                            viewportWidth: cardViewportWidth
                         )
                     }
                 }
@@ -364,7 +502,12 @@ struct DiffView: View {
     }
 
     @ViewBuilder
-    private func splitDiffView(project: ProjectState, sections: [DiffSection], scrollTargetPath: String?) -> some View {
+    private func splitDiffView(
+        project: ProjectState,
+        sections: [DiffSection],
+        scrollTargetPath: String?,
+        viewportWidth: CGFloat
+    ) -> some View {
         if sections.contains(where: { splitRowsBySectionID[$0.id] == nil }) {
             VStack(spacing: FXSpacing.sm) {
                 ProgressView()
@@ -376,20 +519,29 @@ struct DiffView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(FXColors.panelBg)
         } else {
-            let allRows = sections.flatMap { splitRowsBySectionID[$0.id] ?? [] }
-            let maxOldLine = allRows.compactMap(\.oldLine).max() ?? 0
-            let maxNewLine = allRows.compactMap(\.newLine).max() ?? 0
+            let splitSections = sections.compactMap { splitRowsBySectionID[$0.id] }
+            let maxOldLine = splitSections.reduce(0) { max($0, $1.maximumOldLine) }
+            let maxNewLine = splitSections.reduce(0) { max($0, $1.maximumNewLine) }
             let numberWidth = max(lineNumberWidth(maxLine: maxOldLine), lineNumberWidth(maxLine: maxNewLine))
+            let cardViewportWidth = max(0, viewportWidth - (FXSpacing.md * 2))
 
             ScrollViewReader { proxy in
                 ScrollView(.vertical) {
                     LazyVStack(spacing: FXSpacing.lg) {
                         ForEach(sections) { section in
+                            let sectionColumnWidth = splitColumnWidth(
+                                viewportWidth: cardViewportWidth,
+                                numberWidth: numberWidth,
+                                maximumTextColumns: splitRowsBySectionID[section.id]?.maximumTextColumns ?? 0
+                            )
+
                             splitSectionCard(
                                 section,
                                 selectedPath: scrollTargetPath,
                                 project: project,
-                                numberWidth: numberWidth
+                                numberWidth: numberWidth,
+                                viewportWidth: cardViewportWidth,
+                                columnWidth: sectionColumnWidth
                             )
                         }
                     }
@@ -409,11 +561,31 @@ struct DiffView: View {
         }
     }
 
+    private func splitColumnWidth(
+        viewportWidth: CGFloat,
+        numberWidth: CGFloat,
+        maximumTextColumns: Int
+    ) -> CGFloat {
+        let font = NSFont.monospacedSystemFont(
+            ofSize: FXTypography.terminalPointSize,
+            weight: .regular
+        )
+        let glyphWidth = ceil(
+            ("M" as NSString).size(withAttributes: [.font: font]).width
+        )
+        let lineNumberWidth = numberWidth + (FXSpacing.sm * 2)
+        let boundedTextColumns = min(max(0, maximumTextColumns), maximumSplitDiffTextColumns)
+        let textWidth = (CGFloat(boundedTextColumns) * glyphWidth) + (FXSpacing.md * 2)
+        let minimumColumnWidth = max(0, (viewportWidth - 1) / 2)
+        return ceil(max(minimumColumnWidth, lineNumberWidth + textWidth))
+    }
+
     private func inlineSectionCard(
         _ section: DiffSection,
         selectedPath: String?,
         project: ProjectState,
-        numberWidth: CGFloat
+        numberWidth: CGFloat,
+        viewportWidth: CGFloat
     ) -> some View {
         VStack(spacing: 0) {
             sectionHeader(section, selectedPath: selectedPath, project: project)
@@ -423,17 +595,20 @@ struct DiffView: View {
                 ScrollView(.horizontal) {
                     LazyVStack(spacing: 0) {
                         ForEach(section.parsedLines) { line in
-                            inlineDiffLine(line, numberWidth: numberWidth)
+                            inlineDiffLine(
+                                line,
+                                numberWidth: numberWidth,
+                                viewportWidth: viewportWidth
+                            )
                         }
                     }
-                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(minWidth: viewportWidth, alignment: .leading)
                 }
-                .scrollIndicators(.hidden)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .clipped()
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minWidth: viewportWidth, maxWidth: .infinity, alignment: .leading)
         .background(FXColors.bgSurface.opacity(0.24))
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
         .overlay(
@@ -442,7 +617,11 @@ struct DiffView: View {
         )
     }
 
-    private func inlineDiffLine(_ line: ParsedDiffLine, numberWidth: CGFloat) -> some View {
+    private func inlineDiffLine(
+        _ line: ParsedDiffLine,
+        numberWidth: CGFloat,
+        viewportWidth: CGFloat
+    ) -> some View {
         HStack(spacing: 0) {
             lineNumberCell(line.oldLine, width: numberWidth, emphasis: line.kind == .deletion ? .deletion : .neutral)
             lineNumberCell(line.newLine, width: numberWidth, emphasis: line.kind == .addition ? .addition : .neutral)
@@ -450,10 +629,13 @@ struct DiffView: View {
             Text(verbatim: line.text.isEmpty ? " " : line.text)
                 .font(FXTypography.mono)
                 .foregroundStyle(textColor(for: line.kind))
-                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, FXSpacing.md)
                 .padding(.vertical, 1)
+                .fixedSize(horizontal: true, vertical: false)
+
+            Spacer(minLength: 0)
         }
+        .frame(minWidth: viewportWidth, alignment: .leading)
         .background(backgroundColor(for: line.kind))
     }
 
@@ -461,7 +643,9 @@ struct DiffView: View {
         _ section: DiffSection,
         selectedPath: String?,
         project: ProjectState,
-        numberWidth: CGFloat
+        numberWidth: CGFloat,
+        viewportWidth: CGFloat,
+        columnWidth: CGFloat
     ) -> some View {
         VStack(spacing: 0) {
             sectionHeader(section, selectedPath: selectedPath, project: project)
@@ -470,18 +654,22 @@ struct DiffView: View {
             if !isCollapsed(section) {
                 ScrollView(.horizontal) {
                     LazyVStack(spacing: 0) {
-                        ForEach(splitRowsBySectionID[section.id] ?? []) { row in
-                            splitRowView(row, numberWidth: numberWidth)
+                        ForEach(splitRowsBySectionID[section.id]?.rows ?? []) { row in
+                            splitRowView(
+                                row,
+                                numberWidth: numberWidth,
+                                viewportWidth: viewportWidth,
+                                columnWidth: columnWidth
+                            )
                         }
                     }
-                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(minWidth: viewportWidth, alignment: .leading)
                 }
-                .scrollIndicators(.hidden)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .clipped()
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minWidth: viewportWidth, maxWidth: .infinity, alignment: .leading)
         .background(FXColors.bgSurface.opacity(0.24))
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
         .overlay(
@@ -491,19 +679,26 @@ struct DiffView: View {
     }
 
     @ViewBuilder
-    private func splitRowView(_ row: SplitDiffRow, numberWidth: CGFloat) -> some View {
+    private func splitRowView(
+        _ row: SplitDiffRow,
+        numberWidth: CGFloat,
+        viewportWidth: CGFloat,
+        columnWidth: CGFloat
+    ) -> some View {
         switch row.kind {
         case .meta:
             splitAnnotationRow(
                 text: row.oldText,
                 foreground: FXColors.fgTertiary,
-                background: FXColors.bgSurface.opacity(0.35)
+                background: FXColors.bgSurface.opacity(0.35),
+                viewportWidth: viewportWidth
             )
         case .hunk:
             splitAnnotationRow(
                 text: row.oldText,
                 foreground: FXColors.info,
-                background: FXColors.info.opacity(0.08)
+                background: FXColors.info.opacity(0.08),
+                viewportWidth: viewportWidth
             )
         case .content:
             HStack(spacing: 0) {
@@ -511,7 +706,8 @@ struct DiffView: View {
                     line: row.oldLine,
                     text: row.oldText,
                     width: numberWidth,
-                    side: row.oldSide
+                    side: row.oldSide,
+                    columnWidth: columnWidth
                 )
 
                 FXDivider(.vertical)
@@ -520,9 +716,11 @@ struct DiffView: View {
                     line: row.newLine,
                     text: row.newText,
                     width: numberWidth,
-                    side: row.newSide
+                    side: row.newSide,
+                    columnWidth: columnWidth
                 )
             }
+            .frame(width: (columnWidth * 2) + 1, alignment: .leading)
         }
     }
 
@@ -544,6 +742,7 @@ struct DiffView: View {
             }
             .buttonStyle(.plain)
             .help(isCollapsed ? "Expand diff section" : "Collapse diff section")
+            .accessibilityLabel(isCollapsed ? "Expand \(section.title) diff" : "Collapse \(section.title) diff")
 
             Button(action: {
                 if let path = section.path {
@@ -559,6 +758,7 @@ struct DiffView: View {
             }
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
 
             Color.clear
                 .frame(width: diffSectionAccessoryWidth, height: 1)
@@ -570,71 +770,8 @@ struct DiffView: View {
         .overlay(alignment: .bottom) {
             FXDivider()
         }
-    }
-
-    private func changedFilesSidebar(project: ProjectState, sections: [DiffSection]) -> some View {
-        return VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(spacing: FXSpacing.xxs) {
-                    ForEach(sections) { section in
-                        changedFileRow(section, project: project)
-                    }
-                }
-                .padding(.horizontal, FXSpacing.sm)
-                .padding(.vertical, FXSpacing.md)
-            }
-            .background(FXColors.panelBg)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private func diffWorkspaceLayout(totalWidth: CGFloat, preferredRailWidth: CGFloat, showsFilesRail: Bool) -> DiffWorkspaceLayout {
-        guard showsFilesRail else {
-            return DiffWorkspaceLayout(diffWidth: max(0, totalWidth), railWidth: 0)
-        }
-
-        let minimumDiffWidth: CGFloat = 360
-        let maximumRailWidth = max(0, totalWidth - minimumDiffWidth - changedFilesResizeHandleWidth)
-
-        guard maximumRailWidth > 0 else {
-            return DiffWorkspaceLayout(diffWidth: max(0, totalWidth), railWidth: 0)
-        }
-
-        let minimumRailWidth = min(FlowXLayoutDefaults.minChangedFilesRailWidth, maximumRailWidth)
-        let railWidth = min(max(preferredRailWidth, minimumRailWidth), maximumRailWidth)
-        let diffWidth = max(0, totalWidth - railWidth - changedFilesResizeHandleWidth)
-        return DiffWorkspaceLayout(diffWidth: diffWidth, railWidth: railWidth)
-    }
-
-    private func changedFileRow(_ section: DiffSection, project: ProjectState) -> some View {
-        let isSelected = project.selectedInspectorPath == section.path
-
-        return Button(action: {
-            if let path = section.path {
-                project.selectedInspectorPath = path
-            }
-        }) {
-            HStack(spacing: FXSpacing.sm) {
-                sectionPathLabel(section, isSelected: isSelected)
-
-                Spacer(minLength: 0)
-
-                diffCountSummary(section)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, FXSpacing.md)
-            .padding(.vertical, FXSpacing.sm)
-            .frame(minHeight: 44)
-            .contentShape(Rectangle())
-            .background(
-                RoundedRectangle(cornerRadius: FXRadii.md)
-                    .fill(isSelected ? FXColors.bgSelected : .clear)
-            )
-        }
-        .buttonStyle(.plain)
-        .frame(maxWidth: .infinity, alignment: .leading)
         .contextMenu {
-            Button(isCollapsed(section) ? "Expand" : "Collapse") {
+            Button(isCollapsed ? "Expand Diff" : "Collapse Diff") {
                 toggleSection(section)
             }
             if let path = section.path {
@@ -660,13 +797,13 @@ struct DiffView: View {
             if section.additions > 0 {
                 Text("+\(section.additions)")
                     .font(FXTypography.monoSmall)
-                    .foregroundStyle(FXColors.success)
+                    .foregroundStyle(FXColors.diffAddedFg)
             }
 
             if section.deletions > 0 {
                 Text("-\(section.deletions)")
                     .font(FXTypography.monoSmall)
-                    .foregroundStyle(FXColors.error)
+                    .foregroundStyle(FXColors.diffRemovedFg)
             }
         }
     }
@@ -676,71 +813,15 @@ struct DiffView: View {
         return path.contains("/") ? path : "./\(path)"
     }
 
-    private func changedFilesResizeHandle(totalWidth: CGFloat, project: ProjectState) -> some View {
-        Rectangle()
-            .fill(.clear)
-            .frame(width: changedFilesResizeHandleWidth)
-            .overlay {
-                Rectangle()
-                    .fill(changedFilesResizeHandleHovered ? FXColors.accent.opacity(0.8) : FXColors.borderSubtle)
-                    .frame(width: 1)
-            }
-            .contentShape(Rectangle())
-            .background(changedFilesResizeHandleHovered ? FXColors.accent.opacity(0.08) : .clear)
-            .onHover { hovering in
-                changedFilesResizeHandleHovered = hovering
-                if hovering {
-                    NSCursor.resizeLeftRight.set()
-                } else {
-                    NSCursor.arrow.set()
-                }
-            }
-            .gesture(
-                DragGesture(minimumDistance: 0, coordinateSpace: .global)
-                    .onChanged { value in
-                        if railDragStartWidth == nil {
-                            railDragStartWidth = displayedChangedFilesRailWidth(totalWidth: totalWidth, project: project)
-                            liveChangedFilesRailWidth = railDragStartWidth
-                        }
-
-                        let baseWidth = railDragStartWidth ?? displayedChangedFilesRailWidth(totalWidth: totalWidth, project: project)
-                        let proposedWidth = baseWidth - value.translation.width
-                        liveChangedFilesRailWidth = clampChangedFilesRailWidth(proposedWidth, totalWidth: totalWidth)
-                    }
-                    .onEnded { _ in
-                        if let liveChangedFilesRailWidth {
-                            project.changedFilesRailWidth = liveChangedFilesRailWidth
-                        }
-                        liveChangedFilesRailWidth = nil
-                        railDragStartWidth = nil
-                        if changedFilesResizeHandleHovered {
-                            NSCursor.resizeLeftRight.set()
-                        } else {
-                            NSCursor.arrow.set()
-                        }
-                    }
-            )
-            .help("Resize changed files rail")
-    }
-
-    private func displayedChangedFilesRailWidth(totalWidth: CGFloat, project: ProjectState) -> CGFloat {
-        let bounds = changedFilesRailWidthBounds(totalWidth: totalWidth)
-        let sourceWidth = liveChangedFilesRailWidth ?? project.changedFilesRailWidth
-        return min(max(sourceWidth, bounds.lowerBound), bounds.upperBound)
-    }
-
-    private func clampChangedFilesRailWidth(_ width: CGFloat, totalWidth: CGFloat) -> CGFloat {
-        let bounds = changedFilesRailWidthBounds(totalWidth: totalWidth)
-        return min(max(width, bounds.lowerBound), bounds.upperBound)
-    }
-
-    private func changedFilesRailWidthBounds(totalWidth: CGFloat) -> ClosedRange<CGFloat> {
-        let maximumWidth = min(
-            FlowXLayoutDefaults.maxChangedFilesRailWidth,
-            max(0, totalWidth - 360 - changedFilesResizeHandleWidth)
-        )
-        let minimumWidth = min(FlowXLayoutDefaults.minChangedFilesRailWidth, maximumWidth)
-        return minimumWidth ... maximumWidth
+    private func filePickerSubtitle(_ section: DiffSection) -> String? {
+        var components: [String] = []
+        if section.additions > 0 {
+            components.append("+\(section.additions)")
+        }
+        if section.deletions > 0 {
+            components.append("-\(section.deletions)")
+        }
+        return components.isEmpty ? nil : components.joined(separator: "  ")
     }
 
     private func messageView(title: String, body: String) -> some View {
@@ -775,21 +856,32 @@ struct DiffView: View {
             .background(FXColors.bgElevated.opacity(0.55))
     }
 
-    private func splitAnnotationRow(text: String, foreground: Color, background: Color) -> some View {
-        Text(verbatim: text.isEmpty ? " " : text)
-            .font(FXTypography.mono)
-            .foregroundStyle(foreground)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, FXSpacing.md)
-            .padding(.vertical, 1)
-            .background(background)
+    private func splitAnnotationRow(
+        text: String,
+        foreground: Color,
+        background: Color,
+        viewportWidth: CGFloat
+    ) -> some View {
+        HStack(spacing: 0) {
+            Text(verbatim: text.isEmpty ? " " : text)
+                .font(FXTypography.mono)
+                .foregroundStyle(foreground)
+                .padding(.horizontal, FXSpacing.md)
+                .padding(.vertical, 1)
+                .fixedSize(horizontal: true, vertical: false)
+
+            Spacer(minLength: 0)
+        }
+        .frame(minWidth: viewportWidth, alignment: .leading)
+        .background(background)
     }
 
     private func splitDiffCell(
         line: Int?,
         text: String,
         width: CGFloat,
-        side: SplitDiffSideKind
+        side: SplitDiffSideKind,
+        columnWidth: CGFloat
     ) -> some View {
         HStack(spacing: 0) {
             lineNumberCell(line, width: width, emphasis: lineNumberEmphasis(for: side))
@@ -797,11 +889,13 @@ struct DiffView: View {
             Text(verbatim: text.isEmpty ? " " : text)
                 .font(FXTypography.mono)
                 .foregroundStyle(splitTextColor(for: side))
-                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, FXSpacing.md)
                 .padding(.vertical, 1)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(width: columnWidth, alignment: .leading)
         .background(splitBackgroundColor(for: side))
     }
 
@@ -864,10 +958,13 @@ struct DiffView: View {
         return lines
     }
 
-    nonisolated private static func splitRows(from parsedLines: [ParsedDiffLine]) -> [SplitDiffRow] {
+    nonisolated private static func splitRows(from parsedLines: [ParsedDiffLine]) -> SplitSectionRows {
         var rows: [SplitDiffRow] = []
         var index = 0
         var nextID = 0
+        var maximumOldLine = 0
+        var maximumNewLine = 0
+        var maximumTextColumns = 0
 
         func appendRow(
             kind: SplitDiffRow.Kind,
@@ -890,12 +987,24 @@ struct DiffView: View {
                     newSide: newSide
                 )
             )
+            maximumOldLine = max(maximumOldLine, oldLine ?? 0)
+            maximumNewLine = max(maximumNewLine, newLine ?? 0)
+            maximumTextColumns = max(
+                maximumTextColumns,
+                Self.displayColumnCount(oldText),
+                Self.displayColumnCount(newText)
+            )
             nextID += 1
         }
 
         while index < parsedLines.count {
             if index.isMultiple(of: 256), Task.isCancelled {
-                return []
+                return SplitSectionRows(
+                    rows: [],
+                    maximumOldLine: maximumOldLine,
+                    maximumNewLine: maximumNewLine,
+                    maximumTextColumns: maximumTextColumns
+                )
             }
             let line = parsedLines[index]
 
@@ -940,6 +1049,14 @@ struct DiffView: View {
             case .deletion:
                 var deletions: [ParsedDiffLine] = []
                 while index < parsedLines.count, parsedLines[index].kind == .deletion {
+                    if deletions.count.isMultiple(of: 256), Task.isCancelled {
+                        return SplitSectionRows(
+                            rows: [],
+                            maximumOldLine: maximumOldLine,
+                            maximumNewLine: maximumNewLine,
+                            maximumTextColumns: maximumTextColumns
+                        )
+                    }
                     deletions.append(parsedLines[index])
                     index += 1
                 }
@@ -947,6 +1064,14 @@ struct DiffView: View {
                 var additions: [ParsedDiffLine] = []
                 let additionStart = index
                 while index < parsedLines.count, parsedLines[index].kind == .addition {
+                    if additions.count.isMultiple(of: 256), Task.isCancelled {
+                        return SplitSectionRows(
+                            rows: [],
+                            maximumOldLine: maximumOldLine,
+                            maximumNewLine: maximumNewLine,
+                            maximumTextColumns: maximumTextColumns
+                        )
+                    }
                     additions.append(parsedLines[index])
                     index += 1
                 }
@@ -957,6 +1082,14 @@ struct DiffView: View {
 
                 let pairCount = max(deletions.count, additions.count)
                 for offset in 0..<pairCount {
+                    if offset.isMultiple(of: 256), Task.isCancelled {
+                        return SplitSectionRows(
+                            rows: [],
+                            maximumOldLine: maximumOldLine,
+                            maximumNewLine: maximumNewLine,
+                            maximumTextColumns: maximumTextColumns
+                        )
+                    }
                     let deletion = offset < deletions.count ? deletions[offset] : nil
                     let addition = offset < additions.count ? additions[offset] : nil
                     appendRow(
@@ -984,9 +1117,8 @@ struct DiffView: View {
             }
         }
 
-        return rows.isEmpty
-            ? [
-                SplitDiffRow(
+        if rows.isEmpty {
+            let placeholder = SplitDiffRow(
                     id: 0,
                     kind: .meta,
                     oldLine: nil,
@@ -996,17 +1128,30 @@ struct DiffView: View {
                     oldSide: .context,
                     newSide: .empty
                 )
-            ]
-            : rows
+            return SplitSectionRows(
+                rows: [placeholder],
+                maximumOldLine: 0,
+                maximumNewLine: 0,
+                maximumTextColumns: Self.displayColumnCount(placeholder.oldText)
+            )
+        }
+
+        return SplitSectionRows(
+            rows: rows,
+            maximumOldLine: maximumOldLine,
+            maximumNewLine: maximumNewLine,
+            maximumTextColumns: maximumTextColumns
+        )
     }
 
-    nonisolated private static func splitRowsMap(from sections: [DiffSection]) -> [String: [SplitDiffRow]] {
-        var rowsBySectionID: [String: [SplitDiffRow]] = [:]
+    nonisolated private static func splitRowsMap(from sections: [DiffSection]) -> [String: SplitSectionRows] {
+        var rowsBySectionID: [String: SplitSectionRows] = [:]
         rowsBySectionID.reserveCapacity(sections.count)
 
         for section in sections {
             guard !Task.isCancelled else { return [:] }
             rowsBySectionID[section.id] = splitRows(from: section.parsedLines)
+            guard !Task.isCancelled else { return [:] }
         }
 
         return rowsBySectionID
@@ -1057,24 +1202,40 @@ struct DiffView: View {
     }
 
     nonisolated private static func makeSection(id: String, path: String?, lines: [ParsedDiffLine]) -> DiffSection {
-        let additions = lines.filter { $0.kind == .addition }.count
-        let deletions = lines.filter { $0.kind == .deletion }.count
-        let title = path.map { ($0 as NSString).lastPathComponent } ?? "Project diff"
-        let subtitle: String?
-        if let path {
-            let parent = (path as NSString).deletingLastPathComponent
-            subtitle = (parent.isEmpty || parent == ".") ? "./" : parent
-        } else {
-            subtitle = nil
+        var additions = 0
+        var deletions = 0
+        var maximumLineNumber = 0
+        var estimatedCacheWeight = 256
+        for line in lines {
+            switch line.kind {
+            case .addition:
+                additions += 1
+            case .deletion:
+                deletions += 1
+            case .meta, .hunk, .context:
+                break
+            }
+            maximumLineNumber = max(
+                maximumLineNumber,
+                line.oldLine ?? 0,
+                line.newLine ?? 0
+            )
+            estimatedCacheWeight += 96 + line.text.utf8.count
         }
+
+        let title = path.map { ($0 as NSString).lastPathComponent } ?? "Project diff"
+        estimatedCacheWeight += id.utf8.count
+            + (path?.utf8.count ?? 0)
+            + title.utf8.count
 
         return DiffSection(
             id: id,
             path: path,
             title: title,
-            subtitle: subtitle,
             additions: additions,
             deletions: deletions,
+            maximumLineNumber: maximumLineNumber,
+            estimatedCacheWeight: estimatedCacheWeight,
             parsedLines: lines
         )
     }
@@ -1086,6 +1247,25 @@ struct DiffView: View {
         case .meta, .hunk:
             line.text
         }
+    }
+
+    nonisolated private static func displayColumnCount(_ text: String) -> Int {
+        var columns = 0
+        for scalar in text.unicodeScalars {
+            if scalar.value == 9 {
+                columns += 4 - (columns % 4)
+            } else if scalar.value < 128 {
+                columns += 1
+            } else {
+                // Conservatively reserve two monospace cells for non-ASCII
+                // fallback glyphs so code never overlaps the split divider.
+                columns += 2
+            }
+            if columns >= maximumSplitDiffTextColumns {
+                return maximumSplitDiffTextColumns
+            }
+        }
+        return columns
     }
 
     nonisolated private static func hunkLineNumbers(from line: String) -> (Int, Int)? {
@@ -1236,16 +1416,36 @@ struct DiffView: View {
         }
     }
 
+    private func selectedCanvasSections(
+        from sections: [DiffSection],
+        selectedPath _: String?
+    ) -> [DiffSection] {
+        let fileSections = sections.filter { $0.path != nil }
+        return fileSections.isEmpty ? sections : fileSections
+    }
+
+    private func ensureSelectedDiffPath(for project: ProjectState, sections: [DiffSection]) {
+        let availablePaths = sections.compactMap(\.path)
+        guard !availablePaths.isEmpty else { return }
+        if let selectedPath = project.selectedInspectorPath,
+           availablePaths.contains(selectedPath) {
+            return
+        }
+        project.selectedInspectorPath = availablePaths[0]
+    }
+
     private func loadProjectDiff(for project: ProjectState) async {
         let snapshot = diffTaskKey(for: project)
         let visibleFiles = visibleDiffFiles(for: project)
         activeLoadKey = snapshot
+        loadFailureKey = nil
 
         guard project.gitInfo.isGitRepo, !visibleFiles.isEmpty else {
             diffSections = []
             splitRowsBySectionID = [:]
             displayedDiffKey = nil
             isLoadingDiff = false
+            loadFailureKey = nil
             return
         }
 
@@ -1254,6 +1454,8 @@ struct DiffView: View {
             splitRowsBySectionID = [:]
             displayedDiffKey = snapshot
             isLoadingDiff = false
+            loadFailureKey = nil
+            ensureSelectedDiffPath(for: project, sections: cachedSections)
             return
         }
 
@@ -1272,7 +1474,13 @@ struct DiffView: View {
             sections = try await Self.parseExecutor.run(priority: .userInitiated) {
                 DiffView.sections(from: diff)
             }
+        } catch is CancellationError {
+            return
         } catch {
+            guard activeLoadKey == snapshot,
+                  diffTaskKey(for: project) == snapshot else { return }
+            isLoadingDiff = false
+            loadFailureKey = snapshot
             return
         }
         guard !Task.isCancelled,
@@ -1283,6 +1491,8 @@ struct DiffView: View {
         splitRowsBySectionID = [:]
         displayedDiffKey = snapshot
         isLoadingDiff = false
+        loadFailureKey = nil
+        ensureSelectedDiffPath(for: project, sections: sections)
     }
 
     private func precomputeSplitRowsIfNeeded(for project: ProjectState) async {
@@ -1294,17 +1504,22 @@ struct DiffView: View {
         }
 
         let snapshot = displayedDiffKey
-        let sections = diffSections
+        let sections = selectedCanvasSections(
+            from: diffSections,
+            selectedPath: project.selectedInspectorPath
+        )
         guard snapshot != nil, !sections.isEmpty else { return }
 
         let missingSections = sections.filter { splitRowsBySectionID[$0.id] == nil }
         guard !missingSections.isEmpty else { return }
 
-        let computedRows: [String: [SplitDiffRow]]
+        let computedRows: [String: SplitSectionRows]
         do {
             computedRows = try await Self.parseExecutor.run(priority: .userInitiated) {
                 Self.splitRowsMap(from: missingSections)
             }
+        } catch is CancellationError {
+            return
         } catch {
             return
         }
@@ -1458,9 +1673,9 @@ struct DiffView: View {
     }
 
     private func openFile(_ path: String, in project: ProjectState) {
-        let url = project.project.rootURL.appendingPathComponent(path)
-        NSWorkspace.shared.open(url)
+        NSWorkspace.shared.open(project.project.rootURL.appendingPathComponent(path))
     }
+
 }
 
 private enum LineNumberEmphasis {
