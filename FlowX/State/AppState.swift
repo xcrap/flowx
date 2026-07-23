@@ -118,6 +118,18 @@ struct ThreadLifecycleConfirmation: Identifiable {
     }
 }
 
+struct ThreadRenameRequest: Identifiable {
+    let id = UUID()
+    let agentID: UUID?
+    let projectID: UUID
+    let providerIdentity: NativeThreadIdentity
+    let currentTitle: String
+
+    var providerName: String {
+        providerIdentity.providerID == "claude" ? "Claude Code" : "Codex"
+    }
+}
+
 struct NativeThreadIdentity: Codable, Sendable, Hashable {
     var providerID: String
     var providerSource: String
@@ -145,6 +157,8 @@ struct NativeThreadBinding: Codable, Sendable, Equatable {
     var agentMode: AgentMode?
     var agentAccess: AgentAccess?
     var status: String?
+    var currentContextTokens: Int?
+    var contextWindow: Int?
 
     init(summary: ProviderNativeThreadSummary) {
         identity = NativeThreadIdentity(
@@ -162,6 +176,8 @@ struct NativeThreadBinding: Codable, Sendable, Equatable {
         agentMode = summary.agentMode
         agentAccess = summary.agentAccess
         status = summary.status
+        currentContextTokens = summary.currentContextTokens
+        contextWindow = summary.contextWindow
     }
 }
 
@@ -1040,10 +1056,17 @@ final class AppState {
     }
     var rightPanelTab: RightPanelTab = .changes { didSet { persistStateIfBootstrapped() } }
     var sidebarVisible = true { didSet { persistStateIfBootstrapped() } }
-    var settingsVisible = false
+    var settingsVisible = false {
+        didSet {
+            if !settingsVisible, settingsTab != .general {
+                settingsTab = .general
+            }
+        }
+    }
     var settingsTab: SettingsPanel.SettingsTab = .general
     var commandPaletteVisible = false
     var threadLifecycleConfirmation: ThreadLifecycleConfirmation?
+    var threadRenameRequest: ThreadRenameRequest?
     var runtimeHealth: [String: BinaryHealth] = [:]
     var isBootstrapped = false
 
@@ -1371,6 +1394,30 @@ final class AppState {
         return actions
     }
 
+    func canRenameNativeThread(_ agent: AgentInfo) -> Bool {
+        guard agent.nativeThreadBinding != nil else { return false }
+        return providerRegistry.provider(for: agent.providerID)
+            is any AIProviderNativeThreadRenaming
+    }
+
+    func canRenameArchivedNativeThread(_ binding: NativeThreadBinding) -> Bool {
+        providerRegistry.provider(for: binding.identity.providerID)
+            is any AIProviderNativeThreadRenaming
+    }
+
+    func threadRenameBlockedReason(for agent: AgentInfo, in project: ProjectState) -> String? {
+        guard canRenameNativeThread(agent) else {
+            return "This provider task cannot be renamed."
+        }
+        if project.isSyncingNativeThreads {
+            return "Wait for provider task refresh to finish, then try again."
+        }
+        if threadLifecycleAgentIDs.contains(agent.id) {
+            return "A task action is already in progress."
+        }
+        return nil
+    }
+
     func threadLifecycleBlockedReason(for agent: AgentInfo, in project: ProjectState) -> String? {
         if agent.isStreaming {
             return "Stop the current FlowX run before managing this task."
@@ -1428,6 +1475,69 @@ final class AppState {
         )
     }
 
+    func requestThreadRename(for agent: AgentInfo) {
+        guard let project = project(for: agent.id),
+              let binding = agent.nativeThreadBinding else {
+            reportThreadLifecycleError(
+                "This task is not bound to a provider-owned thread.",
+                for: agent
+            )
+            return
+        }
+        if let blockedReason = threadRenameBlockedReason(for: agent, in: project) {
+            reportThreadLifecycleError(blockedReason, for: agent)
+            return
+        }
+
+        threadRenameRequest = ThreadRenameRequest(
+            agentID: agent.id,
+            projectID: project.id,
+            providerIdentity: binding.identity,
+            currentTitle: binding.title
+        )
+    }
+
+    func requestArchivedThreadRename(
+        _ binding: NativeThreadBinding,
+        in project: ProjectState
+    ) {
+        let identity = binding.identity
+        guard projects.contains(where: { $0.id == project.id }),
+              project.archivedNativeThreadBindings.contains(where: { $0.identity == identity }),
+              canRenameArchivedNativeThread(binding) else {
+            project.threadLifecycleNotice = "Renaming is unavailable for this archived task."
+            project.threadLifecycleNoticeIsError = true
+            return
+        }
+        guard !project.isSyncingNativeThreads,
+              !archivedThreadLifecycleIdentities.contains(identity) else {
+            project.threadLifecycleNotice = "Wait for the current task action to finish, then try again."
+            project.threadLifecycleNoticeIsError = true
+            return
+        }
+
+        threadRenameRequest = ThreadRenameRequest(
+            agentID: nil,
+            projectID: project.id,
+            providerIdentity: identity,
+            currentTitle: binding.title
+        )
+    }
+
+    func cancelThreadRename() {
+        threadRenameRequest = nil
+    }
+
+    func confirmThreadRename(_ name: String) {
+        guard let request = threadRenameRequest else { return }
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedName.isEmpty else { return }
+        threadRenameRequest = nil
+        Task { @MainActor [weak self] in
+            await self?.performThreadRename(request, name: normalizedName)
+        }
+    }
+
     func requestArchivedThreadDeletion(
         _ binding: NativeThreadBinding,
         in project: ProjectState
@@ -1465,6 +1575,78 @@ final class AppState {
         threadLifecycleConfirmation = nil
         Task { @MainActor [weak self] in
             await self?.performThreadLifecycleAction(confirmation)
+        }
+    }
+
+    private func performThreadRename(
+        _ request: ThreadRenameRequest,
+        name: String
+    ) async {
+        guard let project = projects.first(where: { $0.id == request.projectID }),
+              !project.isSyncingNativeThreads,
+              let provider = providerRegistry.provider(for: request.providerIdentity.providerID)
+                as? any AIProviderNativeThreadRenaming else {
+            return
+        }
+
+        let identity = request.providerIdentity
+        let progressAgentID = request.agentID
+        if let agentID = progressAgentID {
+            guard let agent = project.agents.first(where: { $0.id == agentID }),
+                  agent.nativeThreadBinding?.identity == identity,
+                  !threadLifecycleAgentIDs.contains(agentID) else {
+                project.threadLifecycleNotice = "The task changed before it could be renamed."
+                project.threadLifecycleNoticeIsError = true
+                return
+            }
+            threadLifecycleAgentIDs.insert(agentID)
+        } else {
+            guard project.archivedNativeThreadBindings.contains(where: { $0.identity == identity }),
+                  !archivedThreadLifecycleIdentities.contains(identity) else {
+                project.threadLifecycleNotice = "The archived task changed before it could be renamed."
+                project.threadLifecycleNoticeIsError = true
+                return
+            }
+            archivedThreadLifecycleIdentities.insert(identity)
+        }
+        defer {
+            if let progressAgentID {
+                threadLifecycleAgentIDs.remove(progressAgentID)
+            } else {
+                archivedThreadLifecycleIdentities.remove(identity)
+            }
+        }
+
+        do {
+            try await provider.renameNativeThread(
+                id: identity.sessionID,
+                name: name,
+                workingDirectory: project.project.rootURL
+            )
+            guard projects.contains(where: { $0.id == project.id }) else { return }
+
+            for agent in project.agents where agent.nativeThreadBinding?.identity == identity {
+                if var binding = agent.nativeThreadBinding {
+                    binding.title = name
+                    binding.updatedAt = Date()
+                    agent.nativeThreadBinding = binding
+                }
+                agent.title = name
+            }
+            for index in project.archivedNativeThreadBindings.indices
+                where project.archivedNativeThreadBindings[index].identity == identity {
+                project.archivedNativeThreadBindings[index].title = name
+                project.archivedNativeThreadBindings[index].updatedAt = Date()
+            }
+
+            project.threadLifecycleNotice = nil
+            project.threadLifecycleNoticeIsError = false
+            project.project.updatedAt = Date()
+            scheduleSave()
+            refreshNativeThreads(for: project, discoveryMode: .indexed)
+        } catch {
+            project.threadLifecycleNotice = "Could not rename “\(request.currentTitle)”: \(error.localizedDescription)"
+            project.threadLifecycleNoticeIsError = true
         }
     }
 
@@ -2613,6 +2795,13 @@ final class AppState {
     }
 
     private func updateNativeThreadBinding(_ binding: NativeThreadBinding, for agent: AgentInfo) {
+        if let currentContextTokens = binding.currentContextTokens,
+           currentContextTokens >= 0 {
+            agent.conversationState.currentContextTokens = currentContextTokens
+        }
+        if let contextWindow = binding.contextWindow, contextWindow > 0 {
+            agent.conversationState.reportedContextWindow = contextWindow
+        }
         guard agent.nativeThreadBinding != binding else { return }
         let wasActive = agent.nativeThreadBinding?.status?.lowercased() == "active"
         let normalizedStatus = binding.status?.lowercased()
@@ -2916,6 +3105,8 @@ final class AppState {
             agentMode: summary.agentMode,
             agentAccess: summary.agentAccess,
             status: summary.status,
+            currentContextTokens: summary.currentContextTokens,
+            contextWindow: summary.contextWindow,
             source: source
         )
         return NativeThreadBinding(summary: normalizedSummary)

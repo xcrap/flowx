@@ -163,32 +163,12 @@ struct FlowXCommands: Commands {
                 }
             }
 
-            if let project = appState.activeProject,
-               !project.archivedNativeThreadBindings.isEmpty {
-                Menu("Archived Tasks") {
-                    ForEach(project.archivedNativeThreadBindings, id: \.identity) { binding in
-                        Menu(binding.title) {
-                            Button("Restore Task") {
-                                appState.unarchiveNativeThread(binding, in: project)
-                            }
-                            .disabled(
-                                project.isSyncingNativeThreads
-                                    || appState.isArchivedThreadActionInProgress(binding.identity)
-                            )
-
-                            if appState.providerRegistry.provider(for: binding.identity.providerID)
-                                is any AIProviderNativeThreadDeleting {
-                                Divider()
-                                Button("Delete Permanently", role: .destructive) {
-                                    appState.requestArchivedThreadDeletion(binding, in: project)
-                                }
-                                .disabled(
-                                    project.isSyncingNativeThreads
-                                        || appState.isArchivedThreadActionInProgress(binding.identity)
-                                )
-                            }
-                        }
-                    }
+            if appState.projects.contains(where: {
+                !$0.archivedNativeThreadBindings.isEmpty
+            }) {
+                Button("Archived Tasks…") {
+                    appState.settingsTab = .archivedTasks
+                    appState.settingsVisible = true
                 }
             }
         }

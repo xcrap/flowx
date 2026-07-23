@@ -631,7 +631,7 @@ final class ClaudeStreamParser: @unchecked Sendable {
     }
 }
 
-public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIProviderNativeThreadTrashManaging, AIProviderRuntimeDefaultsProviding, Sendable {
+public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIProviderNativeThreadRenaming, AIProviderNativeThreadTrashManaging, AIProviderRuntimeDefaultsProviding, Sendable {
     public let id = "claude"
     public let displayName = "Claude Code"
     public var availableModels: [AIModel] { modelCatalog.models }
@@ -766,9 +766,21 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
         try await nativeStore.moveToTrash(id: id, workingDirectory: workingDirectory)
     }
 
+    public func renameNativeThread(
+        id: String,
+        name: String,
+        workingDirectory: URL
+    ) async throws {
+        try await nativeStore.rename(
+            id: id,
+            name: name,
+            workingDirectory: workingDirectory
+        )
+    }
+
     static let fallbackModels: [AIModel] = [
-        AIModel(id: "claude-fable-5", name: "Claude Fable 5", contextWindow: 200_000, maxContextWindow: 200_000, defaultReasoningEffort: "high", supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"], isDefault: true),
-        AIModel(id: "claude-opus-4-8", name: "Claude Opus 4.8", contextWindow: 200_000, maxContextWindow: 200_000, defaultReasoningEffort: "high", supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"]),
+        AIModel(id: "claude-fable-5", name: "Claude Fable 5", contextWindow: 1_000_000, maxContextWindow: 1_000_000, defaultReasoningEffort: "high", supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"], isDefault: true),
+        AIModel(id: "claude-opus-4-8", name: "Claude Opus 4.8", contextWindow: 1_000_000, maxContextWindow: 1_000_000, defaultReasoningEffort: "high", supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"]),
         AIModel(id: "claude-sonnet-5", name: "Claude Sonnet 5", contextWindow: 200_000, maxContextWindow: 200_000, defaultReasoningEffort: "high", supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"]),
         AIModel(id: "claude-haiku-4-5", name: "Claude Haiku 4.5", contextWindow: 200_000, maxContextWindow: 200_000),
     ]

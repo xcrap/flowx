@@ -885,6 +885,18 @@ private actor CleanupInvocationCounter {
     #expect(request.params["threadId"] as? String == "thr_provider_owned")
 }
 
+@Test func codexNativeThreadRenameUsesTheProviderNameRPC() {
+    let request = CodexProvider.nativeThreadRenameRequestForTesting(
+        threadID: "thr_provider_owned",
+        name: "Polished task name"
+    )
+
+    #expect(request.method == "thread/name/set")
+    #expect(request.params.count == 2)
+    #expect(request.params["threadId"] as? String == "thr_provider_owned")
+    #expect(request.params["name"] as? String == "Polished task name")
+}
+
 @Test func codexNativeLifecycleBlocksActiveProviderTasks() {
     #expect(CodexProvider.nativeThreadIsActiveForTesting("active"))
     #expect(CodexProvider.nativeThreadIsActiveForTesting(" ACTIVE "))
@@ -1072,6 +1084,12 @@ private actor CleanupInvocationCounter {
     ])
     #expect(ClaudeCodeProvider.fallbackModels.prefix(3).allSatisfy { $0.defaultReasoningEffort == "high" })
     #expect(ClaudeCodeProvider.fallbackModels.last?.supportedReasoningEfforts.isEmpty == true)
+    #expect(ClaudeCodeProvider.fallbackModels[0].contextWindow == 1_000_000)
+    #expect(ClaudeCodeProvider.fallbackModels[0].availableContextWindows == [1_000_000])
+    #expect(ClaudeCodeProvider.fallbackModels[1].contextWindow == 1_000_000)
+    #expect(ClaudeCodeProvider.fallbackModels[2].contextWindow == 200_000)
+    #expect(ClaudeCodeProvider.fallbackModels[2].maxContextWindow == 200_000)
+    #expect(ClaudeCodeProvider.fallbackModels[3].contextWindow == 200_000)
 
     let automatic = ClaudeCodeProvider.buildArguments(
         model: nil,
@@ -1311,7 +1329,7 @@ private actor CleanupInvocationCounter {
     let sessionID = "11111111-2222-4333-8444-555555555555"
     let records = [
         #"{"type":"user","uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","sessionId":"11111111-2222-4333-8444-555555555555","cwd":"WORKSPACE","timestamp":"2026-07-23T01:00:00.000Z","message":{"content":"Build it"}}"#,
-        #"{"type":"assistant","uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","sessionId":"11111111-2222-4333-8444-555555555555","cwd":"WORKSPACE","timestamp":"2026-07-23T01:00:01.000Z","message":{"model":"claude-fable-5","content":[{"type":"text","text":"Built"},{"type":"tool_use","id":"tool-1","name":"Read","input":{"path":"README.md"}}]}}"#,
+        #"{"type":"assistant","uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","sessionId":"11111111-2222-4333-8444-555555555555","cwd":"WORKSPACE","timestamp":"2026-07-23T01:00:01.000Z","message":{"model":"claude-fable-5","usage":{"input_tokens":2,"cache_creation_input_tokens":12000,"cache_read_input_tokens":25000,"output_tokens":415},"content":[{"type":"text","text":"Built"},{"type":"tool_use","id":"tool-1","name":"Read","input":{"path":"README.md"}}]}}"#,
         #"{"type":"last-prompt","sessionId":"11111111-2222-4333-8444-555555555555","lastPrompt":"Build it"}"#,
     ]
     .map { $0.replacingOccurrences(of: "WORKSPACE", with: canonical) }
@@ -1323,8 +1341,10 @@ private actor CleanupInvocationCounter {
     #expect(summaries.count == 1)
     #expect(summaries.first?.id == sessionID)
     #expect(summaries.first?.model == "claude-fable-5")
+    #expect(summaries.first?.currentContextTokens == 37_417)
 
     let thread = try await store.read(id: sessionID, workingDirectory: workspace)
+    #expect(thread.summary.currentContextTokens == 37_417)
     #expect(thread.messages.count == 2)
     #expect(thread.messages.first?.textContent == "Build it")
     #expect(thread.messages.last?.textContent == "Built")
@@ -1649,6 +1669,64 @@ private actor CleanupInvocationCounter {
             .path
     ))
     #expect(try await store.list(workingDirectory: workspace, limit: 10).isEmpty)
+}
+
+@Test func claudeNativeSessionRenameAppendsTheProviderCustomTitleRecord() async throws {
+    let manager = FileManager.default
+    let container = manager.temporaryDirectory
+        .appendingPathComponent("flowx-claude-rename-\(UUID().uuidString)", isDirectory: true)
+    let workspace = container.appendingPathComponent("workspace", isDirectory: true)
+    let otherWorkspace = container.appendingPathComponent("other-workspace", isDirectory: true)
+    let config = container.appendingPathComponent("claude-config", isDirectory: true)
+    try manager.createDirectory(at: workspace, withIntermediateDirectories: true)
+    try manager.createDirectory(at: otherWorkspace, withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: container) }
+
+    let canonical = workspace.resolvingSymlinksInPath().standardizedFileURL.path
+    let projectKey = canonical.unicodeScalars.map { scalar -> Character in
+        CharacterSet.alphanumerics.contains(scalar) ? Character(String(scalar)) : "-"
+    }
+    let project = config.appendingPathComponent("projects", isDirectory: true)
+        .appendingPathComponent(String(projectKey), isDirectory: true)
+    try manager.createDirectory(at: project, withIntermediateDirectories: true)
+
+    let sessionID = "31111111-2222-4333-8444-555555555555"
+    let sessionFile = project.appendingPathComponent(sessionID).appendingPathExtension("jsonl")
+    let record = #"{"type":"user","sessionId":"SESSION","cwd":"WORKSPACE","timestamp":"2026-07-23T01:00:00.000Z","message":{"content":"Original prompt"}}"#
+        .replacingOccurrences(of: "SESSION", with: sessionID)
+        .replacingOccurrences(of: "WORKSPACE", with: canonical) + "\n"
+    try Data(record.utf8).write(to: sessionFile)
+
+    let store = ClaudeNativeThreadStore(configRoot: config)
+    #expect(try await store.list(workingDirectory: workspace, limit: 10).first?.title == "Original prompt")
+
+    await #expect(throws: (any Error).self) {
+        try await store.rename(
+            id: sessionID,
+            name: "Wrong workspace",
+            workingDirectory: otherWorkspace
+        )
+    }
+
+    try await store.rename(
+        id: sessionID,
+        name: #"  Renamed "natively"  "#,
+        workingDirectory: workspace
+    )
+
+    let lines = try String(contentsOf: sessionFile, encoding: .utf8)
+        .split(separator: "\n")
+    let lastLine = try #require(lines.last)
+    let appended = try #require(
+        try JSONSerialization.jsonObject(with: Data(lastLine.utf8)) as? [String: Any]
+    )
+    #expect(appended["type"] as? String == "custom-title")
+    #expect(appended["sessionId"] as? String == sessionID)
+    #expect(appended["customTitle"] as? String == #"Renamed "natively""#)
+    #expect(appended.count == 3)
+
+    let refreshed = try await store.list(workingDirectory: workspace, limit: 10)
+    #expect(refreshed.first?.title == #"Renamed "natively""#)
 }
 
 @Test func claudeNativeSummaryCacheReusesAndInvalidatesMetadata() async throws {

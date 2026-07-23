@@ -36,6 +36,7 @@ struct PersistedConversation: Codable, Sendable {
     var totalCachedInputTokens: Int
     var totalReasoningOutputTokens: Int
     var totalTokens: Int
+    var currentContextTokens: Int?
     var reportedContextWindow: Int?
     var activeGoal: ConversationGoal?
     var nativeImageSidecar: [NativeImageSidecarEntry]
@@ -51,6 +52,7 @@ struct PersistedConversation: Codable, Sendable {
         case totalCachedInputTokens
         case totalReasoningOutputTokens
         case totalTokens
+        case currentContextTokens
         case reportedContextWindow
         case activeGoal
         case nativeImageSidecar
@@ -67,6 +69,7 @@ struct PersistedConversation: Codable, Sendable {
         totalCachedInputTokens: Int,
         totalReasoningOutputTokens: Int,
         totalTokens: Int,
+        currentContextTokens: Int?,
         reportedContextWindow: Int?,
         activeGoal: ConversationGoal?,
         nativeImageSidecar: [NativeImageSidecarEntry]
@@ -81,6 +84,7 @@ struct PersistedConversation: Codable, Sendable {
         self.totalCachedInputTokens = totalCachedInputTokens
         self.totalReasoningOutputTokens = totalReasoningOutputTokens
         self.totalTokens = totalTokens
+        self.currentContextTokens = currentContextTokens
         self.reportedContextWindow = reportedContextWindow
         self.activeGoal = activeGoal
         self.nativeImageSidecar = nativeImageSidecar
@@ -102,6 +106,7 @@ struct PersistedConversation: Codable, Sendable {
         totalCachedInputTokens = (try? container.decode(Int.self, forKey: .totalCachedInputTokens)) ?? 0
         totalReasoningOutputTokens = (try? container.decode(Int.self, forKey: .totalReasoningOutputTokens)) ?? 0
         totalTokens = (try? container.decode(Int.self, forKey: .totalTokens)) ?? 0
+        currentContextTokens = try? container.decodeIfPresent(Int.self, forKey: .currentContextTokens)
         reportedContextWindow = try? container.decodeIfPresent(Int.self, forKey: .reportedContextWindow)
         activeGoal = try? container.decodeIfPresent(ConversationGoal.self, forKey: .activeGoal)
         nativeImageSidecar = (try? container.decode(
@@ -336,6 +341,7 @@ enum ConversationPersistence {
             totalCachedInputTokens: state.totalCachedInputTokens,
             totalReasoningOutputTokens: state.totalReasoningOutputTokens,
             totalTokens: state.totalTokens,
+            currentContextTokens: state.currentContextTokens,
             reportedContextWindow: state.reportedContextWindow,
             activeGoal: state.activeGoal,
             nativeImageSidecar: agent.nativeImageSidecar
@@ -525,6 +531,7 @@ enum ConversationPersistence {
         state.totalCachedInputTokens = conversation.totalCachedInputTokens
         state.totalReasoningOutputTokens = conversation.totalReasoningOutputTokens
         state.totalTokens = conversation.totalTokens
+        state.currentContextTokens = conversation.currentContextTokens
         state.reportedContextWindow = conversation.reportedContextWindow
         state.activeGoal = conversation.activeGoal
     }

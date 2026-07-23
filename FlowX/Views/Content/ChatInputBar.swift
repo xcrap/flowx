@@ -164,9 +164,11 @@ struct ChatInputBar: View {
                             appState.cancelPrompt(for: agent)
                         }
                     }) {
-                        Image(systemName: composerIcon)
-                            .font(FXTypography.icon(.action))
-                            .foregroundStyle(sendButtonColor)
+                        FXContextRingIcon(
+                            icon: composerIcon,
+                            progress: contextUsageProgress,
+                            tint: sendButtonColor
+                        )
                     }
                     .buttonStyle(.plain)
                     .disabled(
@@ -177,6 +179,7 @@ struct ChatInputBar: View {
                     .help(composerHelpText)
                     .accessibilityLabel(composerAccessibilityLabel)
                     .accessibilityHint(composerHelpText)
+                    .accessibilityValue(contextUsageDescription ?? "Context usage unavailable")
                 }
                 .padding(.horizontal, FXSpacing.lg)
                 .padding(.bottom, FXSpacing.md)
@@ -474,13 +477,13 @@ struct ChatInputBar: View {
     private var composerIcon: String {
         return switch composerAction {
         case .send:
-            "arrow.up.circle.fill"
+            "arrow.up"
         case .steer:
-            "arrow.up.forward.circle.fill"
+            "arrow.up.forward"
         case .queue:
-            "plus.circle.fill"
+            "plus"
         case .cancel:
-            "stop.circle.fill"
+            "stop.fill"
         }
     }
 
@@ -489,7 +492,7 @@ struct ChatInputBar: View {
             return "Choose a vision-capable model or remove the image attachments"
         }
 
-        return switch composerAction {
+        let actionHelp = switch composerAction {
         case .send:
             "Send prompt (Command-Return or Control-Return)"
         case .steer:
@@ -499,6 +502,9 @@ struct ChatInputBar: View {
         case .cancel:
             "Cancel current run"
         }
+
+        guard let contextUsageDescription else { return actionHelp }
+        return "\(actionHelp) · \(contextUsageDescription)"
     }
 
     private var composerAccessibilityLabel: String {
@@ -525,6 +531,33 @@ struct ChatInputBar: View {
         case .send:
             return hasDraftInput ? FXColors.accent : FXColors.fgQuaternary
         }
+    }
+
+    private var contextUsageProgress: Double? {
+        contextUsage.map(\.progress)
+    }
+
+    private var contextUsageDescription: String? {
+        guard let contextUsage else { return nil }
+        let percentage = Int((contextUsage.progress * 100).rounded())
+        return "\(percentage)% context (\(formattedContextWindow(contextUsage.tokens)) of \(formattedContextWindow(contextUsage.limit)))"
+    }
+
+    private var contextUsage: (tokens: Int, limit: Int, progress: Double)? {
+        guard let tokens = agent.conversationState.currentContextTokens,
+              tokens >= 0,
+              let limit = agent.conversationState.reportedContextWindow
+                ?? agent.conversationState.configuredContextWindow
+                ?? currentModel?.contextWindow,
+              limit > 0 else {
+            return nil
+        }
+
+        return (
+            tokens: tokens,
+            limit: limit,
+            progress: min(max(Double(tokens) / Double(limit), 0), 1)
+        )
     }
 
     private var inlineDivider: some View {

@@ -437,6 +437,8 @@ public struct ProviderNativeThreadSummary: Identifiable, Sendable, Equatable {
     public var agentMode: AgentMode?
     public var agentAccess: AgentAccess?
     public var status: String?
+    public var currentContextTokens: Int?
+    public var contextWindow: Int?
     public var source: String
 
     public init(
@@ -452,6 +454,8 @@ public struct ProviderNativeThreadSummary: Identifiable, Sendable, Equatable {
         agentMode: AgentMode? = nil,
         agentAccess: AgentAccess? = nil,
         status: String? = nil,
+        currentContextTokens: Int? = nil,
+        contextWindow: Int? = nil,
         source: String
     ) {
         self.providerID = providerID
@@ -466,6 +470,8 @@ public struct ProviderNativeThreadSummary: Identifiable, Sendable, Equatable {
         self.agentMode = agentMode
         self.agentAccess = agentAccess
         self.status = status
+        self.currentContextTokens = currentContextTokens
+        self.contextWindow = contextWindow
         self.source = source
     }
 }
@@ -515,6 +521,17 @@ public extension AIProviderNativeThreads {
     ) async throws -> [ProviderNativeThreadSummary] {
         try await listNativeThreads(workingDirectory: workingDirectory, limit: limit)
     }
+}
+
+/// Provider-native task renaming. The provider-owned thread title remains
+/// authoritative; FlowX updates its presentation cache only after this
+/// operation succeeds.
+public protocol AIProviderNativeThreadRenaming: AIProvider {
+    func renameNativeThread(
+        id: String,
+        name: String,
+        workingDirectory: URL
+    ) async throws
 }
 
 /// Provider-native archive support. Archive and unarchive must be real

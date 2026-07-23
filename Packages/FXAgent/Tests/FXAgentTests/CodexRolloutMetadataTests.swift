@@ -366,3 +366,81 @@ private let july24UTC = Date(timeIntervalSince1970: 1_784_851_200)
                 + CodexRolloutMetadataStore.maximumContextSearchBytes
     )
 }
+
+@Test func codexRolloutMetadataHydratesAndRefreshesSelectedTaskContextUsage() throws {
+    let manager = FileManager.default
+    let layout = try makeRolloutContainer(named: "flowx-codex-rollout-usage")
+    defer { try? manager.removeItem(at: layout.container) }
+
+    let threadID = "61111111-2222-4333-8444-555555555555"
+    let file = layout.datedDirectory
+        .appendingPathComponent("rollout-2026-07-23T12-00-00-\(threadID)")
+        .appendingPathExtension("jsonl")
+    var transcript = try rolloutLine([
+        "type": "session_meta",
+        "payload": ["id": threadID],
+    ])
+    transcript.append(try rolloutLine([
+        "type": "event_msg",
+        "payload": [
+            "type": "token_count",
+            "info": [
+                "last_token_usage": ["total_tokens": 12_000],
+                "model_context_window": 258_400,
+            ],
+        ],
+    ]))
+    transcript.append(try rolloutLine([
+        "type": "event_msg",
+        "payload": [
+            "blob": String(
+                repeating: "z",
+                count: CodexRolloutMetadataStore.usageSearchChunkBytes * 2
+            ),
+        ],
+    ]))
+    transcript.append(try rolloutLine([
+        "type": "event_msg",
+        "payload": [
+            "type": "token_count",
+            "info": [
+                "last_token_usage": ["total_tokens": 112_251],
+                "model_context_window": 258_400,
+            ],
+        ],
+    ]))
+    try transcript.write(to: file)
+
+    var store = CodexRolloutMetadataStore(sessionsRoot: layout.sessions)
+    let summary = rolloutSummary(id: threadID, createdAt: july24UTC)
+    let hydrated = store.enrichUsage(summary)
+    #expect(hydrated.currentContextTokens == 112_251)
+    #expect(hydrated.contextWindow == 258_400)
+    #expect(
+        store.totalBytesRead
+            <= CodexRolloutMetadataStore.maximumSessionMetadataBytes
+                + CodexRolloutMetadataStore.maximumUsageSearchBytes
+                + CodexRolloutMetadataStore.maximumUsageRecordBytes * 2
+    )
+
+    let bytesRead = store.totalBytesRead
+    let cached = store.enrichUsage(summary)
+    #expect(cached.currentContextTokens == 112_251)
+    #expect(store.totalBytesRead == bytesRead)
+
+    transcript.append(try rolloutLine([
+        "type": "event_msg",
+        "payload": [
+            "type": "token_count",
+            "info": [
+                "last_token_usage": ["total_tokens": 8_500],
+                "model_context_window": 258_400,
+            ],
+        ],
+    ]))
+    try transcript.write(to: file, options: [.atomic])
+
+    let refreshed = store.enrichUsage(summary)
+    #expect(refreshed.currentContextTokens == 8_500)
+    #expect(refreshed.contextWindow == 258_400)
+}

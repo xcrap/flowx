@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import FXCore
 
@@ -76,6 +77,7 @@ actor ClaudeNativeThreadStore {
         var effort: String?
         var agentMode: AgentMode?
         var agentAccess: AgentAccess?
+        var currentContextTokens: Int?
         var createdAt: Date?
         var updatedAt: Date?
         var messages: [ConversationMessage] = []
@@ -289,6 +291,73 @@ actor ClaudeNativeThreadStore {
         }
     }
 
+    func rename(
+        id: String,
+        name: String,
+        workingDirectory: URL
+    ) throws {
+        try Task.checkCancellation()
+        guard Self.isSafeSessionID(id) else {
+            throw Self.error("Invalid Claude Code session id.")
+        }
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedName.isEmpty else {
+            throw Self.error("A task name is required.")
+        }
+
+        let configuredDirectory = try Self.standardizedDirectory(workingDirectory)
+        let canonicalDirectory = configuredDirectory.resolvingSymlinksInPath().standardizedFileURL
+        let keys: Set<URLResourceKey> = [
+            .isRegularFileKey,
+            .fileSizeKey,
+            .creationDateKey,
+            .contentModificationDateKey,
+        ]
+        var matchedFilesByCanonicalPath: [String: URL] = [:]
+        var cachePaths: Set<String> = []
+
+        for projectDirectory in projectDirectories(
+            configuredDirectory: configuredDirectory,
+            canonicalDirectory: canonicalDirectory
+        ) {
+            try Task.checkCancellation()
+            let file = projectDirectory.appendingPathComponent(id).appendingPathExtension("jsonl")
+            guard let values = try? file.resourceValues(forKeys: keys),
+                  values.isRegularFile == true,
+                  let summary = try summary(
+                    for: file,
+                    values: values,
+                    canonicalDirectory: canonicalDirectory
+                  ),
+                  summary.id == id,
+                  Self.canonicalPath(summary.workingDirectory) == canonicalDirectory.path else {
+                continue
+            }
+            let standardizedFile = file.standardizedFileURL
+            let resolvedFile = standardizedFile.resolvingSymlinksInPath()
+            matchedFilesByCanonicalPath[resolvedFile.path] = resolvedFile
+            cachePaths.insert(standardizedFile.path)
+            cachePaths.insert(resolvedFile.path)
+        }
+
+        guard !matchedFilesByCanonicalPath.isEmpty else {
+            throw Self.error("Claude Code session '\(id)' was not found for this workspace.")
+        }
+
+        let record: [String: Any] = [
+            "type": "custom-title",
+            "customTitle": normalizedName,
+            "sessionId": id,
+        ]
+        for file in matchedFilesByCanonicalPath.values.sorted(by: { $0.path < $1.path }) {
+            try Self.appendJSONLine(record, to: file)
+        }
+        for path in cachePaths {
+            summaryCache[path] = nil
+            transcriptCache[path] = nil
+        }
+    }
+
     func summaryCacheStatisticsForTesting() -> (entries: Int, parses: Int) {
         (summaryCache.count, summaryParseCount)
     }
@@ -352,6 +421,7 @@ actor ClaudeNativeThreadStore {
                 agentMode: parsed.agentMode,
                 agentAccess: parsed.agentAccess,
                 status: "native",
+                currentContextTokens: parsed.currentContextTokens,
                 source: "claude-jsonl"
             )
         } else {
@@ -550,6 +620,11 @@ actor ClaudeNativeThreadStore {
                 if message.keys.contains("model") {
                     parsed.model = nonEmpty(message["model"] as? String)
                 }
+                if object["isSidechain"] as? Bool != true,
+                   let usage = message["usage"] as? [String: Any],
+                   let currentContextTokens = currentContextTokens(from: usage) {
+                    parsed.currentContextTokens = currentContextTokens
+                }
                 guard includeMessages else { continue }
                 let contents = assistantContents(message["content"])
                 guard !contents.isEmpty else { continue }
@@ -571,6 +646,33 @@ actor ClaudeNativeThreadStore {
         }
         try Task.checkCancellation()
         return parsed
+    }
+
+    private static func currentContextTokens(
+        from usage: [String: Any]
+    ) -> Int? {
+        let keys = [
+            "input_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+            "output_tokens",
+        ]
+        let values = keys.compactMap { nonNegativeInteger(usage[$0]) }
+        guard !values.isEmpty else { return nil }
+        return values.reduce(0, +)
+    }
+
+    private static func nonNegativeInteger(_ value: Any?) -> Int? {
+        let result: Int?
+        switch value {
+        case let value as Int:
+            result = value
+        case let value as NSNumber:
+            result = value.intValue
+        default:
+            result = nil
+        }
+        return result.flatMap { $0 >= 0 ? $0 : nil }
     }
 
     private static func agentMode(fromClaudeMode value: Any?) -> AgentMode? {
@@ -854,6 +956,45 @@ actor ClaudeNativeThreadStore {
     private nonisolated static func moveItemToTrash(_ url: URL) throws {
         var resultingURL: NSURL?
         try FileManager.default.trashItem(at: url, resultingItemURL: &resultingURL)
+    }
+
+    private nonisolated static func appendJSONLine(
+        _ object: [String: Any],
+        to url: URL
+    ) throws {
+        guard JSONSerialization.isValidJSONObject(object) else {
+            throw error("Could not encode the Claude Code task name.")
+        }
+        var payload = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        payload.append(0x0A)
+
+        let descriptor: Int32 = url.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return Int32(-1) }
+            return Darwin.open(path, O_WRONLY | O_APPEND | O_CLOEXEC)
+        }
+        guard descriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { Darwin.close(descriptor) }
+
+        try payload.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var writtenBytes = 0
+            while writtenBytes < rawBuffer.count {
+                let result = Darwin.write(
+                    descriptor,
+                    baseAddress.advanced(by: writtenBytes),
+                    rawBuffer.count - writtenBytes
+                )
+                if result > 0 {
+                    writtenBytes += result
+                } else if result < 0, errno == EINTR {
+                    continue
+                } else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+            }
+        }
     }
 
     private static func canonicalPath(_ path: String) -> String {

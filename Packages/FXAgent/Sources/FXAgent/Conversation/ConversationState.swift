@@ -267,7 +267,7 @@ public final class ConversationState {
         totalCachedInputTokens = cachedInputTokens
         totalReasoningOutputTokens = reasoningOutputTokens
         self.totalTokens = totalTokens
-        if configuredContextWindow == nil, let contextWindow, contextWindow > 0 {
+        if let contextWindow, contextWindow > 0 {
             reportedContextWindow = contextWindow
         }
     }
@@ -284,7 +284,7 @@ public final class ConversationState {
             totalTokens,
             inputTokens + outputTokens + cachedInputTokens + reasoningOutputTokens
         )
-        if configuredContextWindow == nil, let contextWindow, contextWindow > 0 {
+        if let contextWindow, contextWindow > 0 {
             reportedContextWindow = contextWindow
         }
     }

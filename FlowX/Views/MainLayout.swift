@@ -47,6 +47,14 @@ struct MainLayout: View {
                 }
 
                 if appState.settingsVisible {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            appState.settingsVisible = false
+                        }
+                        .accessibilityHidden(true)
+                        .zIndex(4)
+
                     settingsOverlay(totalSize: geometry.size)
                         .padding(.top, titleBarHeight)
                         .zIndex(5)
@@ -62,6 +70,12 @@ struct MainLayout: View {
                     ThreadLifecycleConfirmationView(confirmation: confirmation)
                         .transition(.opacity)
                         .zIndex(20)
+                }
+
+                if let request = appState.threadRenameRequest {
+                    ThreadRenameView(request: request)
+                        .transition(.opacity)
+                        .zIndex(21)
                 }
             }
         }
@@ -354,6 +368,107 @@ struct MainLayout: View {
         .buttonStyle(.plain)
         .accessibilityLabel(label)
         .accessibilityValue(active ? "Visible" : "Hidden")
+    }
+}
+
+private struct ThreadRenameView: View {
+    @Environment(AppState.self) private var appState
+    @FocusState private var nameFocused: Bool
+    @State private var name: String
+    let request: ThreadRenameRequest
+
+    init(request: ThreadRenameRequest) {
+        self.request = request
+        _name = State(initialValue: request.currentTitle)
+    }
+
+    var body: some View {
+        ZStack {
+            FXColors.overlay
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    appState.cancelThreadRename()
+                }
+
+            VStack(alignment: .leading, spacing: FXSpacing.lg) {
+                HStack(spacing: FXSpacing.md) {
+                    Image(systemName: "pencil.line")
+                        .font(FXTypography.icon(.large))
+                        .foregroundStyle(FXColors.accent)
+
+                    VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
+                        Text("Rename Task")
+                            .font(FXTypography.title2)
+                            .foregroundStyle(FXColors.fg)
+
+                        Text("Updates the name in \(request.providerName) and FlowX.")
+                            .font(FXTypography.caption)
+                            .foregroundStyle(FXColors.fgTertiary)
+                    }
+                }
+
+                TextField("Task name", text: $name)
+                    .textFieldStyle(.plain)
+                    .font(FXTypography.body)
+                    .foregroundStyle(FXColors.fg)
+                    .padding(.horizontal, FXSpacing.md)
+                    .frame(height: 38)
+                    .background(FXColors.bgSurface)
+                    .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: FXRadii.md)
+                            .strokeBorder(
+                                nameFocused ? FXColors.accent : FXColors.borderMedium,
+                                lineWidth: nameFocused ? 1 : 0.5
+                            )
+                    }
+                    .focused($nameFocused)
+                    .onSubmit(submit)
+                    .accessibilityLabel("Task name")
+
+                HStack(spacing: FXSpacing.sm) {
+                    Spacer(minLength: 0)
+
+                    FXButton("Cancel", style: .secondary) {
+                        appState.cancelThreadRename()
+                    }
+                    .keyboardShortcut(.cancelAction)
+
+                    FXButton("Rename", style: .primary) {
+                        submit()
+                    }
+                    .disabled(normalizedName.isEmpty)
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(FXSpacing.xl)
+            .frame(width: 440)
+            .background(FXColors.bgElevated)
+            .clipShape(RoundedRectangle(cornerRadius: FXRadii.xxl))
+            .overlay {
+                RoundedRectangle(cornerRadius: FXRadii.xxl)
+                    .strokeBorder(FXColors.borderMedium, lineWidth: 0.5)
+            }
+            .shadow(color: FXColors.overlay, radius: 24, y: 14)
+        }
+        .onExitCommand {
+            appState.cancelThreadRename()
+        }
+        .onAppear {
+            nameFocused = true
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Rename Task")
+    }
+
+    private var normalizedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func submit() {
+        guard !normalizedName.isEmpty else { return }
+        appState.confirmThreadRename(normalizedName)
     }
 }
 
@@ -716,6 +831,22 @@ private struct CommandPaletteView: View {
                         keywords: ["reset", "clear", "conversation", "session"]
                     ) {
                         appState.resetConversation(for: agent)
+                    }
+                )
+            }
+
+            if let project = appState.activeProject,
+               appState.canRenameNativeThread(agent),
+               appState.threadRenameBlockedReason(for: agent, in: project) == nil {
+                items.append(
+                    PaletteAction(
+                        id: "task-rename:\(agent.id.uuidString)",
+                        title: "Rename Task…",
+                        subtitle: "Update this task in \(agent.providerName) and FlowX",
+                        systemImage: "pencil",
+                        keywords: ["task", "thread", "rename", "title", "name"]
+                    ) {
+                        appState.requestThreadRename(for: agent)
                     }
                 )
             }

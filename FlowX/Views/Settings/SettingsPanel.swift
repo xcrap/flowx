@@ -6,188 +6,270 @@ import FXDesign
 struct SettingsPanel: View {
     @Environment(AppState.self) private var appState
     @Environment(AppPreferences.self) private var preferences
+    @FocusState private var isSettingsFocused: Bool
 
-    // Keep SettingsTab type for API compat but we no longer use tabs
     enum SettingsTab: String, CaseIterable {
-        case general, providers, appearance, shortcuts
+        case general, providers, appearance, shortcuts, archivedTasks
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            Text("Settings")
-                .font(FXTypography.title3)
-                .foregroundStyle(FXColors.fg)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, FXSpacing.lg)
-                .frame(height: 52)
+            settingsHeader
 
             FXDivider()
 
-            // Single scrollable pane — everything in order
-            ScrollView {
-                VStack(alignment: .leading, spacing: FXSpacing.xxxl) {
-                    // Defaults first — this is an AI app
-                    settingsSection("Defaults") {
-                        settingsMenuRow("Provider", value: selectedProvider.map { simplifiedProviderName(for: $0.displayName) } ?? "Unavailable", enabled: !providers.isEmpty, sections: [
-                            FXDropdownSection(items: providers.map { provider in
-                                FXDropdownItem(
-                                    id: provider.id,
-                                    title: simplifiedProviderName(for: provider.displayName),
-                                    subtitle: provider.availableModels.isEmpty
-                                        ? "No models available"
-                                        : "\(provider.availableModels.count) \(provider.availableModels.count == 1 ? "model" : "models")",
-                                    isSelected: preferences.defaultProviderID == provider.id
-                                ) {
-                                    selectDefaultProvider(provider)
-                                }
-                            })
-                        ])
-
-                        settingsMenuRow("Model", value: simplifiedModelName(for: selectedModel?.name ?? preferences.defaultModelID), enabled: selectedProvider != nil, sections: [
-                            FXDropdownSection(items: (selectedProvider?.availableModels ?? []).map { model in
-                                FXDropdownItem(id: model.id, title: simplifiedModelName(for: model.name), isSelected: preferences.defaultModelID == model.id) {
-                                    selectDefaultModel(model)
-                                }
-                            })
-                        ])
-
-                        settingsMenuRow("Effort", value: effortLabel(for: preferences.defaultEffort), sections: [
-                            FXDropdownSection(items: defaultSupportedEfforts.map { level in
-                                FXDropdownItem(id: level, title: effortLabel(for: level), isSelected: preferences.defaultEffort == level) {
-                                    preferences.defaultEffort = level
-                                }
-                            })
-                        ])
-
-                        settingsMenuRow("Access", value: accessLabel(preferences.defaultAccess), sections: [
-                            FXDropdownSection(items: AgentAccess.allCases.map { access in
-                                FXDropdownItem(
-                                    id: access.rawValue,
-                                    title: accessLabel(access),
-                                    subtitle: accessDescription(access),
-                                    isSelected: preferences.defaultAccess == access
-                                ) {
-                                    preferences.defaultAccess = access
-                                }
-                            })
-                        ])
-
-                        settingsMenuRow("Mode", value: modeLabel(preferences.defaultMode), sections: [
-                            FXDropdownSection(items: AgentMode.allCases.map { mode in
-                                FXDropdownItem(id: mode.rawValue, title: modeLabel(mode), isSelected: preferences.defaultMode == mode) {
-                                    preferences.defaultMode = mode
-                                }
-                            })
-                        ])
-
-                        settingsMenuRow(
-                            "While responding",
-                            value: preferences.defaultFollowUpMode.label,
-                            panelWidth: 260,
-                            sections: [
-                                FXDropdownSection(items: [
-                                    FXDropdownItem(
-                                        id: "steer",
-                                        title: PromptFollowUpMode.steer.label,
-                                        subtitle: "Guide the active run immediately",
-                                        isSelected: preferences.defaultFollowUpMode == .steer
-                                    ) {
-                                        preferences.defaultFollowUpMode = .steer
-                                    },
-                                    FXDropdownItem(
-                                        id: "queue",
-                                        title: PromptFollowUpMode.queue.label,
-                                        subtitle: "Run after the current turn",
-                                        isSelected: preferences.defaultFollowUpMode == .queue
-                                    ) {
-                                        preferences.defaultFollowUpMode = .queue
-                                    },
-                                ])
-                            ]
-                        )
-                    }
-
-                    // Appearance
-                    settingsSection("Appearance") {
-                        settingsMenuRow("Theme", value: preferences.appearanceMode.label, panelWidth: 152, sections: [
-                            FXDropdownSection(items: FXAppearanceMode.allCases.map { mode in
-                                FXDropdownItem(id: mode.rawValue, title: mode.label, isSelected: preferences.appearanceMode == mode) {
-                                    preferences.appearanceMode = mode
-                                }
-                            })
-                        ])
-
-                        settingsMenuRow("Base Tone", value: preferences.baseTone.label, panelWidth: 140, sections: [
-                            FXDropdownSection(items: FXBaseTone.allCases.map { tone in
-                                FXDropdownItem(id: tone.rawValue, title: tone.label, isSelected: preferences.baseTone == tone) {
-                                    preferences.baseTone = tone
-                                }
-                            })
-                        ])
-
-                        settingsMenuRow("Accent", value: preferences.accentColor.label, panelWidth: 152, sections: [
-                            FXDropdownSection(items: FXAccentColorOption.allCases.map { option in
-                                FXDropdownItem(id: option.rawValue, title: option.label, isSelected: preferences.accentColor == option) {
-                                    preferences.accentColor = option
-                                }
-                            })
-                        ])
-
-                        settingsMenuRow("Text Size", value: textSizeLabel(preferences.textSizePreset), panelWidth: 176, sections: [
-                            FXDropdownSection(items: FXTextSizePreset.allCases.map { preset in
-                                FXDropdownItem(id: preset.rawValue, title: textSizeLabel(preset), isSelected: preferences.textSizePreset == preset) {
-                                    preferences.textSizePreset = preset
-                                }
-                            })
-                        ])
-                    }
-
-                    // Runtime
-                    settingsSection("Runtime") {
-                        ForEach(providers, id: \.id) { provider in
-                            providerRow(
-                                title: simplifiedProviderName(for: provider.displayName),
-                                binaryID: provider.id,
-                                modelCount: provider.availableModels.count
-                            )
-                        }
-
-                        Button {
-                            Task { @MainActor in
-                                await appState.refreshRuntimeHealth()
-                            }
-                        } label: {
-                            Label("Check runtimes again", systemImage: "arrow.clockwise")
-                                .font(FXTypography.captionMedium)
-                                .foregroundStyle(FXColors.fgSecondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Refresh provider command availability and versions")
-                    }
-
-                    settingsSection("Archived Tasks") {
-                        ArchivedTasksSettingsSection()
-                    }
-
-                    // Shortcuts
-                    settingsSection("Shortcuts") {
-                        shortcutRow("Toggle Sidebar", shortcut: "⌘B")
-                        shortcutRow("Toggle Git Panel", shortcut: "⌘G")
-                        shortcutRow("Toggle Browser", shortcut: "⌘P")
-                        shortcutRow("Toggle Terminal", shortcut: "⌘T")
-                        shortcutRow("Command Palette", shortcut: "⌘K")
-                        shortcutRow("Default follow-up / send", shortcut: "⌘↩")
-                        shortcutRow("Opposite follow-up / send", shortcut: "⌃↩")
-                        shortcutRow("Settings", shortcut: "⌘,")
-                    }
-                }
-                .padding(FXSpacing.lg)
-                .padding(.bottom, FXSpacing.xxl)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            if appState.settingsTab == .archivedTasks {
+                ArchivedTasksSettingsPage()
+            } else {
+                mainSettings
             }
         }
         .background(FXColors.panelBg)
+        .focusable()
+        .focused($isSettingsFocused)
+        .focusEffectDisabled()
+        .onExitCommand {
+            appState.settingsVisible = false
+        }
+        .onAppear {
+            isSettingsFocused = true
+        }
+        .onChange(of: appState.settingsTab) { _, _ in
+            isSettingsFocused = true
+        }
+    }
+
+    private var settingsHeader: some View {
+        HStack(spacing: FXSpacing.sm) {
+            if appState.settingsTab == .archivedTasks {
+                FXIconButton(
+                    icon: "chevron.left",
+                    label: "Back to Settings",
+                    size: 28
+                ) {
+                    withAnimation(FXAnimation.quick) {
+                        appState.settingsTab = .general
+                    }
+                }
+            }
+
+            Text(appState.settingsTab == .archivedTasks ? "Archived Tasks" : "Settings")
+                .font(FXTypography.title3)
+                .foregroundStyle(FXColors.fg)
+
+            Spacer(minLength: 0)
+
+            if appState.settingsTab == .archivedTasks {
+                Text("\(archivedTaskCount)")
+                    .font(FXTypography.captionMedium)
+                    .foregroundStyle(FXColors.fgTertiary)
+                    .accessibilityLabel("\(archivedTaskCount) archived tasks")
+            }
+        }
+        .padding(.horizontal, FXSpacing.lg)
+        .frame(height: 52)
+    }
+
+    private var mainSettings: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: FXSpacing.xxxl) {
+                // Defaults first — this is an AI app
+                settingsSection("Defaults") {
+                    settingsMenuRow("Provider", value: selectedProvider.map { simplifiedProviderName(for: $0.displayName) } ?? "Unavailable", enabled: !providers.isEmpty, sections: [
+                        FXDropdownSection(items: providers.map { provider in
+                            FXDropdownItem(
+                                id: provider.id,
+                                title: simplifiedProviderName(for: provider.displayName),
+                                subtitle: provider.availableModels.isEmpty
+                                    ? "No models available"
+                                    : "\(provider.availableModels.count) \(provider.availableModels.count == 1 ? "model" : "models")",
+                                isSelected: preferences.defaultProviderID == provider.id
+                            ) {
+                                selectDefaultProvider(provider)
+                            }
+                        })
+                    ])
+
+                    settingsMenuRow("Model", value: simplifiedModelName(for: selectedModel?.name ?? preferences.defaultModelID), enabled: selectedProvider != nil, sections: [
+                        FXDropdownSection(items: (selectedProvider?.availableModels ?? []).map { model in
+                            FXDropdownItem(id: model.id, title: simplifiedModelName(for: model.name), isSelected: preferences.defaultModelID == model.id) {
+                                selectDefaultModel(model)
+                            }
+                        })
+                    ])
+
+                    settingsMenuRow("Effort", value: effortLabel(for: preferences.defaultEffort), sections: [
+                        FXDropdownSection(items: defaultSupportedEfforts.map { level in
+                            FXDropdownItem(id: level, title: effortLabel(for: level), isSelected: preferences.defaultEffort == level) {
+                                preferences.defaultEffort = level
+                            }
+                        })
+                    ])
+
+                    settingsMenuRow("Access", value: accessLabel(preferences.defaultAccess), sections: [
+                        FXDropdownSection(items: AgentAccess.allCases.map { access in
+                            FXDropdownItem(
+                                id: access.rawValue,
+                                title: accessLabel(access),
+                                subtitle: accessDescription(access),
+                                isSelected: preferences.defaultAccess == access
+                            ) {
+                                preferences.defaultAccess = access
+                            }
+                        })
+                    ])
+
+                    settingsMenuRow("Mode", value: modeLabel(preferences.defaultMode), sections: [
+                        FXDropdownSection(items: AgentMode.allCases.map { mode in
+                            FXDropdownItem(id: mode.rawValue, title: modeLabel(mode), isSelected: preferences.defaultMode == mode) {
+                                preferences.defaultMode = mode
+                            }
+                        })
+                    ])
+
+                    settingsMenuRow(
+                        "While responding",
+                        value: preferences.defaultFollowUpMode.label,
+                        panelWidth: 260,
+                        sections: [
+                            FXDropdownSection(items: [
+                                FXDropdownItem(
+                                    id: "steer",
+                                    title: PromptFollowUpMode.steer.label,
+                                    subtitle: "Guide the active run immediately",
+                                    isSelected: preferences.defaultFollowUpMode == .steer
+                                ) {
+                                    preferences.defaultFollowUpMode = .steer
+                                },
+                                FXDropdownItem(
+                                    id: "queue",
+                                    title: PromptFollowUpMode.queue.label,
+                                    subtitle: "Run after the current turn",
+                                    isSelected: preferences.defaultFollowUpMode == .queue
+                                ) {
+                                    preferences.defaultFollowUpMode = .queue
+                                },
+                            ])
+                        ]
+                    )
+                }
+
+                // Appearance
+                settingsSection("Appearance") {
+                    settingsMenuRow("Theme", value: preferences.appearanceMode.label, panelWidth: 152, sections: [
+                        FXDropdownSection(items: FXAppearanceMode.allCases.map { mode in
+                            FXDropdownItem(id: mode.rawValue, title: mode.label, isSelected: preferences.appearanceMode == mode) {
+                                preferences.appearanceMode = mode
+                            }
+                        })
+                    ])
+
+                    settingsMenuRow("Base Tone", value: preferences.baseTone.label, panelWidth: 140, sections: [
+                        FXDropdownSection(items: FXBaseTone.allCases.map { tone in
+                            FXDropdownItem(id: tone.rawValue, title: tone.label, isSelected: preferences.baseTone == tone) {
+                                preferences.baseTone = tone
+                            }
+                        })
+                    ])
+
+                    settingsMenuRow("Accent", value: preferences.accentColor.label, panelWidth: 152, sections: [
+                        FXDropdownSection(items: FXAccentColorOption.allCases.map { option in
+                            FXDropdownItem(id: option.rawValue, title: option.label, isSelected: preferences.accentColor == option) {
+                                preferences.accentColor = option
+                            }
+                        })
+                    ])
+
+                    settingsMenuRow("Text Size", value: textSizeLabel(preferences.textSizePreset), panelWidth: 176, sections: [
+                        FXDropdownSection(items: FXTextSizePreset.allCases.map { preset in
+                            FXDropdownItem(id: preset.rawValue, title: textSizeLabel(preset), isSelected: preferences.textSizePreset == preset) {
+                                preferences.textSizePreset = preset
+                            }
+                        })
+                    ])
+                }
+
+                // Runtime
+                settingsSection("Runtime") {
+                    ForEach(providers, id: \.id) { provider in
+                        providerRow(
+                            title: simplifiedProviderName(for: provider.displayName),
+                            binaryID: provider.id,
+                            modelCount: provider.availableModels.count
+                        )
+                    }
+
+                    Button {
+                        Task { @MainActor in
+                            await appState.refreshRuntimeHealth()
+                        }
+                    } label: {
+                        Label("Check runtimes again", systemImage: "arrow.clockwise")
+                            .font(FXTypography.captionMedium)
+                            .foregroundStyle(FXColors.fgSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Refresh provider command availability and versions")
+                }
+
+                settingsSection("History") {
+                    archivedTasksNavigationRow
+                }
+
+                // Shortcuts
+                settingsSection("Shortcuts") {
+                    shortcutRow("Toggle Sidebar", shortcut: "⌘B")
+                    shortcutRow("Toggle Git Panel", shortcut: "⌘G")
+                    shortcutRow("Toggle Browser", shortcut: "⌘P")
+                    shortcutRow("Toggle Terminal", shortcut: "⌘T")
+                    shortcutRow("Command Palette", shortcut: "⌘K")
+                    shortcutRow("Default follow-up / send", shortcut: "⌘↩")
+                    shortcutRow("Opposite follow-up / send", shortcut: "⌃↩")
+                    shortcutRow("Settings", shortcut: "⌘,")
+                }
+            }
+            .padding(FXSpacing.lg)
+            .padding(.bottom, FXSpacing.xxl)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var archivedTasksNavigationRow: some View {
+        Button {
+            withAnimation(FXAnimation.quick) {
+                appState.settingsTab = .archivedTasks
+            }
+        } label: {
+            HStack(spacing: FXSpacing.sm) {
+                Image(systemName: "archivebox")
+                    .font(FXTypography.icon(.small))
+                    .foregroundStyle(FXColors.fgTertiary)
+
+                Text("Archived Tasks")
+                    .font(FXTypography.body)
+                    .foregroundStyle(FXColors.fgSecondary)
+
+                Spacer(minLength: 0)
+
+                Text("\(archivedTaskCount)")
+                    .font(FXTypography.caption)
+                    .foregroundStyle(FXColors.fgTertiary)
+
+                Image(systemName: "chevron.right")
+                    .font(FXTypography.icon(.micro))
+                    .foregroundStyle(FXColors.fgQuaternary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Open archived task history")
+        .accessibilityHint("Opens a separate searchable archive page")
+    }
+
+    private var archivedTaskCount: Int {
+        appState.projects.reduce(0) {
+            $0 + $1.archivedNativeThreadBindings.count
+        }
     }
 
     // MARK: - Helpers

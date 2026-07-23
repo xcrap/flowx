@@ -2,65 +2,185 @@ import SwiftUI
 import FXAgent
 import FXDesign
 
-struct ArchivedTasksSettingsSection: View {
+struct ArchivedTasksSettingsPage: View {
     @Environment(AppState.self) private var appState
+    @State private var searchQuery = ""
 
     var body: some View {
-        if projectsWithArchivedTasks.isEmpty {
-            HStack(spacing: FXSpacing.sm) {
-                Image(systemName: "archivebox")
-                    .font(FXTypography.icon(.regular))
-                    .foregroundStyle(FXColors.fgQuaternary)
+        VStack(spacing: 0) {
+            archiveSearch
+                .padding(.horizontal, FXSpacing.lg)
+                .padding(.vertical, FXSpacing.sm)
 
-                Text("No archived provider tasks")
-                    .font(FXTypography.body)
-                    .foregroundStyle(FXColors.fgTertiary)
-            }
-            .padding(.vertical, FXSpacing.xs)
-        } else {
-            VStack(alignment: .leading, spacing: FXSpacing.lg) {
-                ForEach(projectsWithArchivedTasks) { project in
-                    ArchivedProjectSettingsGroup(project: project)
+            FXDivider()
+
+            ScrollView {
+                if archivedTaskCount == 0 {
+                    emptyState(
+                        title: "No archived tasks",
+                        detail: "Tasks archived from Codex or Claude will appear here."
+                    )
+                } else if projectResults.isEmpty {
+                    emptyState(
+                        title: "No matching tasks",
+                        detail: "Try a different title, project, or provider."
+                    )
+                } else {
+                    LazyVStack(alignment: .leading, spacing: FXSpacing.xl) {
+                        ForEach(projectResults) { result in
+                            Section {
+                                if let notice = result.project.threadLifecycleNotice {
+                                    ArchivedProjectNotice(
+                                        project: result.project,
+                                        notice: notice
+                                    )
+                                }
+
+                                ForEach(result.bindings, id: \.identity) { binding in
+                                    ArchivedTaskSettingsRow(
+                                        binding: binding,
+                                        project: result.project
+                                    )
+                                }
+                            } header: {
+                                projectHeader(result)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, FXSpacing.lg)
+                    .padding(.vertical, FXSpacing.md)
+                    .padding(.bottom, FXSpacing.xxl)
                 }
             }
         }
     }
 
-    private var projectsWithArchivedTasks: [ProjectState] {
-        appState.projects.filter { !$0.archivedNativeThreadBindings.isEmpty }
+    private var archiveSearch: some View {
+        HStack(spacing: FXSpacing.sm) {
+            Image(systemName: "magnifyingglass")
+                .font(FXTypography.icon(.small))
+                .foregroundStyle(FXColors.fgQuaternary)
+
+            TextField("Search archived tasks", text: $searchQuery)
+                .textFieldStyle(.plain)
+                .font(FXTypography.body)
+                .foregroundStyle(FXColors.fgSecondary)
+                .accessibilityLabel("Search archived tasks")
+
+            if !searchQuery.isEmpty {
+                FXIconButton(
+                    icon: "xmark.circle.fill",
+                    label: "Clear archive search",
+                    size: 22
+                ) {
+                    searchQuery = ""
+                }
+            }
+        }
+        .padding(.horizontal, FXSpacing.md)
+        .padding(.vertical, FXSpacing.sm)
+        .background(FXColors.bgSurface)
+        .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
+        .overlay(
+            RoundedRectangle(cornerRadius: FXRadii.md)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+        )
     }
-}
 
-private struct ArchivedProjectSettingsGroup: View {
-    @Bindable var project: ProjectState
+    private func projectHeader(_ result: ArchivedProjectResult) -> some View {
+        HStack(spacing: FXSpacing.sm) {
+            Text(result.project.project.name.uppercased())
+                .font(FXTypography.overline)
+                .foregroundStyle(FXColors.fgTertiary)
+                .tracking(0.35)
+                .lineLimit(1)
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: FXSpacing.xs) {
-            HStack(spacing: FXSpacing.sm) {
-                Text(project.project.name)
-                    .font(FXTypography.captionMedium)
-                    .foregroundStyle(FXColors.fgSecondary)
-                    .lineLimit(1)
+            Spacer(minLength: 0)
 
-                Spacer(minLength: 0)
+            Text(result.bindings.count == 1 ? "1 task" : "\(result.bindings.count) tasks")
+                .font(FXTypography.caption)
+                .foregroundStyle(FXColors.fgQuaternary)
+                .accessibilityLabel("\(result.bindings.count) archived tasks")
+        }
+        .padding(.horizontal, FXSpacing.xs)
+    }
 
-                Text("\(project.archivedNativeThreadBindings.count)")
-                    .font(FXTypography.caption)
-                    .foregroundStyle(FXColors.fgQuaternary)
-                    .accessibilityLabel("\(project.archivedNativeThreadBindings.count) archived tasks")
+    private func emptyState(title: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: FXSpacing.sm) {
+            Image(systemName: "archivebox")
+                .font(FXTypography.icon(.large))
+                .foregroundStyle(FXColors.fgQuaternary)
+
+            Text(title)
+                .font(FXTypography.bodyMedium)
+                .foregroundStyle(FXColors.fgSecondary)
+
+            Text(detail)
+                .font(FXTypography.caption)
+                .foregroundStyle(FXColors.fgTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(FXSpacing.xl)
+    }
+
+    private var projectResults: [ArchivedProjectResult] {
+        appState.projects.compactMap { project in
+            let bindings = project.archivedNativeThreadBindings.filter { binding in
+                guard !searchTerms.isEmpty else { return true }
+                let searchableText = [
+                    project.project.name,
+                    binding.title,
+                    binding.preview,
+                    binding.identity.providerID,
+                    binding.model ?? "",
+                ]
+                .joined(separator: " ")
+                .folding(
+                    options: [.caseInsensitive, .diacriticInsensitive],
+                    locale: .current
+                )
+                return searchTerms.allSatisfy {
+                    searchableText.contains(String($0))
+                }
             }
 
-            if let notice = project.threadLifecycleNotice {
-                archivedNotice(notice)
-            }
-
-            ForEach(project.archivedNativeThreadBindings, id: \.identity) { binding in
-                ArchivedTaskSettingsRow(binding: binding, project: project)
-            }
+            guard !bindings.isEmpty else { return nil }
+            return ArchivedProjectResult(project: project, bindings: bindings)
         }
     }
 
-    private func archivedNotice(_ notice: String) -> some View {
+    private var searchTerms: [Substring] {
+        searchQuery
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: .current
+            )
+            .split(whereSeparator: \.isWhitespace)
+    }
+
+    private var archivedTaskCount: Int {
+        appState.projects.reduce(0) {
+            $0 + $1.archivedNativeThreadBindings.count
+        }
+    }
+}
+
+private struct ArchivedProjectResult: Identifiable {
+    let project: ProjectState
+    let bindings: [NativeThreadBinding]
+
+    var id: UUID {
+        project.id
+    }
+}
+
+private struct ArchivedProjectNotice: View {
+    @Bindable var project: ProjectState
+    let notice: String
+
+    var body: some View {
         HStack(alignment: .top, spacing: FXSpacing.sm) {
             Image(systemName: project.threadLifecycleNoticeIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                 .font(FXTypography.icon(.small))
@@ -87,18 +207,36 @@ private struct ArchivedTaskSettingsRow: View {
     @Environment(AppState.self) private var appState
     let binding: NativeThreadBinding
     @Bindable var project: ProjectState
+    @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: FXSpacing.sm) {
             FXActivityDot(color: providerColor)
                 .help("\(providerName) archived task")
 
-            Text(binding.title)
-                .font(FXTypography.body)
-                .foregroundStyle(FXColors.fgSecondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .layoutPriority(1)
+            VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
+                Text(binding.title)
+                    .font(FXTypography.bodyMedium)
+                    .foregroundStyle(FXColors.fgSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                HStack(spacing: FXSpacing.xs) {
+                    Text(providerName.uppercased())
+                        .font(FXTypography.overline)
+                        .foregroundStyle(providerColor)
+
+                    Text("·")
+                        .font(FXTypography.caption)
+                        .foregroundStyle(FXColors.fgQuaternary)
+
+                    Text(binding.updatedAt.formatted(date: .abbreviated, time: .omitted))
+                        .font(FXTypography.caption)
+                        .foregroundStyle(FXColors.fgTertiary)
+                        .lineLimit(1)
+                }
+            }
+            .layoutPriority(1)
 
             Spacer(minLength: 0)
 
@@ -125,14 +263,22 @@ private struct ArchivedTaskSettingsRow: View {
             }
         }
         .padding(.horizontal, FXSpacing.md)
-        .padding(.vertical, FXSpacing.sm)
-        .background(FXColors.bgSurface)
+        .padding(.vertical, FXSpacing.xs)
+        .frame(minHeight: 48)
+        .background(isHovered ? FXColors.bgHover : FXColors.bgSurface)
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
-        .overlay(
+        .overlay {
             RoundedRectangle(cornerRadius: FXRadii.md)
                 .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
-        )
+        }
+        .onHover { isHovered = $0 }
         .contextMenu {
+            if canRename {
+                Button("Rename Task…", action: rename)
+                    .disabled(project.isSyncingNativeThreads || isActionInProgress)
+                Divider()
+            }
+
             Button("Restore Task", action: restore)
                 .disabled(project.isSyncingNativeThreads || isActionInProgress)
 
@@ -147,15 +293,27 @@ private struct ArchivedTaskSettingsRow: View {
     }
 
     private var actionSections: [FXDropdownSection] {
-        var items = [
+        var items: [FXDropdownItem] = []
+        if canRename {
+            items.append(
+                FXDropdownItem(
+                    id: "rename",
+                    title: "Rename Task…",
+                    subtitle: "Update this task in \(providerName) and FlowX",
+                    isEnabled: !project.isSyncingNativeThreads && !isActionInProgress,
+                    action: rename
+                )
+            )
+        }
+        items.append(
             FXDropdownItem(
                 id: "restore",
                 title: "Restore Task",
                 subtitle: "Return this task to \(project.project.name)",
                 isEnabled: !project.isSyncingNativeThreads && !isActionInProgress,
                 action: restore
-            ),
-        ]
+            )
+        )
 
         if canDeletePermanently {
             items.append(
@@ -182,6 +340,10 @@ private struct ArchivedTaskSettingsRow: View {
             is any AIProviderNativeThreadDeleting
     }
 
+    private var canRename: Bool {
+        appState.canRenameArchivedNativeThread(binding)
+    }
+
     private var providerName: String {
         binding.identity.providerID == "claude" ? "Claude" : "Codex"
     }
@@ -192,6 +354,10 @@ private struct ArchivedTaskSettingsRow: View {
 
     private func restore() {
         appState.unarchiveNativeThread(binding, in: project)
+    }
+
+    private func rename() {
+        appState.requestArchivedThreadRename(binding, in: project)
     }
 
     private func deletePermanently() {

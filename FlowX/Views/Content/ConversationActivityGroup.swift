@@ -350,7 +350,13 @@ private struct ConversationActivityDetails: View {
     @State private var visibleEntryCount = 20
 
     var body: some View {
-        LazyVStack(alignment: .leading, spacing: FXSpacing.sm) {
+        // The surrounding conversation is already the vertical scrolling
+        // container. A nested LazyVStack repeatedly re-places these
+        // variable-height rows during live scrolling and can send
+        // SwiftUI's lazy layout engine into an unbounded CPU/memory loop.
+        // This stack is explicitly paged, so eagerly laying out its small
+        // visible window is both bounded and substantially cheaper.
+        VStack(alignment: .leading, spacing: FXSpacing.sm) {
             if hiddenEntryCount > 0 {
                 Button("Show \(min(20, hiddenEntryCount)) earlier actions") {
                     visibleEntryCount = min(entries.count, visibleEntryCount + 20)
@@ -1137,7 +1143,11 @@ private struct ActivityEditDiffView: View {
             .background(FXColors.bgElevated)
 
             ScrollView(.horizontal) {
-                LazyVStack(spacing: 0) {
+                // The enclosing vertical transcript determines this view's
+                // full height, so vertical laziness cannot skip any rows
+                // here. Keeping a lazy stack inside the horizontal scroller
+                // instead creates a second placement cache for every scroll.
+                VStack(spacing: 0) {
                     ForEach(visibleLines) { line in
                         diffLine(line)
                     }

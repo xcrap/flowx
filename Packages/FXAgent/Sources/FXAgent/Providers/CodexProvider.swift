@@ -421,6 +421,40 @@ private actor CodexSession {
         )
     }
 
+    func renameNativeThread(
+        id: String,
+        name: String,
+        workingDirectory: URL
+    ) async throws {
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedName.isEmpty else {
+            throw Self.makeError("A task name is required.")
+        }
+        let canonicalDirectory = try await validatedNativeThreadWorkspace(
+            id: id,
+            workingDirectory: workingDirectory
+        )
+        try await ensureServerInitialized(workingDirectory: canonicalDirectory)
+        let request = Self.nativeThreadRenameRequest(
+            threadID: id.trimmingCharacters(in: .whitespacesAndNewlines),
+            name: normalizedName
+        )
+        _ = try await requestJSON(method: request.method, params: request.params)
+    }
+
+    fileprivate static func nativeThreadRenameRequest(
+        threadID: String,
+        name: String
+    ) -> (method: String, params: [String: Any]) {
+        (
+            method: "thread/name/set",
+            params: [
+                "threadId": threadID,
+                "name": name,
+            ]
+        )
+    }
+
     func deleteNativeThread(id: String, workingDirectory: URL) async throws {
         let trimmedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
         let canonicalDirectory = try await validatedNativeThreadWorkspace(
@@ -503,7 +537,8 @@ private actor CodexSession {
               ) else {
             throw Self.makeError("Codex did not return thread '\(id)' for this workspace.")
         }
-        let summary = rolloutMetadataStore.enrich([nativeSummary]).first ?? nativeSummary
+        var summary = rolloutMetadataStore.enrich([nativeSummary]).first ?? nativeSummary
+        summary = rolloutMetadataStore.enrichUsage(summary)
 
         let messages: [ConversationMessage]
         do {
@@ -573,7 +608,8 @@ private actor CodexSession {
               ) else {
             throw Self.makeError("Codex did not return thread '\(id)' for this workspace.")
         }
-        let summary = rolloutMetadataStore.enrich([nativeSummary]).first ?? nativeSummary
+        var summary = rolloutMetadataStore.enrich([nativeSummary]).first ?? nativeSummary
+        summary = rolloutMetadataStore.enrichUsage(summary)
         return ProviderNativeThread(summary: summary, messages: Self.nativeMessages(from: thread))
     }
 
@@ -3040,9 +3076,9 @@ private actor CodexSessionReference {
     }
 }
 
-public final class CodexProvider: AIProviderThreadControls, AIProviderSessionManaging, AIProviderNativeThreads, AIProviderNativeThreadArchiving, AIProviderNativeThreadDeleting, Sendable {
+public final class CodexProvider: AIProviderThreadControls, AIProviderSessionManaging, AIProviderNativeThreads, AIProviderNativeThreadRenaming, AIProviderNativeThreadArchiving, AIProviderNativeThreadDeleting, Sendable {
     public let id = "codex"
-    public let displayName = "Codex (OpenAI)"
+    public let displayName = "Codex"
     public var availableModels: [AIModel] { modelCatalog.models }
     public let capabilities = AIProviderCapabilities(
         supportedAttachments: [.image],
@@ -3120,6 +3156,18 @@ public final class CodexProvider: AIProviderThreadControls, AIProviderSessionMan
     ) async throws {
         try await nativeReader.deleteNativeThread(id: id, workingDirectory: workingDirectory)
         await store.release(id.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    public func renameNativeThread(
+        id: String,
+        name: String,
+        workingDirectory: URL
+    ) async throws {
+        try await nativeReader.renameNativeThread(
+            id: id,
+            name: name,
+            workingDirectory: workingDirectory
+        )
     }
 
     public func listArchivedNativeThreads(
@@ -3298,6 +3346,13 @@ public final class CodexProvider: AIProviderThreadControls, AIProviderSessionMan
         threadID: String
     ) -> (method: String, params: [String: Any]) {
         CodexSession.nativeThreadDeleteRequest(threadID: threadID)
+    }
+
+    static func nativeThreadRenameRequestForTesting(
+        threadID: String,
+        name: String
+    ) -> (method: String, params: [String: Any]) {
+        CodexSession.nativeThreadRenameRequest(threadID: threadID, name: name)
     }
 
     static func nativeThreadIsActiveForTesting(_ status: String?) -> Bool {

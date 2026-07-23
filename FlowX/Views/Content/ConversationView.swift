@@ -108,12 +108,6 @@ struct ConversationView: View {
         maximumEntryCount: 6,
         maximumCost: 2_000
     )
-    private static let exactTokenFormatter: NumberFormatter = {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        return formatter
-    }()
-
     init(agent: AgentInfo) {
         self.agent = agent
 
@@ -598,81 +592,6 @@ struct ConversationView: View {
             || !agent.conversationState.pendingUserInputRequests.isEmpty
             || agent.conversationState.activeGoal != nil
             || agent.shouldShowStatusIndicator
-            || (usagePercent ?? 0) >= 70
-    }
-
-    private var hasUsageData: Bool {
-        (agent.conversationState.currentContextTokens ?? 0) > 0
-            || agent.conversationState.totalTokens > 0
-            || agent.conversationState.totalReasoningOutputTokens > 0
-            || agent.conversationState.totalCachedInputTokens > 0
-    }
-
-    private var contextLimitForDisplay: Int? {
-        if let configured = agent.conversationState.configuredContextWindow, configured > 0 {
-            return configured
-        }
-        if let reported = agent.conversationState.reportedContextWindow, reported > 0 {
-            return reported
-        }
-        return nil
-    }
-
-    private var usagePercent: Double? {
-        guard let contextLimit = contextLimitForDisplay,
-              contextLimit > 0,
-              let currentContextTokens = agent.conversationState.currentContextTokens,
-              currentContextTokens > 0 else {
-            return nil
-        }
-
-        return min(100, Double(currentContextTokens) / Double(contextLimit) * 100)
-    }
-
-    private var usagePercentLabel: String? {
-        guard let usagePercent else { return nil }
-
-        switch usagePercent {
-        case ..<1:
-            return "<1%"
-        case ..<10:
-            let formatted = String(format: "%.1f", usagePercent)
-                .replacingOccurrences(of: ".0", with: "")
-            return "\(formatted)%"
-        default:
-            return "\(Int(usagePercent.rounded()))%"
-        }
-    }
-
-    private var usageStatusText: String? {
-        guard let contextLimit = contextLimitForDisplay,
-              contextLimit > 0,
-              let currentContextTokens = agent.conversationState.currentContextTokens,
-              currentContextTokens > 0,
-              let usagePercentLabel else {
-            return nil
-        }
-
-        return "Current turn \(formatExactTokenCount(currentContextTokens)) of \(formatExactTokenCount(contextLimit)) tokens (\(usagePercentLabel))"
-    }
-
-    private var usageSummaryText: String {
-        var pieces: [String] = []
-
-        if let currentContextTokens = agent.conversationState.currentContextTokens, currentContextTokens > 0 {
-            pieces.append("\(formatTokenCount(currentContextTokens)) last turn")
-        }
-        if agent.conversationState.totalTokens > 0 {
-            pieces.append("\(formatTokenCount(agent.conversationState.totalTokens)) total")
-        }
-        if agent.conversationState.totalReasoningOutputTokens > 0 {
-            pieces.append("\(formatTokenCount(agent.conversationState.totalReasoningOutputTokens)) reasoning")
-        }
-        if agent.conversationState.totalCachedInputTokens > 0 {
-            pieces.append("\(formatTokenCount(agent.conversationState.totalCachedInputTokens)) cached")
-        }
-
-        return pieces.joined(separator: " • ")
     }
 
     private var runtimeStatusColor: Color {
@@ -987,25 +906,7 @@ struct ConversationView: View {
                     FXBadge("\(count) inputs needed", tone: .warning)
                 }
 
-                if let usagePercentLabel, (usagePercent ?? 0) >= 70 {
-                    FXBadge("\(usagePercentLabel) context", tone: .warning)
-                }
-
                 Spacer()
-            }
-
-            if agent.isStreaming, let usageStatusText {
-                Text(usageStatusText)
-                    .font(FXTypography.monoSmall)
-                    .foregroundStyle(FXColors.fgTertiary)
-            } else if agent.isStreaming, hasUsageData {
-                Text(usageSummaryText)
-                    .font(FXTypography.monoSmall)
-                    .foregroundStyle(FXColors.fgTertiary)
-            } else if agent.isStreaming {
-                Text("Waiting for provider usage…")
-                    .font(FXTypography.monoSmall)
-                    .foregroundStyle(FXColors.fgTertiary)
             }
         }
         .padding(
@@ -1236,9 +1137,6 @@ struct ConversationView: View {
         }
     }
 
-    private func formatExactTokenCount(_ count: Int) -> String {
-        Self.exactTokenFormatter.string(from: NSNumber(value: count)) ?? "\(count)"
-    }
 }
 
 /// Keeps transcript scrolling under one owner. AppKit performs restoration,

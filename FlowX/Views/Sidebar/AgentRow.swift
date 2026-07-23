@@ -35,10 +35,22 @@ struct ThreadRow: View {
         }
         .onHover { isHovered = $0 }
         .contextMenu {
+            if canRename {
+                Button {
+                    appState.requestThreadRename(for: agent)
+                } label: {
+                    Label("Rename Task…", systemImage: "pencil")
+                }
+                .disabled(!renameActionEnabled)
+            }
+
             if let sessionID = agent.conversationState.sessionID, !sessionID.isEmpty {
                 Button(action: { copyThreadID(sessionID) }) {
                     Label("Copy Provider Thread ID", systemImage: "doc.on.doc")
                 }
+            }
+
+            if canRename || agent.conversationState.sessionID?.isEmpty == false {
                 Divider()
             }
 
@@ -126,6 +138,23 @@ struct ThreadRow: View {
 
     private var lifecycleMenuSections: [FXDropdownSection] {
         var sections: [FXDropdownSection] = []
+        if canRename {
+            sections.append(
+                FXDropdownSection(
+                    id: "thread-rename",
+                    items: [
+                        FXDropdownItem(
+                            id: "rename-thread",
+                            title: "Rename Task…",
+                            subtitle: renameActionSubtitle,
+                            isEnabled: renameActionEnabled
+                        ) {
+                            appState.requestThreadRename(for: agent)
+                        },
+                    ]
+                )
+            )
+        }
         if let sessionID = agent.conversationState.sessionID, !sessionID.isEmpty {
             sections.append(
                 FXDropdownSection(
@@ -167,6 +196,19 @@ struct ThreadRow: View {
         appState.threadLifecycleActions(for: agent)
     }
 
+    private var canRename: Bool {
+        appState.canRenameNativeThread(agent)
+    }
+
+    private var renameActionEnabled: Bool {
+        appState.threadRenameBlockedReason(for: agent, in: project) == nil
+    }
+
+    private var renameActionSubtitle: String {
+        appState.threadRenameBlockedReason(for: agent, in: project)
+            ?? "Update this task in \(agent.providerName) and FlowX"
+    }
+
     private var lifecycleActionEnabled: Bool {
         appState.threadLifecycleBlockedReason(for: agent, in: project) == nil
     }
@@ -181,6 +223,7 @@ struct ThreadRow: View {
 
     private var hasLifecycleMenu: Bool {
         agent.conversationState.sessionID?.isEmpty == false
+            || canRename
             || !lifecycleActions.isEmpty
             || isLifecycleActionInProgress
     }

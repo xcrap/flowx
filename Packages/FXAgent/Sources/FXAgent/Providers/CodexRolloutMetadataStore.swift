@@ -97,13 +97,24 @@ struct CodexNativeConfiguration: Sendable, Equatable {
     }
 }
 
+private struct CodexNativeContextUsage: Sendable, Equatable {
+    var currentContextTokens: Int
+    var contextWindow: Int?
+}
+
 struct CodexRolloutMetadataStore {
     static let maximumSessionMetadataBytes = 128 * 1_024
     static let maximumContextSearchBytes = 32 * 1_024 * 1_024
     static let contextSearchChunkBytes = 1_024 * 1_024
     static let maximumContextRecordBytes = 1_024 * 1_024
+    static let maximumUsageSearchBytes = 8 * 1_024 * 1_024
+    static let usageSearchChunkBytes = 256 * 1_024
+    static let maximumUsageRecordBytes = 64 * 1_024
     private static let turnContextMarker = Data(
         #""type":"turn_context""#.utf8
+    )
+    private static let tokenCountMarker = Data(
+        #""type":"token_count""#.utf8
     )
 
     private struct FileFingerprint: Equatable {
@@ -127,10 +138,18 @@ struct CodexRolloutMetadataStore {
         var files: [URL]
     }
 
+    private struct CachedUsage {
+        var threadID: String
+        var fingerprint: FileFingerprint
+        var validatedSession: Bool
+        var usage: CodexNativeContextUsage?
+    }
+
     private let sessionsRoot: URL
     private let fileManager: FileManager
     private var fileByThreadID: [String: URL] = [:]
     private var metadataByFile: [URL: CachedMetadata] = [:]
+    private var usageByFile: [URL: CachedUsage] = [:]
     private var directoryListings: [URL: CachedDirectory] = [:]
     private(set) var metadataParseCount = 0
     private(set) var directoryScanCount = 0
@@ -185,6 +204,70 @@ struct CodexRolloutMetadataStore {
             if summary.agentAccess == nil { summary.agentAccess = metadata.agentAccess }
             return summary
         }
+    }
+
+    /// Loads only the selected task's latest context usage. Listing hundreds
+    /// of tasks must stay metadata-only; reading a transcript is the bounded
+    /// point where a live context ring is useful.
+    mutating func enrichUsage(
+        _ original: ProviderNativeThreadSummary
+    ) -> ProviderNativeThreadSummary {
+        var summary = original
+        let threadID = summary.id
+        var candidates: [URL] = []
+
+        if let knownFile = fileByThreadID[threadID],
+           fingerprint(forFile: knownFile) != nil {
+            candidates.append(knownFile)
+        } else {
+            fileByThreadID.removeValue(forKey: threadID)
+        }
+
+        if candidates.isEmpty {
+            let suffix = "\(threadID).jsonl"
+            candidates = candidateDirectories(for: summary.createdAt)
+                .flatMap { files(in: $0) }
+                .filter { $0.lastPathComponent.hasSuffix(suffix) }
+                .sorted { $0.path < $1.path }
+        }
+
+        for file in candidates {
+            guard let fingerprint = fingerprint(forFile: file) else { continue }
+
+            let cached: CachedUsage
+            if let existing = usageByFile[file],
+               existing.threadID == threadID,
+               existing.fingerprint == fingerprint {
+                cached = existing
+            } else {
+                let validatedSession = sessionID(
+                    from: file,
+                    fileSize: fingerprint.size
+                ) == threadID
+                let usage = validatedSession
+                    ? latestTokenUsage(from: file, fileSize: fingerprint.size)
+                    : nil
+                cached = CachedUsage(
+                    threadID: threadID,
+                    fingerprint: fingerprint,
+                    validatedSession: validatedSession,
+                    usage: usage
+                )
+                usageByFile[file] = cached
+            }
+
+            guard cached.validatedSession else { continue }
+            fileByThreadID[threadID] = file
+            if let usage = cached.usage {
+                summary.currentContextTokens = usage.currentContextTokens
+                summary.contextWindow = usage.contextWindow
+            }
+            trimCachesIfNeeded()
+            return summary
+        }
+
+        trimCachesIfNeeded()
+        return summary
     }
 
     private static func needsMetadata(_ summary: ProviderNativeThreadSummary) -> Bool {
@@ -445,6 +528,168 @@ struct CodexRolloutMetadataStore {
         return payload
     }
 
+    private mutating func latestTokenUsage(
+        from file: URL,
+        fileSize: Int64
+    ) -> CodexNativeContextUsage? {
+        guard fileSize > 0,
+              let handle = try? FileHandle(forReadingFrom: file) else {
+            return nil
+        }
+        defer { try? handle.close() }
+
+        let searchFloor = max(
+            Int64.zero,
+            fileSize - Int64(Self.maximumUsageSearchBytes)
+        )
+        let overlapCount = max(Self.tokenCountMarker.count - 1, 0)
+        var cursor = fileSize
+        var rightOverlap = Data()
+
+        while cursor > searchFloor {
+            let chunkStart = max(
+                searchFloor,
+                cursor - Int64(Self.usageSearchChunkBytes)
+            )
+            let byteCount = Int(cursor - chunkStart)
+            do {
+                try handle.seek(toOffset: UInt64(chunkStart))
+                guard let chunk = try handle.read(upToCount: byteCount),
+                      !chunk.isEmpty else {
+                    return nil
+                }
+                totalBytesRead += chunk.count
+
+                var searchable = chunk
+                searchable.append(rightOverlap)
+                var searchUpperBound = searchable.endIndex
+                while searchUpperBound - searchable.startIndex
+                    >= Self.tokenCountMarker.count,
+                    let markerRange = searchable.range(
+                        of: Self.tokenCountMarker,
+                        options: .backwards,
+                        in: searchable.startIndex..<searchUpperBound
+                    ) {
+                    if markerRange.lowerBound < chunk.endIndex {
+                        let markerOffset = chunkStart
+                            + Int64(markerRange.lowerBound - searchable.startIndex)
+                        guard let record = usageRecord(
+                            from: handle,
+                            fileSize: fileSize,
+                            markerOffset: markerOffset
+                        ) else {
+                            return nil
+                        }
+                        // The newest token-count event is authoritative. A
+                        // null or malformed newest event means usage is
+                        // unknown; never resurrect an older pre-compaction
+                        // value.
+                        return Self.tokenUsage(from: record[...])
+                    }
+                    searchUpperBound = markerRange.lowerBound
+                }
+
+                rightOverlap = Data(chunk.prefix(overlapCount))
+                cursor = chunkStart
+            } catch {
+                return nil
+            }
+        }
+        return nil
+    }
+
+    private mutating func usageRecord(
+        from handle: FileHandle,
+        fileSize: Int64,
+        markerOffset: Int64
+    ) -> Data? {
+        let radius = Int64(Self.maximumUsageRecordBytes)
+        let windowStart = max(Int64.zero, markerOffset - radius)
+        let windowEnd = min(
+            fileSize,
+            markerOffset + Int64(Self.tokenCountMarker.count) + radius
+        )
+        guard windowEnd > windowStart else { return nil }
+
+        do {
+            try handle.seek(toOffset: UInt64(windowStart))
+            guard let data = try handle.read(
+                upToCount: Int(windowEnd - windowStart)
+            ), !data.isEmpty else {
+                return nil
+            }
+            totalBytesRead += data.count
+
+            let relativeMarker = Int(markerOffset - windowStart)
+            guard relativeMarker >= data.startIndex,
+                  relativeMarker < data.endIndex else {
+                return nil
+            }
+
+            let recordStart: Data.Index
+            if let newline = data[..<relativeMarker].lastIndex(of: 0x0A) {
+                recordStart = data.index(after: newline)
+            } else {
+                guard windowStart == 0 else { return nil }
+                recordStart = data.startIndex
+            }
+
+            let markerEnd = min(
+                relativeMarker + Self.tokenCountMarker.count,
+                data.endIndex
+            )
+            let recordEnd: Data.Index
+            if let newline = data[markerEnd...].firstIndex(of: 0x0A) {
+                recordEnd = newline
+            } else {
+                guard windowEnd == fileSize else { return nil }
+                recordEnd = data.endIndex
+            }
+
+            guard recordEnd >= recordStart,
+                  recordEnd - recordStart <= Self.maximumUsageRecordBytes else {
+                return nil
+            }
+            return Data(data[recordStart..<recordEnd])
+        } catch {
+            return nil
+        }
+    }
+
+    private static func tokenUsage(
+        from bytes: Data.SubSequence
+    ) -> CodexNativeContextUsage? {
+        var record = Data(bytes)
+        if record.last == 0x0D { record.removeLast() }
+        guard let object = try? JSONSerialization.jsonObject(with: record),
+              let envelope = object as? [String: Any],
+              envelope["type"] as? String == "event_msg",
+              let payload = envelope["payload"] as? [String: Any],
+              payload["type"] as? String == "token_count",
+              let info = payload["info"] as? [String: Any],
+              let last = info["last_token_usage"] as? [String: Any],
+              let totalTokens = integer(last["total_tokens"]),
+              totalTokens >= 0 else {
+            return nil
+        }
+        let contextWindow = integer(info["model_context_window"])
+        return CodexNativeContextUsage(
+            currentContextTokens: totalTokens,
+            contextWindow: contextWindow.flatMap { $0 > 0 ? $0 : nil }
+        )
+    }
+
+    private static func integer(_ value: Any?) -> Int? {
+        switch value {
+        case let value as Int:
+            value
+        case let value as NSNumber:
+            value.intValue
+        default:
+            nil
+        }
+    }
+
     private func candidateDirectories(for createdAt: Date) -> [URL] {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -515,6 +760,9 @@ struct CodexRolloutMetadataStore {
     private mutating func trimCachesIfNeeded() {
         while metadataByFile.count > 512, let key = metadataByFile.keys.first {
             metadataByFile.removeValue(forKey: key)
+        }
+        while usageByFile.count > 512, let key = usageByFile.keys.first {
+            usageByFile.removeValue(forKey: key)
         }
         while fileByThreadID.count > 512, let key = fileByThreadID.keys.first {
             fileByThreadID.removeValue(forKey: key)
