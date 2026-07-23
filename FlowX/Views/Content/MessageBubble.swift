@@ -4,16 +4,34 @@ import FXDesign
 import FXCore
 
 struct MessageBubble: View {
+    private struct HistoricalClaudeQuestionPayload {
+        let questions: [HistoricalClaudeQuestion]
+    }
+
+    private struct HistoricalClaudeQuestion {
+        let header: String
+        let question: String
+        let allowsMultiple: Bool
+        let options: [HistoricalClaudeQuestionOption]
+    }
+
+    private struct HistoricalClaudeQuestionOption {
+        let label: String
+        let description: String
+    }
+
     private let messageID: UUID?
     private let role: MessageRole
     private let content: [MessageContent]
     private let isStreaming: Bool
+    private let historicalClaudeQuestionsByIndex: [Int: HistoricalClaudeQuestionPayload]
 
     init(message: ConversationMessage) {
         messageID = message.id
         role = message.role
         content = message.content
         isStreaming = false
+        historicalClaudeQuestionsByIndex = Self.parseHistoricalClaudeQuestions(in: message.content)
     }
 
     init(streamingText: String) {
@@ -21,6 +39,7 @@ struct MessageBubble: View {
         role = .assistant
         content = [.text(streamingText)]
         isStreaming = true
+        historicalClaudeQuestionsByIndex = [:]
     }
 
     private var isUser: Bool { role == .user }
@@ -74,8 +93,8 @@ struct MessageBubble: View {
 
     private var toolEventBody: some View {
         VStack(alignment: .leading, spacing: FXSpacing.xxs) {
-            ForEach(Array(content.enumerated()), id: \.offset) { _, item in
-                toolEventRow(for: item)
+            ForEach(Array(content.enumerated()), id: \.offset) { index, item in
+                toolEventRow(for: item, index: index)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -92,15 +111,19 @@ struct MessageBubble: View {
             )
 
         case .toolUse(_, let name, let input):
-            VStack(alignment: .leading, spacing: FXSpacing.xs) {
-                Label(name, systemImage: "wrench.and.screwdriver")
-                    .font(FXTypography.bodyMedium)
-                    .foregroundStyle(FXColors.accentSecondary)
-                if !input.isEmpty && input != "{}" {
-                    Text(input)
-                        .font(FXTypography.monoSmall)
-                        .foregroundStyle(FXColors.fgSecondary)
-                        .textSelection(.enabled)
+            if let payload = historicalClaudeQuestionsByIndex[index] {
+                historicalClaudeQuestionCard(payload)
+            } else {
+                VStack(alignment: .leading, spacing: FXSpacing.xs) {
+                    Label(name, systemImage: "wrench.and.screwdriver")
+                        .font(FXTypography.bodyMedium)
+                        .foregroundStyle(FXColors.accentSecondary)
+                    if !input.isEmpty && input != "{}" {
+                        Text(input)
+                            .font(FXTypography.monoSmall)
+                            .foregroundStyle(FXColors.fgSecondary)
+                            .textSelection(.enabled)
+                    }
                 }
             }
 
@@ -134,15 +157,19 @@ struct MessageBubble: View {
     }
 
     @ViewBuilder
-    private func toolEventRow(for item: MessageContent) -> some View {
+    private func toolEventRow(for item: MessageContent, index: Int) -> some View {
         switch item {
         case .toolUse(_, let name, let input):
-            compactToolEventRow(
-                icon: "wrench.and.screwdriver",
-                iconColor: FXColors.accentSecondary,
-                title: name,
-                detail: summarizedToolInput(name: name, input: input)
-            )
+            if let payload = historicalClaudeQuestionsByIndex[index] {
+                historicalClaudeQuestionCard(payload)
+            } else {
+                compactToolEventRow(
+                    icon: "wrench.and.screwdriver",
+                    iconColor: FXColors.accentSecondary,
+                    title: name,
+                    detail: summarizedToolInput(name: name, input: input)
+                )
+            }
 
         case .toolResult(_, let output, let isError):
             compactToolEventRow(
@@ -155,6 +182,152 @@ struct MessageBubble: View {
         default:
             EmptyView()
         }
+    }
+
+    private func historicalClaudeQuestionCard(_ payload: HistoricalClaudeQuestionPayload) -> some View {
+        VStack(alignment: .leading, spacing: FXSpacing.md) {
+            HStack(spacing: FXSpacing.sm) {
+                Image(systemName: "questionmark.bubble.fill")
+                    .font(FXTypography.icon(.medium))
+                    .foregroundStyle(FXColors.accentSecondary)
+
+                Text("Claude asked")
+                    .font(FXTypography.bodyMedium)
+                    .foregroundStyle(FXColors.fg)
+
+                Spacer(minLength: FXSpacing.sm)
+
+                FXBadge("Transcript", tone: .neutral)
+            }
+
+            ForEach(Array(payload.questions.enumerated()), id: \.offset) { questionIndex, question in
+                if questionIndex > 0 {
+                    Rectangle()
+                        .fill(FXColors.borderSubtle)
+                        .frame(height: 0.5)
+                }
+
+                historicalClaudeQuestion(question)
+            }
+        }
+        .padding(FXSpacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(FXColors.bgSurface)
+        .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+        .overlay(
+            RoundedRectangle(cornerRadius: FXRadii.lg)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Recorded Claude question in transcript")
+    }
+
+    private func historicalClaudeQuestion(_ question: HistoricalClaudeQuestion) -> some View {
+        VStack(alignment: .leading, spacing: FXSpacing.sm) {
+            HStack(alignment: .firstTextBaseline, spacing: FXSpacing.sm) {
+                Text(question.header.uppercased())
+                    .font(FXTypography.overline)
+                    .foregroundStyle(FXColors.accentSecondary)
+
+                if !question.options.isEmpty {
+                    Text(question.allowsMultiple ? "Multiple answers allowed" : "One answer")
+                        .font(FXTypography.caption)
+                        .foregroundStyle(FXColors.fgTertiary)
+                }
+            }
+
+            Text(question.question)
+                .font(FXTypography.bodyMedium)
+                .foregroundStyle(FXColors.fg)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+
+            if !question.options.isEmpty {
+                VStack(alignment: .leading, spacing: FXSpacing.xs) {
+                    ForEach(Array(question.options.enumerated()), id: \.offset) { optionIndex, option in
+                        HStack(alignment: .top, spacing: FXSpacing.sm) {
+                            Text("\(optionIndex + 1)")
+                                .font(FXTypography.captionMedium)
+                                .foregroundStyle(FXColors.fgQuaternary)
+                                .frame(width: 16, alignment: .trailing)
+
+                            VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
+                                Text(option.label)
+                                    .font(FXTypography.body)
+                                    .foregroundStyle(FXColors.fg)
+                                    .fixedSize(horizontal: false, vertical: true)
+
+                                if !option.description.isEmpty {
+                                    Text(option.description)
+                                        .font(FXTypography.caption)
+                                        .foregroundStyle(FXColors.fgSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static func parseHistoricalClaudeQuestions(
+        in content: [MessageContent]
+    ) -> [Int: HistoricalClaudeQuestionPayload] {
+        Dictionary(uniqueKeysWithValues: content.enumerated().compactMap { index, item in
+            guard case .toolUse(_, let name, let input) = item,
+                  name == "AskUserQuestion",
+                  let payload = parseHistoricalClaudeQuestionPayload(input) else {
+                return nil
+            }
+            return (index, payload)
+        })
+    }
+
+    private static func parseHistoricalClaudeQuestionPayload(
+        _ input: String
+    ) -> HistoricalClaudeQuestionPayload? {
+        guard let data = input.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawQuestions = json["questions"] as? [[String: Any]] else {
+            return nil
+        }
+
+        let questions = rawQuestions.prefix(4).compactMap { raw -> HistoricalClaudeQuestion? in
+            guard let question = boundedTranscriptText(raw["question"] as? String, maximum: 8_192) else {
+                return nil
+            }
+
+            let header = boundedTranscriptText(raw["header"] as? String, maximum: 256) ?? "Question"
+            let options = (raw["options"] as? [[String: Any]] ?? []).prefix(10).compactMap {
+                rawOption -> HistoricalClaudeQuestionOption? in
+                guard let label = boundedTranscriptText(rawOption["label"] as? String, maximum: 256) else {
+                    return nil
+                }
+                let description = boundedTranscriptText(
+                    rawOption["description"] as? String,
+                    maximum: 2_048
+                ) ?? ""
+                return HistoricalClaudeQuestionOption(label: label, description: description)
+            }
+
+            return HistoricalClaudeQuestion(
+                header: header,
+                question: question,
+                allowsMultiple: raw["multiSelect"] as? Bool ?? false,
+                options: options
+            )
+        }
+
+        guard !questions.isEmpty else { return nil }
+        return HistoricalClaudeQuestionPayload(questions: questions)
+    }
+
+    private static func boundedTranscriptText(_ text: String?, maximum: Int) -> String? {
+        guard let text else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return String(trimmed.prefix(maximum))
     }
 
     private func compactToolEventRow(icon: String, iconColor: Color, title: String, detail: String?) -> some View {

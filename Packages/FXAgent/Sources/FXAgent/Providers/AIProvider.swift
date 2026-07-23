@@ -505,6 +505,45 @@ public extension AIProviderNativeThreads {
     }
 }
 
+/// Provider-native archive support. Archive and unarchive must be real
+/// provider operations; FlowX must not present a local hide as provider state.
+public protocol AIProviderNativeThreadArchiving: AIProvider {
+    func listArchivedNativeThreads(
+        workingDirectory: URL,
+        limit: Int
+    ) async throws -> [ProviderNativeThreadSummary]
+
+    func archiveNativeThread(
+        id: String,
+        workingDirectory: URL
+    ) async throws
+
+    func unarchiveNativeThread(
+        id: String,
+        workingDirectory: URL
+    ) async throws
+}
+
+/// Provider-native irreversible deletion. This capability is intentionally
+/// separate from archive/restore and recoverable Trash operations so callers
+/// cannot accidentally present one lifecycle action as another.
+public protocol AIProviderNativeThreadDeleting: AIProvider {
+    func deleteNativeThread(
+        id: String,
+        workingDirectory: URL
+    ) async throws
+}
+
+/// Recoverable deletion for provider session stores that do not expose a
+/// native archive/delete API. Implementations must move the provider-owned
+/// artifact to macOS Trash and must never unlink it directly.
+public protocol AIProviderNativeThreadTrashManaging: AIProvider {
+    func moveNativeThreadToTrash(
+        id: String,
+        workingDirectory: URL
+    ) async throws
+}
+
 public enum AIInputModality: String, Codable, Sendable, CaseIterable {
     case text
     case image

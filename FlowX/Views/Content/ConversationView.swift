@@ -182,7 +182,9 @@ struct ConversationView: View {
     private func isToolEventMessage(_ message: ConversationMessage) -> Bool {
         !message.content.isEmpty && message.content.allSatisfy { item in
             switch item {
-            case .toolUse, .toolResult:
+            case .toolUse(_, let name, _):
+                name != "AskUserQuestion"
+            case .toolResult:
                 true
             default:
                 false
@@ -193,8 +195,11 @@ struct ConversationView: View {
     private static func isGroupedToolEventMessage(_ message: ConversationMessage) -> Bool {
         !message.content.isEmpty && message.content.allSatisfy { item in
             switch item {
-            case .toolUse:
-                true
+            case .toolUse(_, let name, _):
+                // Questions are conversation content, not background tool
+                // noise. Keep them as full transcript cards so the exact
+                // thread always shows what Claude asked.
+                name != "AskUserQuestion"
             case .toolResult(_, _, let isError):
                 !isError
             default:
@@ -208,7 +213,7 @@ struct ConversationView: View {
             || agent.conversationState.pendingToolApprovalCount > 0
             || !agent.conversationState.pendingUserInputRequests.isEmpty
             || agent.conversationState.activeGoal != nil
-            || agent.isStreaming
+            || agent.shouldShowStatusIndicator
             || (usagePercent ?? 0) >= 70
     }
 
@@ -287,17 +292,40 @@ struct ConversationView: View {
     }
 
     private var runtimeStatusColor: Color {
-        switch agent.conversationState.runtimePhase {
+        switch agent.status {
+        case .waitingForInput, .waitingForApproval:
+            return FXColors.warning
+        case .completed:
+            return FXColors.success
+        case .error:
+            return FXColors.error
         case .idle:
-            FXColors.fgTertiary
-        case .preparing, .responding:
-            FXColors.accent
-        case .compacting, .cancelling:
-            FXColors.warning
-        case .compacted:
-            FXColors.info
-        case .failed:
-            FXColors.error
+            return FXColors.fgTertiary
+        case .running:
+            return switch agent.conversationState.runtimePhase {
+            case .compacting, .cancelling:
+                FXColors.warning
+            case .compacted:
+                FXColors.info
+            case .failed:
+                FXColors.error
+            case .idle, .preparing, .responding:
+                FXColors.accent
+            }
+        }
+    }
+
+    private var runtimeStatusLabel: String {
+        switch agent.status {
+        case .waitingForInput: "Waiting for input"
+        case .waitingForApproval: "Approval needed"
+        case .completed: "Done"
+        case .error: "Error"
+        case .idle: "Idle"
+        case .running:
+            agent.conversationState.isStreaming
+                ? agent.conversationState.statusLabel
+                : "Running"
         }
     }
 
@@ -556,21 +584,23 @@ struct ConversationView: View {
             }
 
             HStack(spacing: FXSpacing.sm) {
-                statusPill
+                if agent.shouldShowStatusIndicator {
+                    statusPill
+                }
 
                 if agent.conversationState.queuedPromptCount > 0 {
                     let count = agent.conversationState.queuedPromptCount
                     FXBadge(count == 1 ? "1 queued" : "\(count) queued", tone: .warning)
                 }
 
-                if agent.conversationState.pendingToolApprovalCount > 0 {
+                if agent.conversationState.pendingToolApprovalCount > 1 {
                     let count = agent.conversationState.pendingToolApprovalCount
-                    FXBadge(count == 1 ? "1 approval needed" : "\(count) approvals needed", tone: .warning)
+                    FXBadge("\(count) approvals needed", tone: .warning)
                 }
 
-                if !agent.conversationState.pendingUserInputRequests.isEmpty {
+                if agent.conversationState.pendingUserInputRequests.count > 1 {
                     let count = agent.conversationState.pendingUserInputRequests.count
-                    FXBadge(count == 1 ? "Input needed" : "\(count) inputs needed", tone: .accent)
+                    FXBadge("\(count) inputs needed", tone: .warning)
                 }
 
                 if let usagePercentLabel, (usagePercent ?? 0) >= 70 {
@@ -674,9 +704,9 @@ struct ConversationView: View {
                 .fill(runtimeStatusColor)
                 .frame(width: 6, height: 6)
 
-            Text(agent.conversationState.statusLabel)
+            Text(runtimeStatusLabel)
                 .font(FXTypography.monoSmall)
-                .foregroundStyle(agent.isStreaming ? runtimeStatusColor : FXColors.fgSecondary)
+                .foregroundStyle(runtimeStatusColor)
         }
         .padding(.horizontal, FXSpacing.sm)
         .padding(.vertical, FXSpacing.xxs)

@@ -2,6 +2,8 @@ import Foundation
 import FXCore
 
 actor ClaudeNativeThreadStore {
+    typealias TrashHandler = @Sendable (URL) throws -> Void
+
     static let defaultMaximumThreadResults = 500
     private static let maximumSummaryBytes = 1 * 1_024 * 1_024
     static let defaultMaximumTranscriptBytes = 32 * 1_024 * 1_024
@@ -12,6 +14,7 @@ actor ClaudeNativeThreadStore {
     private let maximumTranscriptBytes: Int
     private let maximumThreadResults: Int
     private let maximumSummaryCacheEntries: Int
+    private let trashHandler: TrashHandler
     private var summaryCache: [String: CachedSummary] = [:]
     private var summaryParseCount = 0
     private var summaryAccessCounter: UInt64 = 0
@@ -20,12 +23,14 @@ actor ClaudeNativeThreadStore {
         configRoot: URL? = nil,
         maximumTranscriptBytes: Int = ClaudeNativeThreadStore.defaultMaximumTranscriptBytes,
         maximumThreadResults: Int = ClaudeNativeThreadStore.defaultMaximumThreadResults,
-        maximumSummaryCacheEntries: Int = ClaudeNativeThreadStore.defaultMaximumSummaryCacheEntries
+        maximumSummaryCacheEntries: Int = ClaudeNativeThreadStore.defaultMaximumSummaryCacheEntries,
+        trashHandler: @escaping TrashHandler = ClaudeNativeThreadStore.moveItemToTrash
     ) {
         configuredRoot = configRoot
         self.maximumTranscriptBytes = max(1, maximumTranscriptBytes)
         self.maximumThreadResults = max(1, maximumThreadResults)
         self.maximumSummaryCacheEntries = max(1, maximumSummaryCacheEntries)
+        self.trashHandler = trashHandler
     }
 
     private struct FileFingerprint: Equatable {
@@ -160,6 +165,75 @@ actor ClaudeNativeThreadStore {
             throw Self.error("Claude Code session '\(id)' does not belong to this workspace.")
         }
         return ProviderNativeThread(summary: match.summary, messages: Array(parsed.messages.suffix(Self.maximumMessages)))
+    }
+
+    func moveToTrash(
+        id: String,
+        workingDirectory: URL
+    ) throws {
+        try Task.checkCancellation()
+        guard Self.isSafeSessionID(id) else { throw Self.error("Invalid Claude Code session id.") }
+
+        let configuredDirectory = try Self.standardizedDirectory(workingDirectory)
+        let canonicalDirectory = configuredDirectory.resolvingSymlinksInPath().standardizedFileURL
+        let keys: Set<URLResourceKey> = [
+            .isRegularFileKey,
+            .isDirectoryKey,
+            .fileSizeKey,
+            .creationDateKey,
+            .contentModificationDateKey,
+        ]
+        var matchedArtifactsByPath: [String: URL] = [:]
+        var matchedTranscriptPaths: Set<String> = []
+
+        for projectDirectory in projectDirectories(
+            configuredDirectory: configuredDirectory,
+            canonicalDirectory: canonicalDirectory
+        ) {
+            try Task.checkCancellation()
+            let file = projectDirectory.appendingPathComponent(id).appendingPathExtension("jsonl")
+            guard let values = try? file.resourceValues(forKeys: keys),
+                  values.isRegularFile == true,
+                  let summary = try summary(
+                    for: file,
+                    values: values,
+                    canonicalDirectory: canonicalDirectory
+                  ),
+                  summary.id == id,
+                  Self.canonicalPath(summary.workingDirectory) == canonicalDirectory.path else {
+                continue
+            }
+            let transcript = file.standardizedFileURL
+            matchedArtifactsByPath[transcript.path] = transcript
+            matchedTranscriptPaths.insert(transcript.path)
+
+            // Claude stores spawned subagent transcripts under a sibling
+            // session directory (`<session-id>/subagents/*.jsonl`). Once the
+            // parent transcript has proven the exact workspace identity, that
+            // UUID-named directory is session-owned and moves with it.
+            let sessionDirectory = projectDirectory
+                .appendingPathComponent(id, isDirectory: true)
+                .standardizedFileURL
+            if let directoryValues = try? sessionDirectory.resourceValues(forKeys: keys),
+               directoryValues.isDirectory == true {
+                matchedArtifactsByPath[sessionDirectory.path] = sessionDirectory
+            }
+        }
+
+        let matchedArtifacts = matchedArtifactsByPath.values.sorted { $0.path < $1.path }
+        guard !matchedTranscriptPaths.isEmpty else {
+            throw Self.error("Claude Code session '\(id)' was not found for this workspace.")
+        }
+
+        // Once the recoverable operation begins, finish every validated
+        // duplicate path instead of leaving a half-moved session because the
+        // surrounding UI task was cancelled.
+        for artifact in matchedArtifacts {
+            try trashHandler(artifact)
+        }
+        for transcriptPath in matchedTranscriptPaths {
+            summaryCache[transcriptPath] = nil
+        }
     }
 
     func summaryCacheStatisticsForTesting() -> (entries: Int, parses: Int) {
@@ -426,6 +500,11 @@ actor ClaudeNativeThreadStore {
             throw error("The workspace path does not exist or is not a directory: \(standardized.path)")
         }
         return standardized
+    }
+
+    private nonisolated static func moveItemToTrash(_ url: URL) throws {
+        var resultingURL: NSURL?
+        try FileManager.default.trashItem(at: url, resultingItemURL: &resultingURL)
     }
 
     private static func canonicalPath(_ path: String) -> String {

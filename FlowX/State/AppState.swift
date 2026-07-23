@@ -48,8 +48,74 @@ enum InspectorDiffDisplayMode: String, CaseIterable, Codable, Sendable {
 enum AgentStatus: String {
     case idle
     case running
+    case waitingForInput
+    case waitingForApproval
     case completed
     case error
+}
+
+enum ThreadLifecycleActionKind: String, Sendable, Hashable {
+    case deleteDraft
+    case archiveProviderTask
+    case deleteProviderTask
+    case moveProviderTaskToTrash
+
+    var title: String {
+        switch self {
+        case .deleteDraft: "Delete Draft"
+        case .archiveProviderTask: "Archive Task"
+        case .deleteProviderTask: "Delete Permanently"
+        case .moveProviderTaskToTrash: "Move Task to Trash"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .deleteDraft: "Delete"
+        case .archiveProviderTask: "Archive"
+        case .deleteProviderTask: "Delete Permanently"
+        case .moveProviderTaskToTrash: "Move to Trash"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .deleteDraft, .deleteProviderTask, .moveProviderTaskToTrash: "trash"
+        case .archiveProviderTask: "archivebox"
+        }
+    }
+
+    var isDestructive: Bool {
+        self != .archiveProviderTask
+    }
+
+    var isProviderAction: Bool {
+        self != .deleteDraft
+    }
+}
+
+struct ThreadLifecycleConfirmation: Identifiable {
+    let id = UUID()
+    let action: ThreadLifecycleActionKind
+    let agentID: UUID?
+    let projectID: UUID
+    let providerIdentity: NativeThreadIdentity?
+    let threadTitle: String
+
+    var title: String { action.title }
+
+    var message: String {
+        switch action {
+        case .deleteDraft:
+            "Delete “\(threadTitle)” from FlowX? Its local draft, attachments, terminals, and workspace layout will be removed. Any unbound provider task is left untouched and may reappear after refresh."
+        case .archiveProviderTask:
+            "Archive “\(threadTitle)” in Codex? Codex also archives any spawned descendants. You can restore this parent from the project's Archived section."
+        case .deleteProviderTask:
+            "Permanently delete “\(threadTitle)” from Codex? Codex also deletes any spawned descendants. This cannot be undone."
+        case .moveProviderTaskToTrash:
+            "Move “\(threadTitle)” and its Claude session data to macOS Trash? Stop any Claude Code process using it first. Claude does not expose live task status, but the files can be recovered from Trash."
+        }
+    }
 }
 
 struct NativeThreadIdentity: Codable, Sendable, Hashable {
@@ -189,10 +255,9 @@ final class AgentInfo: Identifiable {
     var isLoadingNativeTranscript = false
     var nativeTranscriptError: String?
     var nativeTranscriptLoadedAt: Date?
-
-    var branch: String = ""
-    var additions: Int = 0
-    var deletions: Int = 0
+    /// Ephemeral attention state: completed work is only called out until the
+    /// user opens that thread. Historical provider threads stay visually quiet.
+    var hasUnseenCompletion = false
 
     var onChange: (() -> Void)?
     init(
@@ -375,16 +440,38 @@ final class AgentInfo: Identifiable {
     }
 
     var status: AgentStatus {
-        if conversationState.error != nil || agent.executionState == .failure {
+        if conversationState.error != nil
+            || nativeTranscriptError != nil
+            || agent.executionState == .failure
+            || nativeThreadBinding?.status?.lowercased() == "systemerror" {
             return .error
         }
-        if conversationState.isStreaming || agent.executionState == .running {
+        if !conversationState.pendingUserInputRequests.isEmpty {
+            return .waitingForInput
+        }
+        if conversationState.pendingToolApprovalCount > 0 {
+            return .waitingForApproval
+        }
+        if conversationState.isStreaming
+            || agent.executionState == .running
+            || nativeThreadBinding?.status?.lowercased() == "active" {
             return .running
         }
-        if agent.executionState == .success {
+        if agent.executionState == .success || nativeThreadBinding != nil {
             return .completed
         }
         return .idle
+    }
+
+    var shouldShowStatusIndicator: Bool {
+        return switch status {
+        case .running, .waitingForInput, .waitingForApproval, .error:
+            true
+        case .completed:
+            hasUnseenCompletion
+        case .idle:
+            false
+        }
     }
 
     var messages: [ConversationMessage] {
@@ -426,13 +513,8 @@ final class AgentInfo: Identifiable {
         }
     }
 
-    func applyGitInfo(_ gitInfo: GitStatusService.GitInfo) {
-        branch = gitInfo.branch
-        additions = gitInfo.additions
-        deletions = gitInfo.deletions
-    }
-
     func markConversationStarted() {
+        hasUnseenCompletion = false
         agent.executionState = .running
     }
 
@@ -522,9 +604,11 @@ final class ProjectState: Identifiable {
     var isExpanded: Bool { didSet { onChange?() } }
     var lastSelectedAgentID: UUID? { didSet { onChange?() } }
     var nativePresentationAgentIDs: [NativeThreadIdentity: UUID] { didSet { onChange?() } }
+    var archivedNativeThreadBindings: [NativeThreadBinding] = []
     var isSyncingNativeThreads = false
     var nativeThreadSyncError: String?
-    var lastNativeThreadSyncAt: Date?
+    var threadLifecycleNotice: String?
+    var threadLifecycleNoticeIsError = false
 
     var gitInfo = GitStatusService.GitInfo()
     var repositoryFiles: [String] = []
@@ -908,6 +992,7 @@ final class AppState {
     var settingsVisible = false
     var settingsTab: SettingsPanel.SettingsTab = .general
     var commandPaletteVisible = false
+    var threadLifecycleConfirmation: ThreadLifecycleConfirmation?
     var runtimeHealth: [String: BinaryHealth] = [:]
     var isBootstrapped = false
 
@@ -924,6 +1009,8 @@ final class AppState {
     private var nativeTranscriptLoadIDs: [UUID: UUID] = [:]
     @ObservationIgnored private var steeringPromptTasks: [UUID: Task<Void, Never>] = [:]
     private var steeringPromptSubmissionIDs: [UUID: UUID] = [:]
+    private var threadLifecycleAgentIDs: Set<UUID> = []
+    private var archivedThreadLifecycleIdentities: Set<NativeThreadIdentity> = []
     private var prunedNativePresentations: [UUID: [NativeThreadIdentity: AgentInfo]] = [:]
     private var isShuttingDown = false
 
@@ -1148,13 +1235,415 @@ final class AppState {
         let info = AgentInfo(agent: draft, projectRootPath: project.project.rootPath)
         configureAgent(info)
         reconcileConfiguration(for: info)
-        info.applyGitInfo(project.gitInfo)
         project.agents.append(info)
         project.project.agentOrder = project.agents.map(\.id)
         project.project.updatedAt = Date()
         activateAgent(info.id, in: project.id)
         scheduleSave()
         return info
+    }
+
+    func threadLifecycleActions(for agent: AgentInfo) -> [ThreadLifecycleActionKind] {
+        // A provider session id alone does not make a FlowX draft a native
+        // provider task. Stale or interrupted drafts can retain ids that have
+        // no provider rollout behind them. Only provider-discovered bindings
+        // may expose provider lifecycle operations.
+        guard agent.nativeThreadBinding != nil else { return [.deleteDraft] }
+        guard let provider = providerRegistry.provider(for: agent.providerID) else { return [] }
+        var actions: [ThreadLifecycleActionKind] = []
+        if provider is any AIProviderNativeThreadArchiving {
+            actions.append(.archiveProviderTask)
+        }
+        if provider is any AIProviderNativeThreadDeleting {
+            actions.append(.deleteProviderTask)
+        }
+        if provider is any AIProviderNativeThreadTrashManaging {
+            actions.append(.moveProviderTaskToTrash)
+        }
+        return actions
+    }
+
+    func threadLifecycleBlockedReason(for agent: AgentInfo, in project: ProjectState) -> String? {
+        if agent.isStreaming {
+            return "Stop the current FlowX run before managing this task."
+        }
+        if agent.nativeThreadBinding?.status?.lowercased() == "active" {
+            return "This task is currently running in Codex. Stop it before managing it."
+        }
+        if project.isSyncingNativeThreads {
+            return "Wait for provider task refresh to finish, then try again."
+        }
+        if threadLifecycleAgentIDs.contains(agent.id) {
+            return "A task action is already in progress."
+        }
+        return nil
+    }
+
+    func isThreadLifecycleActionInProgress(for agentID: UUID) -> Bool {
+        threadLifecycleAgentIDs.contains(agentID)
+    }
+
+    func isArchivedThreadActionInProgress(_ identity: NativeThreadIdentity) -> Bool {
+        archivedThreadLifecycleIdentities.contains(identity)
+    }
+
+    func requestThreadLifecycleAction(
+        _ action: ThreadLifecycleActionKind,
+        for agent: AgentInfo
+    ) {
+        guard let project = project(for: agent.id),
+              threadLifecycleActions(for: agent).contains(action) else {
+            reportThreadLifecycleError(
+                "This provider does not expose a safe archive or recoverable delete action.",
+                for: agent
+            )
+            return
+        }
+        if let blockedReason = threadLifecycleBlockedReason(for: agent, in: project) {
+            reportThreadLifecycleError(blockedReason, for: agent)
+            return
+        }
+
+        if action == .deleteDraft, !hasMeaningfulDraftContent(agent) {
+            removeAgent(agent.id)
+            project.threadLifecycleNotice = nil
+            project.threadLifecycleNoticeIsError = false
+            return
+        }
+
+        threadLifecycleConfirmation = ThreadLifecycleConfirmation(
+            action: action,
+            agentID: agent.id,
+            projectID: project.id,
+            providerIdentity: action.isProviderAction ? agent.nativeThreadBinding?.identity : nil,
+            threadTitle: agent.nativeThreadBinding?.title ?? agent.title
+        )
+    }
+
+    func requestArchivedThreadDeletion(
+        _ binding: NativeThreadBinding,
+        in project: ProjectState
+    ) {
+        let identity = binding.identity
+        guard projects.contains(where: { $0.id == project.id }),
+              project.archivedNativeThreadBindings.contains(where: { $0.identity == identity }),
+              providerRegistry.provider(for: identity.providerID) is any AIProviderNativeThreadDeleting else {
+            project.threadLifecycleNotice = "Permanent delete is unavailable for this archived task."
+            project.threadLifecycleNoticeIsError = true
+            return
+        }
+        guard !project.isSyncingNativeThreads else {
+            project.threadLifecycleNotice = "Wait for provider task refresh to finish, then try again."
+            project.threadLifecycleNoticeIsError = true
+            return
+        }
+        guard !archivedThreadLifecycleIdentities.contains(identity) else { return }
+
+        threadLifecycleConfirmation = ThreadLifecycleConfirmation(
+            action: .deleteProviderTask,
+            agentID: nil,
+            projectID: project.id,
+            providerIdentity: identity,
+            threadTitle: binding.title
+        )
+    }
+
+    func cancelThreadLifecycleConfirmation() {
+        threadLifecycleConfirmation = nil
+    }
+
+    func confirmThreadLifecycleAction() {
+        guard let confirmation = threadLifecycleConfirmation else { return }
+        threadLifecycleConfirmation = nil
+        Task { @MainActor [weak self] in
+            await self?.performThreadLifecycleAction(confirmation)
+        }
+    }
+
+    func unarchiveNativeThread(_ binding: NativeThreadBinding, in project: ProjectState) {
+        let identity = binding.identity
+        let projectID = project.id
+        guard projects.contains(where: { $0.id == project.id }) else { return }
+        guard !project.isSyncingNativeThreads else {
+            project.threadLifecycleNotice = "Wait for provider task refresh to finish, then restore the task."
+            project.threadLifecycleNoticeIsError = true
+            return
+        }
+        guard !archivedThreadLifecycleIdentities.contains(identity),
+              let provider = providerRegistry.provider(for: identity.providerID)
+                as? any AIProviderNativeThreadArchiving else {
+            return
+        }
+
+        archivedThreadLifecycleIdentities.insert(identity)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.archivedThreadLifecycleIdentities.remove(identity) }
+            guard let project = self.projects.first(where: { $0.id == projectID }) else { return }
+            do {
+                try await provider.unarchiveNativeThread(
+                    id: identity.sessionID,
+                    workingDirectory: project.project.rootURL
+                )
+                guard self.projects.contains(where: { $0.id == project.id }) else { return }
+                project.archivedNativeThreadBindings.removeAll { $0.identity == identity }
+                project.threadLifecycleNotice = nil
+                project.threadLifecycleNoticeIsError = false
+                self.refreshNativeThreads(for: project, discoveryMode: .indexed)
+            } catch {
+                project.threadLifecycleNotice = "Could not restore “\(binding.title)”: \(error.localizedDescription)"
+                project.threadLifecycleNoticeIsError = true
+            }
+        }
+    }
+
+    private func performThreadLifecycleAction(_ confirmation: ThreadLifecycleConfirmation) async {
+        guard let project = projects.first(where: { $0.id == confirmation.projectID }) else {
+            return
+        }
+        guard !project.isSyncingNativeThreads else {
+            project.threadLifecycleNotice = "The task list changed while confirmation was open. Refresh completed actions and try again."
+            project.threadLifecycleNoticeIsError = true
+            return
+        }
+
+        if confirmation.action == .deleteProviderTask, confirmation.agentID == nil {
+            await performArchivedThreadDeletion(confirmation, in: project)
+            return
+        }
+
+        guard let agentID = confirmation.agentID,
+              let agent = project.agents.first(where: { $0.id == agentID }) else {
+            project.threadLifecycleNotice = "The task changed while confirmation was open. No action was performed."
+            project.threadLifecycleNoticeIsError = true
+            return
+        }
+        if let blockedReason = threadLifecycleBlockedReason(for: agent, in: project) {
+            reportThreadLifecycleError(blockedReason, for: agent)
+            return
+        }
+        guard threadLifecycleActions(for: agent).contains(confirmation.action) else {
+            reportThreadLifecycleError("The task changed while confirmation was open. No action was performed.", for: agent)
+            return
+        }
+        if confirmation.action.isProviderAction,
+           agent.nativeThreadBinding?.identity != confirmation.providerIdentity {
+            reportThreadLifecycleError("The provider task changed while confirmation was open. No action was performed.", for: agent)
+            return
+        }
+
+        threadLifecycleAgentIDs.insert(agent.id)
+        defer { threadLifecycleAgentIDs.remove(agent.id) }
+
+        switch confirmation.action {
+        case .deleteDraft:
+            removeAgent(agent.id)
+            project.threadLifecycleNotice = nil
+            project.threadLifecycleNoticeIsError = false
+
+        case .archiveProviderTask:
+            guard let identity = confirmation.providerIdentity,
+                  let provider = providerRegistry.provider(for: identity.providerID)
+                    as? any AIProviderNativeThreadArchiving else {
+                reportThreadLifecycleError("Codex archive is unavailable for this task.", for: agent)
+                return
+            }
+            do {
+                try await provider.archiveNativeThread(
+                    id: identity.sessionID,
+                    workingDirectory: project.project.rootURL
+                )
+                guard projects.contains(where: { $0.id == project.id }),
+                      project.agents.contains(where: { $0.id == agent.id }) else {
+                    return
+                }
+                if let binding = agent.nativeThreadBinding {
+                    project.archivedNativeThreadBindings.removeAll { $0.identity == identity }
+                    project.archivedNativeThreadBindings.append(binding)
+                    sortArchivedNativeBindings(for: project)
+                }
+                removeProviderPresentation(
+                    agent,
+                    from: project,
+                    preservePresentationIdentity: true
+                )
+                project.threadLifecycleNotice = nil
+                project.threadLifecycleNoticeIsError = false
+                refreshNativeThreads(for: project, discoveryMode: .indexed)
+            } catch {
+                reportThreadLifecycleError(
+                    "Could not archive “\(confirmation.threadTitle)”: \(error.localizedDescription)",
+                    for: agent
+                )
+            }
+
+        case .deleteProviderTask:
+            guard let identity = confirmation.providerIdentity,
+                  let provider = providerRegistry.provider(for: identity.providerID)
+                    as? any AIProviderNativeThreadDeleting else {
+                reportThreadLifecycleError("Permanent Codex deletion is unavailable for this task.", for: agent)
+                return
+            }
+            do {
+                try await provider.deleteNativeThread(
+                    id: identity.sessionID,
+                    workingDirectory: project.project.rootURL
+                )
+                guard projects.contains(where: { $0.id == project.id }),
+                      project.agents.contains(where: { $0.id == agent.id }) else {
+                    return
+                }
+                removeProviderPresentation(
+                    agent,
+                    from: project,
+                    preservePresentationIdentity: false
+                )
+                project.threadLifecycleNotice = nil
+                project.threadLifecycleNoticeIsError = false
+                refreshNativeThreads(for: project, discoveryMode: .indexed)
+            } catch {
+                reportThreadLifecycleError(
+                    "Could not permanently delete “\(confirmation.threadTitle)”: \(error.localizedDescription)",
+                    for: agent
+                )
+            }
+
+        case .moveProviderTaskToTrash:
+            guard let identity = confirmation.providerIdentity,
+                  let provider = providerRegistry.provider(for: identity.providerID)
+                    as? any AIProviderNativeThreadTrashManaging else {
+                reportThreadLifecycleError("Recoverable deletion is unavailable for this task.", for: agent)
+                return
+            }
+            do {
+                try await provider.moveNativeThreadToTrash(
+                    id: identity.sessionID,
+                    workingDirectory: project.project.rootURL
+                )
+                guard projects.contains(where: { $0.id == project.id }),
+                      project.agents.contains(where: { $0.id == agent.id }) else {
+                    return
+                }
+                removeProviderPresentation(
+                    agent,
+                    from: project,
+                    preservePresentationIdentity: false
+                )
+                project.threadLifecycleNotice = nil
+                project.threadLifecycleNoticeIsError = false
+                refreshNativeThreads(for: project, discoveryMode: .indexed)
+            } catch {
+                reportThreadLifecycleError(
+                    "Could not move “\(confirmation.threadTitle)” to Trash: \(error.localizedDescription)",
+                    for: agent
+                )
+            }
+        }
+    }
+
+    private func performArchivedThreadDeletion(
+        _ confirmation: ThreadLifecycleConfirmation,
+        in project: ProjectState
+    ) async {
+        guard let identity = confirmation.providerIdentity,
+              project.archivedNativeThreadBindings.contains(where: { $0.identity == identity }),
+              !archivedThreadLifecycleIdentities.contains(identity),
+              let provider = providerRegistry.provider(for: identity.providerID)
+                as? any AIProviderNativeThreadDeleting else {
+            project.threadLifecycleNotice = "The archived task changed while confirmation was open. No action was performed."
+            project.threadLifecycleNoticeIsError = true
+            return
+        }
+
+        archivedThreadLifecycleIdentities.insert(identity)
+        defer { archivedThreadLifecycleIdentities.remove(identity) }
+        do {
+            try await provider.deleteNativeThread(
+                id: identity.sessionID,
+                workingDirectory: project.project.rootURL
+            )
+            guard projects.contains(where: { $0.id == project.id }) else { return }
+            project.archivedNativeThreadBindings.removeAll { $0.identity == identity }
+            discardNativePresentation(identity, from: project)
+            project.threadLifecycleNotice = nil
+            project.threadLifecycleNoticeIsError = false
+            refreshNativeThreads(for: project, discoveryMode: .indexed)
+        } catch {
+            project.threadLifecycleNotice = "Could not permanently delete “\(confirmation.threadTitle)”: \(error.localizedDescription)"
+            project.threadLifecycleNoticeIsError = true
+        }
+    }
+
+    private func removeProviderPresentation(
+        _ agent: AgentInfo,
+        from project: ProjectState,
+        preservePresentationIdentity: Bool
+    ) {
+        let identity = agent.nativeThreadBinding?.identity
+        let agentID = agent.id
+        removeAgent(agentID)
+
+        if let identity {
+            if preservePresentationIdentity {
+                // Archive hides the provider task but preserves its stable
+                // presentation identity and conversation/image sidecar cache.
+                project.nativePresentationAgentIDs[identity] = agentID
+            } else {
+                ConversationPersistence.remove(agentID: agentID, projectID: project.id)
+                var cache = prunedNativePresentations[project.id] ?? [:]
+                cache[identity] = nil
+                prunedNativePresentations[project.id] = cache.isEmpty ? nil : cache
+                project.nativePresentationAgentIDs[identity] = nil
+            }
+        } else if !preservePresentationIdentity {
+            ConversationPersistence.remove(agentID: agentID, projectID: project.id)
+        }
+        scheduleSave()
+    }
+
+    private func discardNativePresentation(
+        _ identity: NativeThreadIdentity,
+        from project: ProjectState
+    ) {
+        let presentationID = project.nativePresentationAgentIDs.removeValue(forKey: identity)
+            ?? Self.deterministicAgentID(for: identity)
+        ConversationPersistence.remove(agentID: presentationID, projectID: project.id)
+        var cache = prunedNativePresentations[project.id] ?? [:]
+        cache[identity] = nil
+        prunedNativePresentations[project.id] = cache.isEmpty ? nil : cache
+        scheduleSave()
+    }
+
+    private func hasMeaningfulDraftContent(_ agent: AgentInfo) -> Bool {
+        !agent.messages.isEmpty
+            || !agent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !agent.conversationState.pendingAttachments.isEmpty
+            || agent.conversationState.queuedPromptCount > 0
+            || agent.conversationState.sessionID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            || agent.terminalSessions.contains(where: { $0.isRunning })
+            || agent.workspace.terminalVisible
+            || agent.workspace.splitOpen
+            || !agent.workspace.browserURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func reportThreadLifecycleError(_ message: String, for agent: AgentInfo) {
+        agent.conversationState.recordRuntimeActivity(
+            kind: .error,
+            tone: .error,
+            summary: "Task action failed",
+            detail: message,
+            state: "failed",
+            turnID: agent.conversationState.activeTurnID
+        )
+        project(for: agent.id)?.threadLifecycleNotice = message
+        project(for: agent.id)?.threadLifecycleNoticeIsError = true
+    }
+
+    private func sortArchivedNativeBindings(for project: ProjectState) {
+        project.archivedNativeThreadBindings.sort {
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+            return Self.nativeIdentitySortKey($0.identity) < Self.nativeIdentitySortKey($1.identity)
+        }
     }
 
     func removeAgent(_ agentID: UUID) {
@@ -1353,6 +1842,10 @@ final class AppState {
         let projectChanged = activeProjectID != projectID
         activeProjectID = projectID
         activeAgentID = resolvedLastAgentID(for: project)
+        if let activeAgentID,
+           let selectedAgent = project.agents.first(where: { $0.id == activeAgentID }) {
+            selectedAgent.hasUnseenCompletion = false
+        }
         cancelNativeTranscriptLoads(except: activeAgentID)
         if projectChanged {
             synchronizeProjectResources()
@@ -1374,6 +1867,9 @@ final class AppState {
         let projectChanged = activeProjectID != projectID
         activeProjectID = projectID
         activeAgentID = agentID
+        if let selectedAgent = project.agents.first(where: { $0.id == agentID }) {
+            selectedAgent.hasUnseenCompletion = false
+        }
         cancelNativeTranscriptLoads(except: agentID)
         if project.lastSelectedAgentID != agentID {
             project.lastSelectedAgentID = agentID
@@ -1687,7 +2183,9 @@ final class AppState {
         }
 
         var bindingsByIdentity: [NativeThreadIdentity: NativeThreadBinding] = [:]
+        var archivedBindingsByIdentity: [NativeThreadIdentity: NativeThreadBinding] = [:]
         var successfullyListedProviderIDs: Set<String> = []
+        var successfullyListedArchivedProviderIDs: Set<String> = []
         var errors: [String] = []
         for provider in providers {
             guard !Task.isCancelled else { return }
@@ -1722,6 +2220,35 @@ final class AppState {
             } catch {
                 errors.append("\(provider.displayName): \(error.localizedDescription)")
             }
+
+            if let archivingProvider = provider as? any AIProviderNativeThreadArchiving {
+                do {
+                    let summaries = try await archivingProvider.listArchivedNativeThreads(
+                        workingDirectory: projectRootURL,
+                        limit: 250
+                    )
+                    guard !Task.isCancelled else { return }
+                    let providerID = AgentInfo.normalizedProviderID(provider.id)
+                    successfullyListedArchivedProviderIDs.insert(providerID)
+                    for summary in summaries {
+                        guard let binding = Self.validatedNativeBinding(
+                            summary,
+                            expectedCanonicalPath: expectedCanonicalPath
+                        ), binding.identity.providerID == providerID else {
+                            continue
+                        }
+                        if let existing = archivedBindingsByIdentity[binding.identity],
+                           existing.updatedAt >= binding.updatedAt {
+                            continue
+                        }
+                        archivedBindingsByIdentity[binding.identity] = binding
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    errors.append("\(provider.displayName) archived tasks: \(error.localizedDescription)")
+                }
+            }
         }
 
         guard !Task.isCancelled,
@@ -1733,12 +2260,24 @@ final class AppState {
             if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
             return Self.nativeIdentitySortKey($0.identity) < Self.nativeIdentitySortKey($1.identity)
         }
+        // Keep the last provider-authoritative archived projection across a
+        // transient runtime/list failure. A successful empty list still
+        // clears that provider's archived tasks as expected.
+        for binding in currentProject.archivedNativeThreadBindings
+            where !successfullyListedArchivedProviderIDs.contains(binding.identity.providerID) {
+            if archivedBindingsByIdentity[binding.identity] == nil {
+                archivedBindingsByIdentity[binding.identity] = binding
+            }
+        }
+        currentProject.archivedNativeThreadBindings = archivedBindingsByIdentity.values.sorted {
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
+            return Self.nativeIdentitySortKey($0.identity) < Self.nativeIdentitySortKey($1.identity)
+        }
         await mergeNativeBindings(
             orderedBindings,
             successfullyListedProviderIDs: successfullyListedProviderIDs,
             into: currentProject
         )
-        currentProject.lastNativeThreadSyncAt = Date()
         currentProject.nativeThreadSyncError = errors.isEmpty ? nil : errors.joined(separator: "\n")
 
         if activeProjectID == currentProject.id,
@@ -1800,7 +2339,7 @@ final class AppState {
                 if previousNativeTitle == nil || agent.agent.title == previousNativeTitle {
                     agent.agent.title = binding.title
                 }
-                agent.nativeThreadBinding = binding
+                updateNativeThreadBinding(binding, for: agent)
                 agent.agent.configuration.providerID = binding.identity.providerID
                 agent.conversationState.sessionID = binding.identity.sessionID
                 project.nativePresentationAgentIDs[binding.identity] = agent.id
@@ -1813,14 +2352,13 @@ final class AppState {
                 identity: binding.identity,
                 projectID: project.id
             ) {
-                cachedAgent.nativeThreadBinding = binding
+                updateNativeThreadBinding(binding, for: cachedAgent)
                 cachedAgent.agent.configuration.providerID = binding.identity.providerID
                 cachedAgent.conversationState.sessionID = binding.identity.sessionID
                 cachedAgent.terminalSessions.removeAll()
                 cachedAgent.setTerminalCount(cachedAgent.workspace.terminalCount)
                 configureAgent(cachedAgent)
                 reconcileConfiguration(for: cachedAgent)
-                cachedAgent.applyGitInfo(project.gitInfo)
                 project.agents.append(cachedAgent)
                 project.nativePresentationAgentIDs[binding.identity] = cachedAgent.id
                 agentsByIdentity[binding.identity] = cachedAgent
@@ -1852,7 +2390,6 @@ final class AppState {
             )
             configureAgent(info)
             reconcileConfiguration(for: info)
-            info.applyGitInfo(project.gitInfo)
             project.agents.append(info)
             project.nativePresentationAgentIDs[binding.identity] = info.id
             agentsByIdentity[binding.identity] = info
@@ -1887,6 +2424,39 @@ final class AppState {
             activeAgentID = project.lastSelectedAgentID ?? project.agents.first?.id
         }
         trimNativePresentationAgentIDs(for: project)
+    }
+
+    private func updateNativeThreadBinding(_ binding: NativeThreadBinding, for agent: AgentInfo) {
+        let wasActive = agent.nativeThreadBinding?.status?.lowercased() == "active"
+        let normalizedStatus = binding.status?.lowercased()
+        let isActive = normalizedStatus == "active"
+
+        agent.nativeThreadBinding = binding
+        if isActive, !wasActive {
+            agent.hasUnseenCompletion = false
+            // A provider-native run started after any previously cancelled
+            // FlowX turn. Do not let that stale stop reason suppress this
+            // new run's eventual completion marker.
+            agent.conversationState.lastStopReason = nil
+        } else if wasActive,
+                  normalizedStatus != "systemerror",
+                  !completionWasCancelled(for: agent) {
+            agent.hasUnseenCompletion = agent.hasUnseenCompletion
+                || completionNeedsAttention(for: agent)
+        }
+    }
+
+    private func completionNeedsAttention(for agent: AgentInfo) -> Bool {
+        activeAgentID != agent.id || !NSApplication.shared.isActive
+    }
+
+    private func completionWasCancelled(for agent: AgentInfo) -> Bool {
+        guard let stopReason = agent.conversationState.lastStopReason?.lowercased() else {
+            return false
+        }
+        return stopReason.contains("cancel")
+            || stopReason.contains("interrupt")
+            || stopReason.contains("abort")
     }
 
     private func removeStaleNativeAgents(
@@ -1997,6 +2567,10 @@ final class AppState {
         for entry in reserve.prefix(Self.maximumPrunedNativePresentationsPerProject) {
             boundedMappings[entry.identity] = entry.agent.id
         }
+        for binding in project.archivedNativeThreadBindings {
+            boundedMappings[binding.identity] = project.nativePresentationAgentIDs[binding.identity]
+                ?? Self.deterministicAgentID(for: binding.identity)
+        }
         if project.nativePresentationAgentIDs != boundedMappings {
             project.nativePresentationAgentIDs = boundedMappings
         }
@@ -2085,7 +2659,7 @@ final class AppState {
                     return
                 }
 
-                currentAgent.nativeThreadBinding = refreshedBinding
+                updateNativeThreadBinding(refreshedBinding, for: currentAgent)
                 let restoredMessages = ConversationAssetStore.reattachingNativeImages(
                     to: nativeThread.messages,
                     from: currentAgent.conversationState.messages,
@@ -2446,10 +3020,6 @@ final class AppState {
         guard project.gitInfo != gitInfo else { return }
 
         project.gitInfo = gitInfo
-        for agent in project.agents {
-            agent.applyGitInfo(gitInfo)
-        }
-
         if !gitInfo.hasChanges {
             project.commitComposerVisible = false
             project.commitMessageDraft = ""
@@ -2635,6 +3205,9 @@ final class AppState {
                 Task { @MainActor in
                     guard self.project(for: agent.id)?.id == project.id else { return }
                     agent.syncExecutionStateFromConversation()
+                    agent.hasUnseenCompletion = agent.status == .completed
+                        && !self.completionWasCancelled(for: agent)
+                        && self.completionNeedsAttention(for: agent)
                     ConversationPersistence.save(agent: agent, projectID: project.id)
                     gitStatusService.forceRefresh(projectID: project.id)
                     await refreshInspector(for: project)

@@ -153,6 +153,50 @@ struct FlowXCommands: Commands {
                 Button("No Threads Available") {}
                     .disabled(true)
             }
+
+            if let activeAgent,
+               let project = appState.activeProject,
+               !appState.threadLifecycleActions(for: activeAgent).isEmpty {
+                Divider()
+                ForEach(appState.threadLifecycleActions(for: activeAgent), id: \.self) { action in
+                    Button(
+                        action.title,
+                        role: action.isDestructive ? .destructive : nil
+                    ) {
+                        appState.requestThreadLifecycleAction(action, for: activeAgent)
+                    }
+                    .disabled(appState.threadLifecycleBlockedReason(for: activeAgent, in: project) != nil)
+                }
+            }
+
+            if let project = appState.activeProject,
+               !project.archivedNativeThreadBindings.isEmpty {
+                Menu("Archived Tasks") {
+                    ForEach(project.archivedNativeThreadBindings, id: \.identity) { binding in
+                        Menu(binding.title) {
+                            Button("Restore Task") {
+                                appState.unarchiveNativeThread(binding, in: project)
+                            }
+                            .disabled(
+                                project.isSyncingNativeThreads
+                                    || appState.isArchivedThreadActionInProgress(binding.identity)
+                            )
+
+                            if appState.providerRegistry.provider(for: binding.identity.providerID)
+                                is any AIProviderNativeThreadDeleting {
+                                Divider()
+                                Button("Delete Permanently", role: .destructive) {
+                                    appState.requestArchivedThreadDeletion(binding, in: project)
+                                }
+                                .disabled(
+                                    project.isSyncingNativeThreads
+                                        || appState.isArchivedThreadActionInProgress(binding.identity)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         CommandGroup(after: .saveItem) {

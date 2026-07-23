@@ -10,6 +10,7 @@ struct ProjectRow: View {
 
     @State private var visibleThreadLimit = Self.initialVisibleThreadLimit
     @State private var paginatedSearchQuery = ""
+    @State private var archivedTasksExpanded = false
 
     private static let initialVisibleThreadLimit = 24
     private static let visibleThreadIncrement = 24
@@ -21,6 +22,7 @@ struct ProjectRow: View {
             : Self.initialVisibleThreadLimit
         let visibleAgents = matchingAgents.prefix(effectiveLimit)
         let remainingThreadCount = max(0, matchingAgents.count - visibleAgents.count)
+        let matchingArchivedBindings = filteredArchivedBindings
 
         VStack(alignment: .leading, spacing: FXSpacing.xs) {
             // Project header
@@ -108,27 +110,30 @@ struct ProjectRow: View {
                 VStack(alignment: .leading, spacing: FXSpacing.xs) {
                     if let syncError = project.nativeThreadSyncError {
                         syncErrorRow(syncError)
-                    } else if let syncStatusLabel {
-                        Label(syncStatusLabel, systemImage: project.isSyncingNativeThreads ? "arrow.triangle.2.circlepath" : "checkmark.circle")
-                            .font(FXTypography.caption)
-                            .foregroundStyle(FXColors.fgQuaternary)
-                            .padding(.horizontal, FXSpacing.md)
                     }
 
-                    if project.agents.isEmpty {
+                    if let notice = project.threadLifecycleNotice {
+                        lifecycleNoticeRow(notice)
+                    }
+
+                    if project.agents.isEmpty && project.archivedNativeThreadBindings.isEmpty {
                         emptyThreadState
-                    } else if matchingAgents.isEmpty {
+                    } else if matchingAgents.isEmpty && matchingArchivedBindings.isEmpty {
                         noMatchingThreadsState
-                    } else {
+                    } else if !matchingAgents.isEmpty {
                         LazyVStack(spacing: FXSpacing.xxxs) {
                             ForEach(visibleAgents) { agent in
-                                ThreadRow(agent: agent, projectName: project.project.name)
+                                ThreadRow(agent: agent, project: project)
                             }
                         }
 
                         if remainingThreadCount > 0 {
                             showMoreThreadsButton(remainingCount: remainingThreadCount)
                         }
+                    }
+
+                    if !matchingArchivedBindings.isEmpty {
+                        archivedTasksSection(matchingArchivedBindings)
                     }
                 }
             }
@@ -169,6 +174,78 @@ struct ProjectRow: View {
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
 
             return searchTerms.allSatisfy { searchableText.contains(String($0)) }
+        }
+    }
+
+    private var filteredArchivedBindings: [NativeThreadBinding] {
+        guard !searchTerms.isEmpty else { return project.archivedNativeThreadBindings }
+        return project.archivedNativeThreadBindings.filter { binding in
+            let searchableText = [
+                binding.title,
+                binding.preview,
+                binding.identity.providerID,
+                "archived",
+            ]
+            .joined(separator: " ")
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            return searchTerms.allSatisfy { searchableText.contains(String($0)) }
+        }
+    }
+
+    private func lifecycleNoticeRow(_ notice: String) -> some View {
+        HStack(spacing: FXSpacing.sm) {
+            Image(systemName: project.threadLifecycleNoticeIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .font(FXTypography.icon(.small))
+                .foregroundStyle(project.threadLifecycleNoticeIsError ? FXColors.error : FXColors.success)
+
+            Text(notice)
+                .font(FXTypography.caption)
+                .foregroundStyle(project.threadLifecycleNoticeIsError ? FXColors.error : FXColors.fgTertiary)
+                .lineLimit(2)
+
+            Spacer(minLength: 0)
+
+            FXIconButton(icon: "xmark", label: "Dismiss task notice", size: 20) {
+                project.threadLifecycleNotice = nil
+            }
+        }
+        .padding(.horizontal, FXSpacing.md)
+        .padding(.vertical, FXSpacing.xs)
+    }
+
+    private func archivedTasksSection(_ bindings: [NativeThreadBinding]) -> some View {
+        VStack(alignment: .leading, spacing: FXSpacing.xs) {
+            Button {
+                withAnimation(FXAnimation.snappy) {
+                    archivedTasksExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: FXSpacing.sm) {
+                    Image(systemName: (archivedTasksExpanded || isSearching) ? "chevron.down" : "chevron.right")
+                        .font(FXTypography.icon(.micro))
+                    Image(systemName: "archivebox")
+                        .font(FXTypography.icon(.small))
+                    Text("ARCHIVED")
+                        .font(FXTypography.overline)
+                        .tracking(0.8)
+                    Spacer(minLength: 0)
+                    Text("\(bindings.count)")
+                        .font(FXTypography.monoSmall)
+                }
+                .foregroundStyle(FXColors.fgTertiary)
+                .padding(.horizontal, FXSpacing.md)
+                .padding(.vertical, FXSpacing.xs)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if archivedTasksExpanded || isSearching {
+                LazyVStack(spacing: FXSpacing.xxxs) {
+                    ForEach(bindings, id: \.identity) { binding in
+                        ArchivedThreadRow(binding: binding, project: project)
+                    }
+                }
+            }
         }
     }
 
@@ -254,14 +331,6 @@ struct ProjectRow: View {
         thread.conversationState.configuredContextWindow = model.contextWindow
     }
 
-    private var syncStatusLabel: String? {
-        if project.isSyncingNativeThreads {
-            return "Syncing Codex and Claude threads…"
-        }
-        guard let syncDate = project.lastNativeThreadSyncAt else { return nil }
-        return "Synced \(syncDate.formatted(.relative(presentation: .numeric, unitsStyle: .abbreviated)))"
-    }
-
     private var emptyThreadState: some View {
         HStack(alignment: .top, spacing: FXSpacing.sm) {
             Image(systemName: project.isSyncingNativeThreads ? "arrow.triangle.2.circlepath" : "bubble.left.and.bubble.right")
@@ -339,5 +408,126 @@ struct ProjectRow: View {
     private func copyPath() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(project.project.rootPath, forType: .string)
+    }
+}
+
+private struct ArchivedThreadRow: View {
+    @Environment(AppState.self) private var appState
+    let binding: NativeThreadBinding
+    @Bindable var project: ProjectState
+
+    var body: some View {
+        HStack(spacing: FXSpacing.sm) {
+            FXBadge(binding.identity.providerID.uppercased(), tone: .accent)
+
+            VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
+                Text(binding.title)
+                    .font(FXTypography.bodyMedium)
+                    .foregroundStyle(FXColors.fgSecondary)
+                    .lineLimit(1)
+
+                Text(binding.preview.isEmpty ? "Archived provider task" : flattenedPreview)
+                    .font(FXTypography.caption)
+                    .foregroundStyle(FXColors.fgTertiary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            if isActionInProgress {
+                ProgressView()
+                    .controlSize(.mini)
+                    .accessibilityLabel("Updating archived task")
+            } else {
+                FXDropdown(
+                    sections: actionSections,
+                    enabled: !project.isSyncingNativeThreads,
+                    panelWidth: 200,
+                    placement: .automatic,
+                    alignment: .trailing
+                ) { isExpanded in
+                    Image(systemName: isExpanded ? "xmark" : "ellipsis")
+                        .font(FXTypography.icon(.small))
+                        .foregroundStyle(isExpanded ? FXColors.accent : FXColors.fgTertiary)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                        .accessibilityLabel("Archived task actions")
+                }
+                .help("Archived task actions")
+            }
+        }
+        .padding(.horizontal, FXSpacing.md)
+        .padding(.vertical, FXSpacing.sm)
+        .background(FXColors.bgSurface)
+        .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
+        .contextMenu {
+            Button("Restore Task") {
+                restore()
+            }
+            .disabled(project.isSyncingNativeThreads || isActionInProgress)
+
+            if canDeletePermanently {
+                Divider()
+                Button("Delete Permanently", role: .destructive) {
+                    deletePermanently()
+                }
+                .disabled(project.isSyncingNativeThreads || isActionInProgress)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Archived Codex task, \(binding.title)")
+    }
+
+    private var actionSections: [FXDropdownSection] {
+        let restoreItem = FXDropdownItem(
+            id: "restore",
+            title: "Restore Task",
+            subtitle: "Unarchive in Codex",
+            isEnabled: !project.isSyncingNativeThreads && !isActionInProgress,
+            action: restore
+        )
+        var items = [restoreItem]
+        if canDeletePermanently {
+            items.append(
+                FXDropdownItem(
+                    id: "delete-permanently",
+                    title: "Delete Permanently",
+                    subtitle: "Cannot be undone; includes spawned tasks",
+                    isEnabled: !project.isSyncingNativeThreads && !isActionInProgress,
+                    tone: .destructive,
+                    action: deletePermanently
+                )
+            )
+        }
+        return [
+            FXDropdownSection(
+                id: "archived-task",
+                items: items
+            ),
+        ]
+    }
+
+    private var isActionInProgress: Bool {
+        appState.isArchivedThreadActionInProgress(binding.identity)
+    }
+
+    private var canDeletePermanently: Bool {
+        appState.providerRegistry.provider(for: binding.identity.providerID)
+            is any AIProviderNativeThreadDeleting
+    }
+
+    private var flattenedPreview: String {
+        binding.preview
+            .replacingOccurrences(of: "\n", with: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+
+    private func restore() {
+        appState.unarchiveNativeThread(binding, in: project)
+    }
+
+    private func deletePermanently() {
+        appState.requestArchivedThreadDeletion(binding, in: project)
     }
 }

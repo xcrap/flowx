@@ -329,7 +329,8 @@ private actor CodexSession {
     func listNativeThreads(
         workingDirectory: URL,
         limit: Int,
-        discoveryMode: ProviderNativeThreadDiscoveryMode = .indexed
+        discoveryMode: ProviderNativeThreadDiscoveryMode = .indexed,
+        archived: Bool = false
     ) async throws -> [ProviderNativeThreadSummary] {
         let configuredDirectory = try Self.validatedWorkingDirectory(workingDirectory).standardizedFileURL
         let canonicalDirectory = configuredDirectory.resolvingSymlinksInPath().standardizedFileURL
@@ -346,7 +347,8 @@ private actor CodexSession {
                 cwdFilters: cwdFilters,
                 limit: min(100, boundedLimit - results.count),
                 cursor: cursor,
-                discoveryMode: discoveryMode
+                discoveryMode: discoveryMode,
+                archived: archived
             )
             let payload = try await requestJSON(method: "thread/list", params: params)
             let result = payload["result"] as? [String: Any] ?? [:]
@@ -376,7 +378,8 @@ private actor CodexSession {
         cwdFilters: [String],
         limit: Int,
         cursor: String?,
-        discoveryMode: ProviderNativeThreadDiscoveryMode
+        discoveryMode: ProviderNativeThreadDiscoveryMode,
+        archived: Bool = false
     ) -> [String: Any] {
         var params: [String: Any] = [
             "cwd": cwdFilters.count == 1 ? (cwdFilters[0] as Any) : cwdFilters,
@@ -385,8 +388,91 @@ private actor CodexSession {
             "sortDirection": "desc",
             "useStateDbOnly": discoveryMode == .indexed,
         ]
+        if archived {
+            params["archived"] = true
+        }
         if let cursor, !cursor.isEmpty { params["cursor"] = cursor }
         return params
+    }
+
+    func archiveNativeThread(id: String, workingDirectory: URL) async throws {
+        let canonicalDirectory = try await validatedNativeThreadWorkspace(
+            id: id,
+            workingDirectory: workingDirectory,
+            requireInactive: true
+        )
+        try await ensureServerInitialized(workingDirectory: canonicalDirectory)
+        _ = try await requestJSON(
+            method: "thread/archive",
+            params: ["threadId": id]
+        )
+    }
+
+    func unarchiveNativeThread(id: String, workingDirectory: URL) async throws {
+        let canonicalDirectory = try await validatedNativeThreadWorkspace(
+            id: id,
+            workingDirectory: workingDirectory
+        )
+        try await ensureServerInitialized(workingDirectory: canonicalDirectory)
+        _ = try await requestJSON(
+            method: "thread/unarchive",
+            params: ["threadId": id]
+        )
+    }
+
+    func deleteNativeThread(id: String, workingDirectory: URL) async throws {
+        let trimmedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let canonicalDirectory = try await validatedNativeThreadWorkspace(
+            id: trimmedID,
+            workingDirectory: workingDirectory,
+            requireInactive: true
+        )
+        try await ensureServerInitialized(workingDirectory: canonicalDirectory)
+        let request = Self.nativeThreadDeleteRequest(threadID: trimmedID)
+        _ = try await requestJSON(method: request.method, params: request.params)
+    }
+
+    fileprivate static func nativeThreadDeleteRequest(
+        threadID: String
+    ) -> (method: String, params: [String: Any]) {
+        (
+            method: "thread/delete",
+            params: ["threadId": threadID]
+        )
+    }
+
+    private func validatedNativeThreadWorkspace(
+        id: String,
+        workingDirectory: URL,
+        requireInactive: Bool = false
+    ) async throws -> URL {
+        let trimmedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedID.isEmpty else {
+            throw Self.makeError("A provider thread id is required.")
+        }
+        let configuredDirectory = try Self.validatedWorkingDirectory(workingDirectory).standardizedFileURL
+        let canonicalDirectory = configuredDirectory.resolvingSymlinksInPath().standardizedFileURL
+        try await ensureServerInitialized(workingDirectory: canonicalDirectory)
+        let payload = try await requestJSON(
+            method: "thread/read",
+            params: ["threadId": trimmedID, "includeTurns": false]
+        )
+        let result = payload["result"] as? [String: Any] ?? [:]
+        guard let thread = result["thread"] as? [String: Any],
+              let summary = Self.nativeSummary(
+                from: thread,
+                expectedCanonicalDirectory: canonicalDirectory.path
+              ) else {
+            throw Self.makeError("Codex thread '\(trimmedID)' does not belong to this workspace.")
+        }
+        if requireInactive, Self.isNativeThreadActive(summary.status) {
+            throw Self.makeError("Codex thread '\(trimmedID)' is currently running. Stop it before managing it.")
+        }
+        return canonicalDirectory
+    }
+
+    fileprivate static func isNativeThreadActive(_ status: String?) -> Bool {
+        status?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "active"
     }
 
     func readNativeThread(
@@ -2928,7 +3014,7 @@ private actor CodexSessionReference {
     }
 }
 
-public final class CodexProvider: AIProviderThreadControls, AIProviderSessionManaging, AIProviderNativeThreads, Sendable {
+public final class CodexProvider: AIProviderThreadControls, AIProviderSessionManaging, AIProviderNativeThreads, AIProviderNativeThreadArchiving, AIProviderNativeThreadDeleting, Sendable {
     public let id = "codex"
     public let displayName = "Codex (OpenAI)"
     public var availableModels: [AIModel] { modelCatalog.models }
@@ -3000,6 +3086,41 @@ public final class CodexProvider: AIProviderThreadControls, AIProviderSessionMan
         workingDirectory: URL?
     ) async throws -> ProviderNativeThread {
         try await nativeReader.readNativeThread(id: id, workingDirectory: workingDirectory)
+    }
+
+    public func deleteNativeThread(
+        id: String,
+        workingDirectory: URL
+    ) async throws {
+        try await nativeReader.deleteNativeThread(id: id, workingDirectory: workingDirectory)
+        await store.release(id.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    public func listArchivedNativeThreads(
+        workingDirectory: URL,
+        limit: Int = 100
+    ) async throws -> [ProviderNativeThreadSummary] {
+        try await nativeReader.listNativeThreads(
+            workingDirectory: workingDirectory,
+            limit: limit,
+            discoveryMode: .indexed,
+            archived: true
+        )
+    }
+
+    public func archiveNativeThread(
+        id: String,
+        workingDirectory: URL
+    ) async throws {
+        try await nativeReader.archiveNativeThread(id: id, workingDirectory: workingDirectory)
+        await store.release(id.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    public func unarchiveNativeThread(
+        id: String,
+        workingDirectory: URL
+    ) async throws {
+        try await nativeReader.unarchiveNativeThread(id: id, workingDirectory: workingDirectory)
     }
 
     static let fallbackModels: [AIModel] = [
@@ -3135,14 +3256,26 @@ public final class CodexProvider: AIProviderThreadControls, AIProviderSessionMan
         cwdFilters: [String],
         limit: Int,
         cursor: String? = nil,
-        discoveryMode: ProviderNativeThreadDiscoveryMode
+        discoveryMode: ProviderNativeThreadDiscoveryMode,
+        archived: Bool = false
     ) -> [String: Any] {
         CodexSession.nativeThreadListParameters(
             cwdFilters: cwdFilters,
             limit: limit,
             cursor: cursor,
-            discoveryMode: discoveryMode
+            discoveryMode: discoveryMode,
+            archived: archived
         )
+    }
+
+    static func nativeThreadDeleteRequestForTesting(
+        threadID: String
+    ) -> (method: String, params: [String: Any]) {
+        CodexSession.nativeThreadDeleteRequest(threadID: threadID)
+    }
+
+    static func nativeThreadIsActiveForTesting(_ status: String?) -> Bool {
+        CodexSession.isNativeThreadActive(status)
     }
 
     static func turnSteerParametersForTesting(

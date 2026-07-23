@@ -103,6 +103,144 @@ import Testing
     ))
 }
 
+@Test func quarantinedSymlinkTargetIsSkippedWithoutLaunchingOrRemovingQuarantine() async throws {
+    let manager = FileManager.default
+    let container = manager.temporaryDirectory
+        .appendingPathComponent("flowx-runtime-quarantine-\(UUID().uuidString)", isDirectory: true)
+    let quarantinedTarget = container.appendingPathComponent("quarantined-codex")
+    let quarantinedSymlink = container.appendingPathComponent("preferred-codex")
+    let cleanFallback = container.appendingPathComponent("clean-codex")
+    let launchMarker = container.appendingPathComponent("quarantined-launched")
+    try manager.createDirectory(at: container, withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: container) }
+
+    try Data(
+        """
+        #!/bin/sh
+        : > "\(launchMarker.path)"
+        printf 'quarantined-version'
+
+        """.utf8
+    ).write(to: quarantinedTarget)
+    try Data(
+        """
+        #!/bin/sh
+        printf 'clean-version'
+
+        """.utf8
+    ).write(to: cleanFallback)
+    try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: quarantinedTarget.path)
+    try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cleanFallback.path)
+    try manager.createSymbolicLink(at: quarantinedSymlink, withDestinationURL: quarantinedTarget)
+
+    let quarantineValue = Data("0081;flowx-runtime-test".utf8)
+    let quarantineResult = quarantineValue.withUnsafeBytes { bytes in
+        setxattr(
+            quarantinedTarget.path,
+            "com.apple.quarantine",
+            bytes.baseAddress,
+            bytes.count,
+            0,
+            0
+        )
+    }
+    try #require(quarantineResult == 0)
+
+    let discovery = RuntimeDiscovery()
+    await discovery.register(BinarySpec(
+        id: "quarantine-test",
+        displayName: "Quarantine test",
+        searchPaths: [quarantinedSymlink.path, cleanFallback.path],
+        versionArgs: []
+    ))
+
+    let cleanResolvedPath = cleanFallback.resolvingSymlinksInPath().standardizedFileURL.path
+    #expect(await discovery.resolvedPath(for: "quarantine-test")?.path == cleanResolvedPath)
+    #expect(!manager.fileExists(atPath: launchMarker.path))
+    #expect(getxattr(
+        quarantinedTarget.path,
+        "com.apple.quarantine",
+        nil,
+        0,
+        0,
+        0
+    ) >= 0)
+
+    let fetchedCleanVersion = await waitUntilAsync {
+        await discovery.health(for: "quarantine-test").version == "clean-version"
+    }
+    #expect(fetchedCleanVersion)
+    #expect(!manager.fileExists(atPath: launchMarker.path))
+}
+
+@Test func runtimeRechecksQuarantineBeforeLaunchingPreviouslySelectedExecutable() async throws {
+    let manager = FileManager.default
+    let container = manager.temporaryDirectory
+        .appendingPathComponent("flowx-runtime-recheck-\(UUID().uuidString)", isDirectory: true)
+    let executable = container.appendingPathComponent("codex")
+    let launchMarker = container.appendingPathComponent("launched")
+    try manager.createDirectory(at: container, withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: container) }
+
+    try Data(
+        """
+        #!/bin/sh
+        if [ "$1" = "--run" ]; then
+          : > "\(launchMarker.path)"
+        fi
+        printf 'runtime-version'
+
+        """.utf8
+    ).write(to: executable)
+    try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+    let discovery = RuntimeDiscovery()
+    await discovery.register(BinarySpec(
+        id: "quarantine-recheck-test",
+        displayName: "Quarantine recheck test",
+        searchPaths: [executable.path],
+        versionArgs: ["--version"]
+    ))
+    let fetchedVersion = await waitUntilAsync {
+        await discovery.health(for: "quarantine-recheck-test").version == "runtime-version"
+    }
+    try #require(fetchedVersion)
+
+    let quarantineValue = Data("0081;flowx-runtime-recheck".utf8)
+    let quarantineResult = quarantineValue.withUnsafeBytes { bytes in
+        setxattr(
+            executable.path,
+            "com.apple.quarantine",
+            bytes.baseAddress,
+            bytes.count,
+            0,
+            0
+        )
+    }
+    try #require(quarantineResult == 0)
+
+    // Providers consume the cached URL through resolvedPath rather than
+    // RuntimeDiscovery.run, so that access must independently revalidate a
+    // runtime that became quarantined after discovery.
+    #expect(await discovery.resolvedPath(for: "quarantine-recheck-test") == nil)
+    #expect(await discovery.health(for: "quarantine-recheck-test") == .notFound)
+
+    var rejectedAsUnavailable = false
+    do {
+        _ = try await discovery.run(
+            binaryID: "quarantine-recheck-test",
+            arguments: ["--run"]
+        )
+    } catch RuntimeDiscoveryError.binaryNotFound {
+        rejectedAsUnavailable = true
+    } catch {
+        Issue.record("Expected quarantined runtime to be unavailable, received \(error)")
+    }
+
+    #expect(rejectedAsUnavailable)
+    #expect(!manager.fileExists(atPath: launchMarker.path))
+}
+
 private func waitUntil(
     timeout: Duration = .seconds(2),
     condition: @escaping @Sendable () -> Bool
@@ -116,6 +254,21 @@ private func waitUntil(
         try? await Task.sleep(for: .milliseconds(20))
     }
     return condition()
+}
+
+private func waitUntilAsync(
+    timeout: Duration = .seconds(2),
+    condition: @escaping @Sendable () async -> Bool
+) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now < deadline {
+        if await condition() {
+            return true
+        }
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    return await condition()
 }
 
 private func readPID(from url: URL) -> pid_t? {

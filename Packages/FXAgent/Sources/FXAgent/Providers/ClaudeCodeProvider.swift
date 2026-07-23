@@ -595,7 +595,7 @@ final class ClaudeStreamParser: @unchecked Sendable {
     }
 }
 
-public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, Sendable {
+public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIProviderNativeThreadTrashManaging, Sendable {
     public let id = "claude"
     public let displayName = "Claude Code (Anthropic)"
     public var availableModels: [AIModel] { modelCatalog.models }
@@ -712,6 +712,13 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, Send
         workingDirectory: URL?
     ) async throws -> ProviderNativeThread {
         try await nativeStore.read(id: id, workingDirectory: workingDirectory)
+    }
+
+    public func moveNativeThreadToTrash(
+        id: String,
+        workingDirectory: URL
+    ) async throws {
+        try await nativeStore.moveToTrash(id: id, workingDirectory: workingDirectory)
     }
 
     static let fallbackModels: [AIModel] = [

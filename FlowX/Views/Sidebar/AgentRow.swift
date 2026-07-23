@@ -9,7 +9,7 @@ import FXDesign
 struct ThreadRow: View {
     @Environment(AppState.self) private var appState
     @Bindable var agent: AgentInfo
-    let projectName: String
+    @Bindable var project: ProjectState
 
     @State private var isHovered = false
 
@@ -18,10 +18,18 @@ struct ThreadRow: View {
     }
 
     var body: some View {
-        Button(action: selectThread) {
-            rowContent
+        rowContent
+        .contentShape(Rectangle())
+        .onTapGesture(perform: selectThread)
+        .focusable()
+        .onKeyPress(.return) {
+            selectThread()
+            return .handled
         }
-        .buttonStyle(.plain)
+        .onKeyPress(.space) {
+            selectThread()
+            return .handled
+        }
         .onHover { isHovered = $0 }
         .contextMenu {
             if let sessionID = agent.conversationState.sessionID, !sessionID.isEmpty {
@@ -31,14 +39,24 @@ struct ThreadRow: View {
                 Divider()
             }
 
-            if !agent.isProviderNativeThread {
-                Button(role: .destructive, action: removeFromFlowX) {
-                    Label("Remove Draft", systemImage: "trash")
+            if !lifecycleActions.isEmpty {
+                ForEach(lifecycleActions, id: \.self) { action in
+                    Button(
+                        action.title,
+                        role: action.isDestructive ? .destructive : nil
+                    ) {
+                        appState.requestThreadLifecycleAction(action, for: agent)
+                    }
+                    .disabled(!lifecycleActionEnabled)
                 }
             }
         }
+        .accessibilityAddTraits(.isButton)
         .accessibilityLabel("\(agent.providerName) thread, \(displayTitle)")
-        .accessibilityHint("Open this thread in \(projectName)")
+        .accessibilityHint("Open this thread in \(project.project.name)")
+        .accessibilityAction {
+            selectThread()
+        }
     }
 
     private var rowContent: some View {
@@ -53,7 +71,16 @@ struct ThreadRow: View {
 
                 Spacer(minLength: 0)
 
-                statusIndicator
+                if agent.shouldShowStatusIndicator {
+                    statusIndicator
+                }
+
+                if hasLifecycleMenu {
+                    lifecycleMenu
+                        .opacity(showsLifecycleMenu ? 1 : 0)
+                        .allowsHitTesting(showsLifecycleMenu)
+                        .accessibilityHidden(!showsLifecycleMenu)
+                }
             }
 
             HStack(alignment: .firstTextBaseline, spacing: FXSpacing.sm) {
@@ -71,16 +98,15 @@ struct ThreadRow: View {
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                Text(activityLabel)
-                    .font(FXTypography.monoSmall)
-                    .foregroundStyle(activityColor)
-                    .lineLimit(1)
-                    .fixedSize()
+                if let activityLabel {
+                    Text(activityLabel)
+                        .font(FXTypography.monoSmall)
+                        .foregroundStyle(activityColor)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
             }
 
-            if agent.additions > 0 || agent.deletions > 0 {
-                changesLine
-            }
         }
         .padding(.horizontal, FXSpacing.md)
         .padding(.vertical, FXSpacing.sm)
@@ -95,72 +121,185 @@ struct ThreadRow: View {
         .contentShape(Rectangle())
     }
 
+    private var lifecycleMenu: some View {
+        FXDropdown(
+            sections: lifecycleMenuSections,
+            enabled: !isLifecycleActionInProgress,
+            panelWidth: 220,
+            placement: .automatic,
+            alignment: .trailing
+        ) { isExpanded in
+            Group {
+                if isLifecycleActionInProgress {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: isExpanded ? "xmark" : "ellipsis")
+                        .font(FXTypography.icon(.small))
+                        .foregroundStyle(isExpanded ? FXColors.accent : FXColors.fgTertiary)
+                }
+            }
+            .frame(width: 24, height: 24)
+            .contentShape(Rectangle())
+            .accessibilityLabel("Task actions")
+        }
+        .help("Task actions")
+    }
+
+    private var lifecycleMenuSections: [FXDropdownSection] {
+        var sections: [FXDropdownSection] = []
+        if let sessionID = agent.conversationState.sessionID, !sessionID.isEmpty {
+            sections.append(
+                FXDropdownSection(
+                    id: "thread-info",
+                    items: [
+                        FXDropdownItem(
+                            id: "copy-thread-id",
+                            title: "Copy Provider Thread ID",
+                            subtitle: sessionID
+                        ) {
+                            copyThreadID(sessionID)
+                        },
+                    ]
+                )
+            )
+        }
+        if !lifecycleActions.isEmpty {
+            sections.append(
+                FXDropdownSection(
+                    id: "thread-lifecycle",
+                    items: lifecycleActions.map { action in
+                        FXDropdownItem(
+                            id: action.rawValue,
+                            title: action.title,
+                            subtitle: lifecycleActionSubtitle(action),
+                            isEnabled: lifecycleActionEnabled,
+                            tone: action.isDestructive ? .destructive : .standard
+                        ) {
+                            appState.requestThreadLifecycleAction(action, for: agent)
+                        }
+                    }
+                )
+            )
+        }
+        return sections
+    }
+
+    private var lifecycleActions: [ThreadLifecycleActionKind] {
+        appState.threadLifecycleActions(for: agent)
+    }
+
+    private var lifecycleActionEnabled: Bool {
+        appState.threadLifecycleBlockedReason(for: agent, in: project) == nil
+    }
+
+    private var isLifecycleActionInProgress: Bool {
+        appState.isThreadLifecycleActionInProgress(for: agent.id)
+    }
+
+    private var showsLifecycleMenu: Bool {
+        (isHovered || isSelected) && hasLifecycleMenu
+    }
+
+    private var hasLifecycleMenu: Bool {
+        agent.conversationState.sessionID?.isEmpty == false
+            || !lifecycleActions.isEmpty
+            || isLifecycleActionInProgress
+    }
+
+    private func lifecycleActionSubtitle(_ action: ThreadLifecycleActionKind) -> String {
+        if let blockedReason = appState.threadLifecycleBlockedReason(for: agent, in: project) {
+            return blockedReason
+        }
+        switch action {
+        case .deleteDraft:
+            return "Remove this local FlowX draft"
+        case .archiveProviderTask:
+            return "Restore later from Archived; includes spawned tasks"
+        case .deleteProviderTask:
+            return "Permanent; includes spawned tasks"
+        case .moveProviderTaskToTrash:
+            return "Recoverable from macOS Trash"
+        }
+    }
+
     private var providerBadge: some View {
         FXBadge(providerShortLabel, tone: providerBadgeTone)
             .accessibilityLabel("Source: \(agent.providerName)")
     }
 
-    @ViewBuilder
     private var statusIndicator: some View {
-        if !agent.conversationState.pendingUserInputRequests.isEmpty {
-            Image(systemName: "questionmark.bubble.fill")
-                .font(FXTypography.icon(.small))
-                .foregroundStyle(FXColors.accent)
-                .accessibilityLabel("Waiting for your input")
-        } else if agent.isLoadingNativeTranscript {
-            ProgressView()
-                .controlSize(.mini)
-                .accessibilityLabel("Loading provider transcript")
-        } else if agent.nativeTranscriptError != nil {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(FXTypography.icon(.small))
-                .foregroundStyle(FXColors.warning)
-                .accessibilityLabel("Provider transcript unavailable")
-        } else {
-            statusIcon
+        HStack(spacing: FXSpacing.xxs) {
+            statusGlyph
+
+            Text(statusLabel)
+                .font(FXTypography.monoSmall)
+                .lineLimit(1)
         }
+        .foregroundStyle(statusColor)
+        .frame(width: 76, alignment: .trailing)
+        .help(statusHelp)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(statusHelp)
     }
 
     @ViewBuilder
-    private var statusIcon: some View {
+    private var statusGlyph: some View {
         switch agent.status {
         case .running:
-            PulsingDot(color: FXColors.success)
-                .accessibilityLabel("Running")
+            PulsingDot(color: statusColor)
+        case .waitingForInput:
+            Image(systemName: "questionmark.bubble.fill")
+                .font(FXTypography.icon(.small))
+        case .waitingForApproval:
+            Image(systemName: "hand.raised.fill")
+                .font(FXTypography.icon(.small))
         case .completed:
             Image(systemName: "checkmark.circle.fill")
                 .font(FXTypography.icon(.small))
-                .foregroundStyle(FXColors.success)
-                .accessibilityLabel("Completed")
         case .error:
             Image(systemName: "exclamationmark.circle.fill")
                 .font(FXTypography.icon(.small))
-                .foregroundStyle(FXColors.error)
-                .accessibilityLabel("Needs attention")
         case .idle:
-            Circle()
-                .fill(FXColors.fgQuaternary)
-                .frame(width: 7, height: 7)
-                .accessibilityLabel("Idle")
+            EmptyView()
         }
     }
 
-    private var changesLine: some View {
-        HStack(spacing: FXSpacing.sm) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(FXTypography.icon(.micro))
-                .foregroundStyle(FXColors.fgQuaternary)
+    private var statusLabel: String {
+        return switch agent.status {
+        case .running: "RUNNING"
+        case .waitingForInput: "INPUT"
+        case .waitingForApproval: "APPROVAL"
+        case .completed: "DONE"
+        case .error: "ERROR"
+        case .idle: ""
+        }
+    }
 
-            if agent.additions > 0 {
-                Text("+\(agent.additions)")
-                    .font(FXTypography.monoSmall)
-                    .foregroundStyle(FXColors.diffAddedFg)
-            }
-            if agent.deletions > 0 {
-                Text("-\(agent.deletions)")
-                    .font(FXTypography.monoSmall)
-                    .foregroundStyle(FXColors.diffRemovedFg)
-            }
+    private var statusHelp: String {
+        return switch agent.status {
+        case .running:
+            "Agent is running"
+        case .waitingForInput:
+            "Waiting for your answer in this thread"
+        case .waitingForApproval:
+            "Waiting for your approval in this thread"
+        case .completed:
+            "Agent completed"
+        case .error:
+            "Agent needs attention"
+        case .idle:
+            ""
+        }
+    }
+
+    private var statusColor: Color {
+        return switch agent.status {
+        case .running: FXColors.accent
+        case .waitingForInput, .waitingForApproval: FXColors.warning
+        case .completed: FXColors.success
+        case .error: FXColors.error
+        case .idle: FXColors.fgQuaternary
         }
     }
 
@@ -226,63 +365,27 @@ struct ThreadRow: View {
         return flattened.isEmpty ? "Provider thread" : flattened
     }
 
-    private var activityLabel: String {
-        if !agent.conversationState.pendingUserInputRequests.isEmpty {
-            return "INPUT"
-        }
-        if agent.isLoadingNativeTranscript {
-            return "LOADING"
-        }
-        if agent.nativeTranscriptError != nil {
-            return "RETRY"
-        }
-        if agent.status == .running {
-            return "LIVE"
-        }
-
+    private var activityLabel: String? {
         guard let timestamp = agent.nativeUpdatedAt ?? agent.messages.last?.timestamp else {
-            return agent.conversationState.sessionID == nil ? "DRAFT" : "SYNCED"
+            return nil
         }
 
         return timestamp.formatted(.relative(presentation: .numeric, unitsStyle: .abbreviated))
     }
 
     private var activityColor: Color {
-        if !agent.conversationState.pendingUserInputRequests.isEmpty {
-            return FXColors.accent
-        }
-        if agent.nativeTranscriptError != nil {
-            return FXColors.warning
-        }
-        return switch agent.status {
-        case .running:
-            FXColors.success
-        case .error:
-            FXColors.error
-        default:
-            FXColors.fgQuaternary
-        }
+        FXColors.fgQuaternary
     }
 
     private func selectThread() {
         withAnimation(FXAnimation.snappy) {
-            if let project = appState.projects.first(where: { project in
-                project.agents.contains(where: { $0.id == agent.id })
-            }) {
-                appState.activateAgent(agent.id, in: project.id)
-            }
+            appState.activateAgent(agent.id, in: project.id)
         }
     }
 
     private func copyThreadID(_ sessionID: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(sessionID, forType: .string)
-    }
-
-    private func removeFromFlowX() {
-        withAnimation(FXAnimation.snappy) {
-            appState.removeAgent(agent.id)
-        }
     }
 
 }

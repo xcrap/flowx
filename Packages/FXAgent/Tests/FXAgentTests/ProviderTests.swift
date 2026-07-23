@@ -723,10 +723,37 @@ private actor CleanupInvocationCounter {
     )
     #expect(repair["useStateDbOnly"] as? Bool == false)
     #expect(repair["cwd"] as? [String] == ["/configured", "/canonical"])
+
+    let archived = CodexProvider.nativeThreadListParametersForTesting(
+        cwdFilters: ["/workspace"],
+        limit: 50,
+        discoveryMode: .indexed,
+        archived: true
+    )
+    #expect(archived["archived"] as? Bool == true)
+    #expect(indexed["archived"] == nil)
 }
 
 @Test func codexControlRPCsHaveBoundedTimeouts() {
     #expect(CodexProvider.controlRequestTimeoutSecondsForTesting == 30)
+}
+
+@Test func codexNativeThreadDeleteUsesTheHardDeleteRPC() {
+    let request = CodexProvider.nativeThreadDeleteRequestForTesting(
+        threadID: "thr_provider_owned"
+    )
+
+    #expect(request.method == "thread/delete")
+    #expect(request.params.count == 1)
+    #expect(request.params["threadId"] as? String == "thr_provider_owned")
+}
+
+@Test func codexNativeLifecycleBlocksActiveProviderTasks() {
+    #expect(CodexProvider.nativeThreadIsActiveForTesting("active"))
+    #expect(CodexProvider.nativeThreadIsActiveForTesting(" ACTIVE "))
+    #expect(!CodexProvider.nativeThreadIsActiveForTesting("idle"))
+    #expect(!CodexProvider.nativeThreadIsActiveForTesting("notLoaded"))
+    #expect(!CodexProvider.nativeThreadIsActiveForTesting(nil))
 }
 
 @Test func codexRuntimePrefersTheDesktopAgentsSignedBinary() {
@@ -1115,6 +1142,71 @@ private actor CleanupInvocationCounter {
     #expect(thread.messages.first?.textContent == "Build it")
     #expect(thread.messages.last?.textContent == "Built")
     #expect(thread.messages.last?.content.count == 2)
+}
+
+@Test func claudeNativeSessionDeletionMovesOnlyTheExactWorkspaceFileRecoverably() async throws {
+    let manager = FileManager.default
+    let container = manager.temporaryDirectory
+        .appendingPathComponent("flowx-claude-trash-\(UUID().uuidString)", isDirectory: true)
+    let workspace = container.appendingPathComponent("workspace", isDirectory: true)
+    let otherWorkspace = container.appendingPathComponent("other-workspace", isDirectory: true)
+    let config = container.appendingPathComponent("claude-config", isDirectory: true)
+    let trash = container.appendingPathComponent("trash", isDirectory: true)
+    try manager.createDirectory(at: workspace, withIntermediateDirectories: true)
+    try manager.createDirectory(at: otherWorkspace, withIntermediateDirectories: true)
+    try manager.createDirectory(at: trash, withIntermediateDirectories: true)
+    defer { try? manager.removeItem(at: container) }
+
+    let canonical = workspace.resolvingSymlinksInPath().standardizedFileURL.path
+    let projectKey = canonical.unicodeScalars.map { scalar -> Character in
+        CharacterSet.alphanumerics.contains(scalar) ? Character(String(scalar)) : "-"
+    }
+    let project = config.appendingPathComponent("projects", isDirectory: true)
+        .appendingPathComponent(String(projectKey), isDirectory: true)
+    try manager.createDirectory(at: project, withIntermediateDirectories: true)
+
+    let sessionID = "41111111-2222-4333-8444-555555555555"
+    let sessionFile = project.appendingPathComponent(sessionID).appendingPathExtension("jsonl")
+    let sessionDirectory = project.appendingPathComponent(sessionID, isDirectory: true)
+    let subagentsDirectory = sessionDirectory.appendingPathComponent("subagents", isDirectory: true)
+    let subagentFile = subagentsDirectory.appendingPathComponent("agent-child.jsonl")
+    try manager.createDirectory(at: subagentsDirectory, withIntermediateDirectories: true)
+    try Data("{\"type\":\"assistant\"}\n".utf8).write(to: subagentFile)
+    let record = #"{"type":"user","sessionId":"SESSION","cwd":"WORKSPACE","timestamp":"2026-07-23T01:00:00.000Z","message":{"content":"Recoverable task"}}"#
+        .replacingOccurrences(of: "SESSION", with: sessionID)
+        .replacingOccurrences(of: "WORKSPACE", with: canonical) + "\n"
+    try Data(record.utf8).write(to: sessionFile)
+
+    let store = ClaudeNativeThreadStore(
+        configRoot: config,
+        trashHandler: { source in
+            try FileManager.default.moveItem(
+                at: source,
+                to: trash.appendingPathComponent(source.lastPathComponent)
+            )
+        }
+    )
+
+    await #expect(throws: (any Error).self) {
+        try await store.moveToTrash(id: sessionID, workingDirectory: otherWorkspace)
+    }
+    #expect(manager.fileExists(atPath: sessionFile.path))
+    #expect(manager.fileExists(atPath: subagentFile.path))
+
+    try await store.moveToTrash(id: sessionID, workingDirectory: workspace)
+    #expect(!manager.fileExists(atPath: sessionFile.path))
+    #expect(!manager.fileExists(atPath: sessionDirectory.path))
+    #expect(manager.fileExists(
+        atPath: trash.appendingPathComponent(sessionFile.lastPathComponent).path
+    ))
+    #expect(manager.fileExists(
+        atPath: trash
+            .appendingPathComponent(sessionID, isDirectory: true)
+            .appendingPathComponent("subagents", isDirectory: true)
+            .appendingPathComponent(subagentFile.lastPathComponent)
+            .path
+    ))
+    #expect(try await store.list(workingDirectory: workspace, limit: 10).isEmpty)
 }
 
 @Test func claudeNativeSummaryCacheReusesAndInvalidatesMetadata() async throws {

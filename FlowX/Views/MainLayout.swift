@@ -64,6 +64,12 @@ struct MainLayout: View {
                         .transition(.opacity)
                         .zIndex(10)
                 }
+
+                if let confirmation = appState.threadLifecycleConfirmation {
+                    ThreadLifecycleConfirmationView(confirmation: confirmation)
+                        .transition(.opacity)
+                        .zIndex(20)
+                }
             }
         }
         .ignoresSafeArea()
@@ -183,14 +189,14 @@ struct MainLayout: View {
                         .font(FXTypography.caption)
                         .foregroundStyle(FXColors.fgTertiary)
 
-                    if !agent.branch.isEmpty {
+                    if !project.gitInfo.branch.isEmpty {
                         metadataSeparator
 
                         Image(systemName: "arrow.triangle.branch")
                             .font(FXTypography.icon(.small))
                             .foregroundStyle(FXColors.fgSecondary)
 
-                        Text(agent.branch)
+                        Text(project.gitInfo.branch)
                             .font(FXTypography.captionMedium)
                             .foregroundStyle(FXColors.fgSecondary)
                     }
@@ -211,16 +217,20 @@ struct MainLayout: View {
                         .help(agent.nativeThreadBinding?.title ?? agent.title)
                         .accessibilityLabel("Thread: \(agent.nativeThreadBinding?.title ?? agent.title)")
 
-                    if agent.additions > 0 || agent.deletions > 0 {
+                    if agent.shouldShowStatusIndicator {
+                        threadStatusBadge(for: agent)
+                    }
+
+                    if project.gitInfo.additions > 0 || project.gitInfo.deletions > 0 {
                         metadataSeparator
                         Button(action: appState.toggleGitPanel) {
                             HStack(spacing: FXSpacing.sm) {
-                                Text("+\(agent.additions)")
+                                Text("+\(project.gitInfo.additions)")
                                     .font(FXTypography.monoSmall)
-                                    .foregroundStyle(FXColors.success)
-                                Text("-\(agent.deletions)")
+                                    .foregroundStyle(FXColors.diffAddedFg)
+                                Text("-\(project.gitInfo.deletions)")
                                     .font(FXTypography.monoSmall)
-                                    .foregroundStyle(FXColors.error)
+                                    .foregroundStyle(FXColors.diffRemovedFg)
                             }
                             .contentShape(Rectangle())
                         }
@@ -284,9 +294,11 @@ struct MainLayout: View {
         case .idle:
             FXColors.fgTertiary
         case .running:
-            FXColors.success
+            FXColors.accent
+        case .waitingForInput, .waitingForApproval:
+            FXColors.warning
         case .completed:
-            FXColors.info
+            FXColors.success
         case .error:
             FXColors.error
         }
@@ -298,11 +310,46 @@ struct MainLayout: View {
             "circle.fill"
         case .running:
             "waveform.circle.fill"
+        case .waitingForInput:
+            "questionmark.bubble.fill"
+        case .waitingForApproval:
+            "hand.raised.fill"
         case .completed:
             "checkmark.circle.fill"
         case .error:
             "xmark.circle.fill"
         }
+    }
+
+    private func statusLabel(for status: AgentStatus) -> String {
+        switch status {
+        case .idle: "Idle"
+        case .running: "Running"
+        case .waitingForInput: "Input needed"
+        case .waitingForApproval: "Approval needed"
+        case .completed: "Done"
+        case .error: "Error"
+        }
+    }
+
+    private func threadStatusBadge(for agent: AgentInfo) -> some View {
+        let color = statusColor(for: agent.status)
+        return HStack(spacing: FXSpacing.xxs) {
+            Image(systemName: statusIcon(for: agent.status))
+                .font(FXTypography.icon(.micro))
+
+            Text(statusLabel(for: agent.status))
+                .font(FXTypography.monoSmall)
+                .lineLimit(1)
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, FXSpacing.sm)
+        .padding(.vertical, FXSpacing.xxs)
+        .background(FXColors.bgSurface)
+        .clipShape(Capsule())
+        .help(statusLabel(for: agent.status))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(statusLabel(for: agent.status))
     }
 
     private func headerButton(icon: String, label: String, active: Bool = false, action: @escaping () -> Void) -> some View {
@@ -316,6 +363,70 @@ struct MainLayout: View {
         .buttonStyle(.plain)
         .accessibilityLabel(label)
         .accessibilityValue(active ? "Visible" : "Hidden")
+    }
+}
+
+private struct ThreadLifecycleConfirmationView: View {
+    @Environment(AppState.self) private var appState
+    @FocusState private var cancelFocused: Bool
+    let confirmation: ThreadLifecycleConfirmation
+
+    var body: some View {
+        ZStack {
+            FXColors.overlay
+                .ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: FXSpacing.lg) {
+                HStack(spacing: FXSpacing.md) {
+                    Image(systemName: confirmation.action.systemImage)
+                        .font(FXTypography.icon(.large))
+                        .foregroundStyle(confirmation.action.isDestructive ? FXColors.error : FXColors.accent)
+
+                    Text(confirmation.title)
+                        .font(FXTypography.title2)
+                        .foregroundStyle(FXColors.fg)
+                }
+
+                Text(confirmation.message)
+                    .font(FXTypography.body)
+                    .foregroundStyle(FXColors.fgSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: FXSpacing.sm) {
+                    Spacer(minLength: 0)
+
+                    FXButton("Cancel", style: .secondary) {
+                        appState.cancelThreadLifecycleConfirmation()
+                    }
+                    .focused($cancelFocused)
+                    .keyboardShortcut(.cancelAction)
+
+                    FXButton(
+                        confirmation.action.shortTitle,
+                        style: confirmation.action.isDestructive ? .danger : .primary
+                    ) {
+                        appState.confirmThreadLifecycleAction()
+                    }
+                }
+            }
+            .padding(FXSpacing.xl)
+            .frame(width: 440)
+            .background(FXColors.bgElevated)
+            .clipShape(RoundedRectangle(cornerRadius: FXRadii.xxl))
+            .overlay(
+                RoundedRectangle(cornerRadius: FXRadii.xxl)
+                    .strokeBorder(FXColors.borderMedium, lineWidth: 0.5)
+            )
+            .shadow(color: FXColors.overlay, radius: 24, y: 14)
+        }
+        .onExitCommand {
+            appState.cancelThreadLifecycleConfirmation()
+        }
+        .onAppear {
+            cancelFocused = true
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(confirmation.title)
     }
 }
 
@@ -622,6 +733,23 @@ private struct CommandPaletteView: View {
                 )
             }
 
+            if let project = appState.activeProject,
+               appState.threadLifecycleBlockedReason(for: agent, in: project) == nil {
+                for action in appState.threadLifecycleActions(for: agent) {
+                    items.append(
+                        PaletteAction(
+                            id: "task-lifecycle:\(action.rawValue):\(agent.id.uuidString)",
+                            title: action.title,
+                            subtitle: lifecycleActionSubtitle(action),
+                            systemImage: action.systemImage,
+                            keywords: ["task", "thread", "archive", "delete", "trash", "remove"]
+                        ) {
+                            appState.requestThreadLifecycleAction(action, for: agent)
+                        }
+                    )
+                }
+            }
+
             let supportsImages = currentModel?.supportsVision
                 ?? appState.providerRegistry
                     .provider(for: agent.providerID)?
@@ -728,6 +856,38 @@ private struct CommandPaletteView: View {
                 )
             }
 
+            if !project.isSyncingNativeThreads {
+                for binding in project.archivedNativeThreadBindings
+                    where !appState.isArchivedThreadActionInProgress(binding.identity) {
+                    items.append(
+                        PaletteAction(
+                            id: "task-unarchive:\(binding.identity.providerID):\(binding.identity.sessionID)",
+                            title: "Restore \(binding.title)",
+                            subtitle: "Unarchive this Codex task",
+                            systemImage: "arrow.uturn.backward.circle",
+                            keywords: ["restore", "unarchive", "archived", "task", "thread", binding.title.lowercased()]
+                        ) {
+                            appState.unarchiveNativeThread(binding, in: project)
+                        }
+                    )
+
+                    if appState.providerRegistry.provider(for: binding.identity.providerID)
+                        is any AIProviderNativeThreadDeleting {
+                        items.append(
+                            PaletteAction(
+                                id: "task-delete-archived:\(binding.identity.providerID):\(binding.identity.sessionID)",
+                                title: "Delete \(binding.title) Permanently",
+                                subtitle: "Permanently delete this archived Codex task",
+                                systemImage: "trash",
+                                keywords: ["delete", "permanent", "archived", "task", "thread", binding.title.lowercased()]
+                            ) {
+                                appState.requestArchivedThreadDeletion(binding, in: project)
+                            }
+                        )
+                    }
+                }
+            }
+
             for agent in project.agents {
                 let threadTitle = agent.nativeThreadBinding?.title ?? agent.title
                 items.append(
@@ -767,6 +927,19 @@ private struct CommandPaletteView: View {
             shortcut: shortcut
         ) {
             appState.sendPrompt(for: agent, followUpMode: mode)
+        }
+    }
+
+    private func lifecycleActionSubtitle(_ action: ThreadLifecycleActionKind) -> String {
+        switch action {
+        case .deleteDraft:
+            "Remove this FlowX-owned draft and its local workspace layout"
+        case .archiveProviderTask:
+            "Archive this Codex task and its spawned descendants"
+        case .deleteProviderTask:
+            "Permanently delete this Codex task and its spawned descendants"
+        case .moveProviderTaskToTrash:
+            "Recoverably move this Claude session to macOS Trash"
         }
     }
 

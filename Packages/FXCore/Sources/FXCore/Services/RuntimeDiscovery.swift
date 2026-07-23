@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import os
 
@@ -448,12 +449,24 @@ public actor RuntimeDiscovery {
             healthCache[spec.id] = .available(path: url.path, version: nil)
             launchVersionCheck(for: spec, at: url)
         } else {
+            resolved[spec.id] = nil
             healthCache[spec.id] = .notFound
         }
     }
 
     public func resolvedPath(for binaryID: String) -> URL? {
-        resolved[binaryID]
+        guard let cachedURL = resolved[binaryID],
+              let executableURL = Self.validatedExecutableURL(at: cachedURL) else {
+            resolved[binaryID] = nil
+            healthCache[binaryID] = .notFound
+            return nil
+        }
+
+        resolved[binaryID] = executableURL
+        if case .available(_, let version) = healthCache[binaryID] {
+            healthCache[binaryID] = .available(path: executableURL.path, version: version)
+        }
+        return executableURL
     }
 
     public func health(for binaryID: String) -> BinaryHealth {
@@ -526,10 +539,14 @@ public actor RuntimeDiscovery {
         currentDirectory: URL? = nil,
         timeout: TimeInterval = 15
     ) async throws -> RuntimeCommandResult {
-        guard let executableURL = resolved[binaryID] else {
+        guard let resolvedURL = resolved[binaryID],
+              let executableURL = Self.validatedExecutableURL(at: resolvedURL) else {
+            resolved[binaryID] = nil
+            healthCache[binaryID] = .notFound
             throw RuntimeDiscoveryError.binaryNotFound(binaryID)
         }
 
+        resolved[binaryID] = executableURL
         return try await Self.runProcess(
             executableURL: executableURL,
             arguments: arguments,
@@ -544,17 +561,19 @@ public actor RuntimeDiscovery {
             if pattern.contains("*") {
                 for expanded in expandGlob(pattern).sorted(by: Self.preferNewestPath) {
                     try Task.checkCancellation()
-                    if FileManager.default.isExecutableFile(atPath: expanded) {
-                        return URL(fileURLWithPath: expanded)
+                    if let executableURL = Self.validatedExecutableURL(atPath: expanded) {
+                        return executableURL
                     }
                 }
-            } else if FileManager.default.isExecutableFile(atPath: pattern) {
-                return URL(fileURLWithPath: pattern)
+            } else if let executableURL = Self.validatedExecutableURL(atPath: pattern) {
+                return executableURL
             }
         }
 
-        if let name = spec.shellFallbackName, let path = try await shellWhich(name) {
-            return URL(fileURLWithPath: path)
+        if let name = spec.shellFallbackName,
+           let path = try await shellWhich(name),
+           let executableURL = Self.validatedExecutableURL(atPath: path) {
+            return executableURL
         }
 
         return nil
@@ -637,15 +656,29 @@ public actor RuntimeDiscovery {
     }
 
     private func fetchAndStoreVersion(for spec: BinarySpec, at url: URL) async {
-        let version = await Self.fetchVersion(at: url, args: spec.versionArgs)
-        if !Task.isCancelled {
-            healthCache[spec.id] = .available(path: url.path, version: version)
+        guard let executableURL = Self.validatedExecutableURL(at: url) else {
+            if resolved[spec.id] == url {
+                resolved[spec.id] = nil
+                healthCache[spec.id] = .notFound
+            }
+            return
         }
+
+        let version = await Self.fetchVersion(at: executableURL, args: spec.versionArgs)
+        guard !Task.isCancelled, resolved[spec.id] == url else { return }
+        guard let currentExecutableURL = Self.validatedExecutableURL(at: executableURL) else {
+            resolved[spec.id] = nil
+            healthCache[spec.id] = .notFound
+            return
+        }
+        resolved[spec.id] = currentExecutableURL
+        healthCache[spec.id] = .available(path: currentExecutableURL.path, version: version)
     }
 
     private static func fetchVersion(at url: URL, args: [String]) async -> String? {
-        guard let result = try? await runProcess(
-            executableURL: url,
+        guard let executableURL = validatedExecutableURL(at: url),
+              let result = try? await runProcess(
+            executableURL: executableURL,
             arguments: args,
             currentDirectory: nil,
             timeout: 5,
@@ -664,6 +697,42 @@ public actor RuntimeDiscovery {
 
     private static func preferNewestPath(_ lhs: String, _ rhs: String) -> Bool {
         lhs.localizedStandardCompare(rhs) == .orderedDescending
+    }
+
+    /// Resolves indirection before applying Gatekeeper policy so a benign
+    /// symlink cannot hide quarantine metadata on its executable target.
+    /// Quarantine is intentionally never removed or bypassed by FlowX.
+    private static func validatedExecutableURL(atPath path: String) -> URL? {
+        validatedExecutableURL(at: URL(fileURLWithPath: path))
+    }
+
+    private static func validatedExecutableURL(at url: URL) -> URL? {
+        let resolvedURL = url.resolvingSymlinksInPath().standardizedFileURL
+        guard FileManager.default.isExecutableFile(atPath: resolvedURL.path),
+              !hasQuarantineAttribute(at: resolvedURL) else {
+            return nil
+        }
+        return resolvedURL
+    }
+
+    private static func hasQuarantineAttribute(at url: URL) -> Bool {
+        url.withUnsafeFileSystemRepresentation { fileSystemPath in
+            guard let fileSystemPath else { return true }
+            let result = getxattr(
+                fileSystemPath,
+                "com.apple.quarantine",
+                nil,
+                0,
+                0,
+                0
+            )
+            if result >= 0 {
+                return true
+            }
+            // Fail closed for unreadable metadata. ENOATTR is the only result
+            // that establishes the executable has no quarantine attribute.
+            return errno != ENOATTR
+        }
     }
 
     private static func runProcess(

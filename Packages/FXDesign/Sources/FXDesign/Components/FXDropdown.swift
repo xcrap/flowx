@@ -4,12 +4,18 @@ import SwiftUI
 import AppKit
 #endif
 
+public enum FXDropdownItemTone: Equatable {
+    case standard
+    case destructive
+}
+
 public struct FXDropdownItem: Identifiable {
     public let id: String
     public let title: String
     public let subtitle: String?
     public let isSelected: Bool
     public let isEnabled: Bool
+    public let tone: FXDropdownItemTone
     public let action: () -> Void
 
     public init(
@@ -18,6 +24,7 @@ public struct FXDropdownItem: Identifiable {
         subtitle: String? = nil,
         isSelected: Bool = false,
         isEnabled: Bool = true,
+        tone: FXDropdownItemTone = .standard,
         action: @escaping () -> Void
     ) {
         self.id = id
@@ -25,6 +32,7 @@ public struct FXDropdownItem: Identifiable {
         self.subtitle = subtitle
         self.isSelected = isSelected
         self.isEnabled = isEnabled
+        self.tone = tone
         self.action = action
     }
 }
@@ -209,7 +217,7 @@ private struct FXDropdownRow: View {
                 VStack(alignment: .leading, spacing: item.subtitle == nil ? 0 : FXSpacing.xxxs) {
                     Text(item.title)
                         .font(FXTypography.body)
-                        .foregroundStyle(item.isEnabled ? FXColors.fg : FXColors.fgTertiary)
+                        .foregroundStyle(titleColor)
 
                     if let subtitle = item.subtitle {
                         Text(subtitle)
@@ -237,6 +245,11 @@ private struct FXDropdownRow: View {
         .buttonStyle(.plain)
         .disabled(!item.isEnabled)
         .onHover { isHovered = $0 }
+    }
+
+    private var titleColor: Color {
+        guard item.isEnabled else { return FXColors.fgTertiary }
+        return item.tone == .destructive ? FXColors.error : FXColors.fg
     }
 }
 
