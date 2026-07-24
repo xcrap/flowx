@@ -29,6 +29,9 @@ struct MessageBubble: View {
     private let attachmentFilenames: [String]
     private let directives: [TranscriptDirective]
 
+    @State private var isHoveringUserMessage = false
+    @State private var didCopyUserMessage = false
+
     init(message: ConversationMessage) {
         messageID = message.id
         role = message.role
@@ -83,8 +86,22 @@ struct MessageBubble: View {
                 )
             }
 
-            HStack(alignment: .top, spacing: 0) {
+            HStack(alignment: .top, spacing: isUser ? FXSpacing.sm : 0) {
                 if isUser { Spacer(minLength: 80) }
+
+                if isUser, !copyableText.isEmpty {
+                    FXCompactActionButton(
+                        didCopyUserMessage ? "Copied" : "Copy",
+                        icon: didCopyUserMessage ? "checkmark" : nil
+                    ) {
+                        copyMessage()
+                        didCopyUserMessage = true
+                    }
+                    .frame(width: 58, alignment: .trailing)
+                    .opacity(isHoveringUserMessage ? 1 : 0)
+                    .allowsHitTesting(isHoveringUserMessage)
+                    .accessibilityHidden(!isHoveringUserMessage)
+                }
 
                 VStack(alignment: .leading, spacing: FXSpacing.xs) {
                     ForEach(displayContentEntries, id: \.offset) { entry in
@@ -107,14 +124,40 @@ struct MessageBubble: View {
                     RoundedRectangle(cornerRadius: isUser ? FXRadii.xl : 0)
                         .strokeBorder(isUser ? FXColors.accent.opacity(0.2) : Color.clear, lineWidth: 0.5)
                 )
+                .onHover { isHovering in
+                    guard isUser else { return }
+                    isHoveringUserMessage = isHovering
+                    if !isHovering {
+                        didCopyUserMessage = false
+                    }
+                }
 
                 if !isUser { Spacer(minLength: 80) }
             }
         }
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+        .contentShape(Rectangle())
+        .onHover { isHovering in
+            guard isUser else { return }
+            isHoveringUserMessage = isHovering
+            if !isHovering {
+                didCopyUserMessage = false
+            }
+        }
+        .onContinuousHover { phase in
+            guard isUser else { return }
+            switch phase {
+            case .active:
+                isHoveringUserMessage = true
+            case .ended:
+                isHoveringUserMessage = false
+                didCopyUserMessage = false
+            }
+        }
+        .animation(FXAnimation.micro, value: isHoveringUserMessage)
         .contextMenu {
             if !copyableText.isEmpty {
-                Button("Copy Message", systemImage: "doc.on.doc", action: copyMessage)
+                Button("Copy", systemImage: "doc.on.doc", action: copyMessage)
             }
         }
         .accessibilityElement(children: .contain)

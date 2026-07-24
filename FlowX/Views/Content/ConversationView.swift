@@ -223,6 +223,7 @@ struct ConversationView: View {
                     )
             }
             .scrollContentBackground(.hidden)
+            .background(TranscriptSelectionMenuLimiter())
             .opacity(initialScrollRestorePending ? 0 : 1)
             .allowsHitTesting(!initialScrollRestorePending)
         } else {
@@ -369,37 +370,28 @@ struct ConversationView: View {
         to items: inout [ConversationDisplayItem]
     ) throws {
         guard !messages.isEmpty else { return }
-        var lastWorkIndex: Int?
-        for (messageIndex, message) in messages.enumerated() {
-            if messageIndex.isMultiple(of: 32) {
+        let groupedSegments = TranscriptActivityGroupingPolicy.segments(from: messages)
+        for (groupIndex, groupedSegment) in groupedSegments.enumerated() {
+            if groupIndex.isMultiple(of: 32) {
                 try Task.checkCancellation()
             }
-            if containsBackgroundToolActivity(message) {
-                lastWorkIndex = messageIndex
-            }
-        }
-        guard let lastWorkIndex else {
-            items.append(contentsOf: messages.map(ConversationDisplayItem.message))
-            return
-        }
 
-        let workMessages = Array(messages[...lastWorkIndex])
-        if let first = workMessages.first {
-            items.append(
-                .workGroup(
-                    id: "work-\(first.id.uuidString)-\(segmentIndex)",
-                    entries: try ConversationActivityEntry.makeEntries(from: workMessages),
-                    isActive: isActive,
-                    summary: try ConversationActivitySummary(messages: workMessages)
+            switch groupedSegment {
+            case .narrative(let narrativeMessages):
+                items.append(
+                    contentsOf: narrativeMessages.map(ConversationDisplayItem.message)
                 )
-            )
-        }
-
-        if lastWorkIndex < messages.index(before: messages.endIndex) {
-            let tailStart = messages.index(after: lastWorkIndex)
-            items.append(
-                contentsOf: messages[tailStart...].map(ConversationDisplayItem.message)
-            )
+            case .activity(let activityMessages):
+                guard let first = activityMessages.first else { continue }
+                items.append(
+                    .workGroup(
+                        id: "work-\(first.id.uuidString)-\(segmentIndex)-\(groupIndex)",
+                        entries: try ConversationActivityEntry.makeEntries(from: activityMessages),
+                        isActive: isActive && groupIndex == groupedSegments.count - 1,
+                        summary: try ConversationActivitySummary(messages: activityMessages)
+                    )
+                )
+            }
         }
     }
 
@@ -560,21 +552,6 @@ struct ConversationView: View {
 
     private func isToolEventMessage(_ message: ConversationMessage) -> Bool {
         !message.content.isEmpty && message.content.allSatisfy { item in
-            switch item {
-            case .toolUse(_, let name, _):
-                name != "AskUserQuestion"
-            case .toolResult:
-                true
-            default:
-                false
-            }
-        }
-    }
-
-    nonisolated private static func containsBackgroundToolActivity(
-        _ message: ConversationMessage
-    ) -> Bool {
-        message.content.contains { item in
             switch item {
             case .toolUse(_, let name, _):
                 name != "AskUserQuestion"
