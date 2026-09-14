@@ -42,3 +42,29 @@ public enum ConversationScrollPolicy {
             || metrics.offset >= metrics.maxOffset - max(0, tolerance)
     }
 }
+
+/// Reveal the transcript once its geometry converges, instead of imposing a
+/// half-second delay on every task switch. A late document resize is followed
+/// separately by the scroll coordinator.
+public struct ConversationScrollRestoration: Sendable {
+    private var previousMaxOffset: CGFloat?
+    private var stablePasses = 0
+
+    public init() {}
+
+    public mutating func observe(
+        maxOffset: CGFloat,
+        desiredOffset: CGFloat,
+        stickToBottom: Bool
+    ) -> Bool {
+        let targetAvailable = stickToBottom || desiredOffset <= maxOffset + 0.5
+        if targetAvailable, let previousMaxOffset,
+           abs(previousMaxOffset - maxOffset) <= 0.5 {
+            stablePasses += 1
+        } else {
+            stablePasses = 0
+        }
+        previousMaxOffset = maxOffset
+        return stablePasses >= 3
+    }
+}

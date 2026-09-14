@@ -604,13 +604,24 @@ private struct CollapsibleUserMessageTextView: View {
     @State private var isExpanded = false
 
     private var canCollapse: Bool {
-        text.count > Self.collapsedCharacterLimit
-            || text.components(separatedBy: .newlines).count > Self.collapsedLineLimit
+        text.prefix(Self.collapsedCharacterLimit + 1).count > Self.collapsedCharacterLimit
+            || text.split(
+                maxSplits: Self.collapsedLineLimit,
+                omittingEmptySubsequences: false,
+                whereSeparator: \.isNewline
+            ).count > Self.collapsedLineLimit
+    }
+
+    private var displayedText: String {
+        guard canCollapse, !isExpanded else { return text }
+        // A collapsed context prompt can contain hundreds of KB. Parse only
+        // enough text to fill the preview; expansion still exposes it in full.
+        return String(text.prefix(2_000))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: FXSpacing.xs) {
-            MessageTextView(text: text, cacheKey: cacheKey, isStreaming: false)
+            MessageTextView(text: displayedText, cacheKey: cacheKey, isStreaming: false)
                 .frame(
                     maxHeight: canCollapse && !isExpanded
                         ? FXLayout.collapsedUserMessageHeight

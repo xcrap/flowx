@@ -18,6 +18,7 @@ public final class ConversationState {
     public var streamingRevision: Int = 0
     public private(set) var completedToolUseIDs: Set<String> = []
     public var inputText: String = ""
+    public var unsentPrompt: UnsentConversationPrompt?
     public var error: String?
     public var sessionID: String?
     public var activeProviderID: String?
@@ -53,13 +54,29 @@ public final class ConversationState {
         runtimePhase.statusLabel
     }
 
-    public func appendUserMessage(_ text: String, attachments: [Attachment] = []) {
+    @discardableResult
+    public func appendUserMessage(_ text: String, attachments: [Attachment] = []) -> UUID {
         var content: [MessageContent] = []
         for attachment in attachments where attachment.isImage {
             content.append(.image(data: attachment.data, mimeType: attachment.mimeType))
         }
         content.append(.text(text))
-        appendMessage(ConversationMessage(role: .user, content: content))
+        let message = ConversationMessage(role: .user, content: content)
+        appendMessage(message)
+        return message.id
+    }
+
+    public func recoverUnsentPrompt(_ prompt: UnsentConversationPrompt, messageID: UUID? = nil) {
+        unsentPrompt = prompt
+        if let messageID, messages.contains(where: { $0.id == messageID }) {
+            messages.removeAll { $0.id == messageID }
+            messageRevision &+= 1
+        }
+        // The user may already be composing their next request.
+        if inputText.isEmpty, pendingAttachments.isEmpty {
+            inputText = prompt.prompt
+            pendingAttachments = prompt.attachments
+        }
     }
 
     public func appendMessage(_ message: ConversationMessage) {
@@ -376,6 +393,7 @@ public final class ConversationState {
         streamingText = ""
         streamingRevision &+= 1
         inputText = ""
+        unsentPrompt = nil
         error = nil
         sessionID = nil
         activeProviderID = nil

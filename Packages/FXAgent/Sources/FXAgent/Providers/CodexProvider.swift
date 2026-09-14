@@ -510,6 +510,12 @@ private actor CodexSession {
         status?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "active"
     }
 
+    func nativeThreadRevision(id: String, createdAt: Date) -> String? {
+        rolloutMetadataStore.revision(threadID: id, createdAt: createdAt).map {
+            "\($0):images:\(ProviderNativeImageImporter.localCacheRevision)"
+        }
+    }
+
     func readNativeThread(
         id: String,
         workingDirectory: URL?
@@ -586,7 +592,7 @@ private actor CodexSession {
 
             var boundedThread = thread
             boundedThread["turns"] = pages.chronologicalTurns
-            messages = Self.nativeMessages(from: boundedThread)
+            messages = Self.nativeMessages(from: boundedThread, deferLocalImages: true)
         } while cursor != nil && messages.count < 250
 
         return messages
@@ -610,7 +616,7 @@ private actor CodexSession {
         }
         var summary = rolloutMetadataStore.enrich([nativeSummary]).first ?? nativeSummary
         summary = rolloutMetadataStore.enrichUsage(summary)
-        return ProviderNativeThread(summary: summary, messages: Self.nativeMessages(from: thread))
+        return ProviderNativeThread(summary: summary, messages: Self.nativeMessages(from: thread, deferLocalImages: true))
     }
 
     func startTurn(
@@ -886,7 +892,9 @@ private actor CodexSession {
         for _ in 0..<100 {
             try await Task.sleep(for: .milliseconds(50))
             if let startupError {
-                throw Self.makeError(startupError)
+                let failure = currentStartupFailureMessage(summary: startupError)
+                await shutdown()
+                throw Self.makeError(failure)
             }
             if process?.isRunning == true, writer != nil {
                 return
@@ -1304,6 +1312,9 @@ private actor CodexSession {
         terminatedBySignal: Bool,
         isQuarantined: Bool
     ) -> String {
+        if CodexThreadWriterConflict.matches(summary) {
+            return CodexThreadWriterConflict.message
+        }
         let path = executableURL?.path
         var details: [String] = [summary]
 
@@ -1842,7 +1853,10 @@ private actor CodexSession {
         )
     }
 
-    fileprivate static func nativeMessages(from thread: [String: Any]) -> [ConversationMessage] {
+    fileprivate static func nativeMessages(
+        from thread: [String: Any],
+        deferLocalImages: Bool = false
+    ) -> [ConversationMessage] {
         var messages: [ConversationMessage] = []
         var remainingImageBytes = ProviderNativeImageImporter.maximumTranscriptImageBytes
         let threadID = thread["id"] as? String ?? "codex-thread"
@@ -1882,10 +1896,9 @@ private actor CodexSession {
                             contents.append(image)
                         case "localImage":
                             guard let path = content["path"] as? String,
-                                  let image = ProviderNativeImageImporter.localFile(
-                                      atPath: path,
-                                      remainingBytes: &remainingImageBytes
-                                  ) else {
+                                  let image = deferLocalImages
+                                    ? ProviderNativeImageImporter.cachedLocalFile(atPath: path, remainingBytes: &remainingImageBytes)
+                                    : ProviderNativeImageImporter.localFile(atPath: path, remainingBytes: &remainingImageBytes) else {
                                 continue
                             }
                             contents.append(image)
@@ -2018,8 +2031,11 @@ private actor CodexSession {
         }
     }
 
-    private static func makeError(_ message: String) -> NSError {
-        NSError(domain: "CodexProvider", code: 10, userInfo: [
+    private static func makeError(_ message: String) -> any Error {
+        if CodexThreadWriterConflict.matches(message) {
+            return CodexThreadWriterConflict()
+        }
+        return NSError(domain: "CodexProvider", code: 10, userInfo: [
             NSLocalizedDescriptionKey: message,
         ])
     }
@@ -3150,6 +3166,10 @@ public final class CodexProvider: AIProviderThreadControls, AIProviderSessionMan
         try await nativeReader.readNativeThread(id: id, workingDirectory: workingDirectory)
     }
 
+    public func nativeThreadRevision(id: String, createdAt: Date) async -> String? {
+        await nativeReader.nativeThreadRevision(id: id, createdAt: createdAt)
+    }
+
     public func deleteNativeThread(
         id: String,
         workingDirectory: URL
@@ -3198,6 +3218,17 @@ public final class CodexProvider: AIProviderThreadControls, AIProviderSessionMan
     }
 
     static let fallbackModels: [AIModel] = [
+        AIModel(
+            id: "gpt-6-astra",
+            name: "GPT-6 Astra",
+            description: "Our most capable model for complex, demanding work.",
+            contextWindow: 272_000,
+            maxContextWindow: 872_000,
+            availableContextWindows: [272_000],
+            defaultReasoningEffort: "medium",
+            supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+            serviceTiers: [AIModelServiceTier(id: "priority", name: "Fast", description: "2x speed, increased usage")]
+        ),
         AIModel(
             id: "gpt-5.6-sol",
             name: "GPT-5.6 Sol",
@@ -3480,6 +3511,10 @@ public final class CodexProvider: AIProviderThreadControls, AIProviderSessionMan
                     }
                 } catch is CancellationError {
                     continuation.finish()
+                } catch let error as CodexThreadWriterConflict {
+                    // Preserve the typed rejection; emitting a generic .error first
+                    // would lose the distinction between unsent and failed work.
+                    continuation.finish(throwing: error)
                 } catch {
                     continuation.yield(.error(error.localizedDescription))
                     continuation.finish(throwing: error)

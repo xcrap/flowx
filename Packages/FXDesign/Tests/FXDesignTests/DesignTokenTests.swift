@@ -1,8 +1,34 @@
 import Testing
+import SwiftUI
 @testable import FXDesign
 
 @Suite("FlowX design tokens")
 struct DesignTokenTests {
+    @Test("Cached palettes follow tone and appearance changes")
+    @MainActor func palettesFollowThemeChanges() {
+        let originalTone = FXTheme.baseTone
+        let originalAppearance = FXTheme.appearanceMode
+        defer {
+            FXTheme.baseTone = originalTone
+            FXTheme.appearanceMode = originalAppearance
+        }
+        for tone in FXBaseTone.allCases {
+            FXTheme.baseTone = tone
+            FXTheme.appearanceMode = .dark
+            let darkBackground = FXColors.bg
+            let darkDiff = FXColors.diffAddedBg
+            FXTheme.appearanceMode = .light
+            #expect(FXColors.bg != darkBackground)
+            #expect(FXColors.diffAddedBg != darkDiff)
+            FXTheme.appearanceMode = .dark
+            #expect(FXColors.bg == darkBackground)
+            #expect(FXColors.diffAddedBg == darkDiff)
+        }
+        FXTheme.baseTone = .zinc
+        let zinc = FXColors.bg
+        FXTheme.baseTone = .stone
+        #expect(FXColors.bg != zinc)
+    }
     @Test("Spacing remains a strictly increasing shared scale")
     func spacingScaleIsOrdered() {
         let values = [

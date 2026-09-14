@@ -15,4 +15,7 @@ public enum FXLayout {
     public static let splitPanelResizeHandleWidth: CGFloat = 12
     public static let minimumTerminalHeight: CGFloat = 120
     public static let maximumTerminalHeight: CGFloat = 500
+    public static let diffNavigatorWidth: CGFloat = 248
+    public static let diffNavigatorSideBySideWidth: CGFloat = 720
+    public static let diffNavigatorCompactHeight: CGFloat = 200
 }

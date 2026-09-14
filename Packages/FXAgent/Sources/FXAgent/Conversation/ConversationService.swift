@@ -3,11 +3,6 @@ import FXCore
 
 @MainActor
 public final class ConversationService {
-    // Text remains visibly fluid while avoiding a full transcript relayout for
-    // every tiny provider delta. Twenty UI publications per second is faster
-    // than users can read and leaves substantially more main-thread headroom.
-    nonisolated private static let streamFlushInterval: TimeInterval = 1.0 / 20.0
-    nonisolated private static let streamFlushCharacterThreshold = 1_024
     nonisolated private static let maxQueuedRequestsPerConversation = 20
     nonisolated private static let maxQueuedAttachmentBytesPerConversation = 64 * 1_024 * 1_024
     nonisolated private static let toolInputExecutor = BoundedTaskExecutor(maxConcurrentTasks: 2)
@@ -27,6 +22,7 @@ public final class ConversationService {
         let onSessionReady: (() -> Void)?
         let onComplete: (() -> Void)?
         let queued: Bool
+        var userMessageID: UUID?
     }
 
     private struct ActiveRequest {
@@ -66,7 +62,7 @@ public final class ConversationService {
     ) -> Bool {
         let isQueued = activeRequests[conversationState.agentID] != nil
 
-        let request = PendingRequest(
+        var request = PendingRequest(
             prompt: prompt,
             attachments: attachments,
             providerID: providerID,
@@ -127,7 +123,7 @@ public final class ConversationService {
             return true
         }
 
-        conversationState.appendUserMessage(prompt, attachments: attachments)
+        request.userMessageID = conversationState.appendUserMessage(prompt, attachments: attachments)
         request.onStart?()
         start(request, for: conversationState)
         return true
@@ -450,9 +446,10 @@ public final class ConversationService {
     }
 
     private func start(_ request: PendingRequest, for conversationState: ConversationState) {
+        var request = request
         if request.queued {
             conversationState.beginQueuedPrompt()
-            conversationState.appendUserMessage(request.prompt, attachments: request.attachments)
+            request.userMessageID = conversationState.appendUserMessage(request.prompt, attachments: request.attachments)
             request.onStart?()
         }
 
@@ -501,26 +498,12 @@ public final class ConversationService {
         let task = Task { [weak self] in
             var didReceiveCompletion = false
             var didReceiveError = false
-            var pendingStreamDelta = ""
-            var lastStreamFlushAt = Date.distantPast
-
-            @MainActor
-            func flushPendingStreamDelta() {
-                guard !pendingStreamDelta.isEmpty else { return }
-                conversationState.appendStreamDelta(pendingStreamDelta)
-                pendingStreamDelta = ""
-                lastStreamFlushAt = Date()
+            var didInitialize = false
+            var didRejectUnsentPrompt = false
+            let streamBuffer = StreamDeltaBuffer { delta in
+                conversationState.appendStreamDelta(delta)
             }
-
-            @MainActor
-            func enqueueStreamDelta(_ delta: String) {
-                pendingStreamDelta += delta
-                let now = Date()
-                if pendingStreamDelta.count >= Self.streamFlushCharacterThreshold
-                    || now.timeIntervalSince(lastStreamFlushAt) >= Self.streamFlushInterval {
-                    flushPendingStreamDelta()
-                }
-            }
+            defer { streamBuffer.discard() }
 
             do {
                 for try await event in handle.stream {
@@ -528,6 +511,13 @@ public final class ConversationService {
 
                     switch event {
                     case .initialized(let sessionID, let model):
+                        didInitialize = true
+                        if conversationState.unsentPrompt == UnsentConversationPrompt(
+                            prompt: request.prompt, attachments: request.attachments,
+                            sessionID: request.resumeSessionID ?? conversationState.sessionID
+                        ) {
+                            conversationState.unsentPrompt = nil
+                        }
                         let previousSessionID = conversationState.sessionID
                         let previousModelID = conversationState.activeModelID
                         conversationState.registerSession(sessionID, modelID: model)
@@ -580,10 +570,10 @@ public final class ConversationService {
                         }
 
                     case .textDelta(let delta):
-                        enqueueStreamDelta(delta)
+                        streamBuffer.append(delta)
 
                     case .text(let text):
-                        enqueueStreamDelta(text)
+                        streamBuffer.append(text)
 
                     case .approvalRequest(let request):
                         let approval = ToolApprovalRequest(
@@ -616,7 +606,7 @@ public final class ConversationService {
                         )
 
                     case .toolUse(let id, let name, let input):
-                        flushPendingStreamDelta()
+                        streamBuffer.flush()
                         let retainedInput: String
                         do {
                             retainedInput = try await Self.toolInputExecutor.run(priority: .utility) {
@@ -753,14 +743,14 @@ public final class ConversationService {
 
                     case .done(let stopReason):
                         didReceiveCompletion = true
-                        flushPendingStreamDelta()
+                        streamBuffer.flush()
                         conversationState.clearToolApprovalRequests()
                         conversationState.clearUserInputRequests()
                         conversationState.finishStreaming(stopReason: stopReason)
 
                     case .error(let message):
                         didReceiveError = true
-                        pendingStreamDelta = ""
+                        streamBuffer.discard()
                         conversationState.clearToolApprovalRequests()
                         conversationState.clearUserInputRequests()
                         conversationState.setError(message)
@@ -774,10 +764,27 @@ public final class ConversationService {
                         )
                     }
                 }
+            } catch let error as CodexThreadWriterConflict where !didInitialize {
+                didReceiveError = true
+                didRejectUnsentPrompt = true
+                streamBuffer.discard()
+                conversationState.clearToolApprovalRequests()
+                conversationState.clearUserInputRequests()
+                conversationState.recoverUnsentPrompt(
+                    UnsentConversationPrompt(prompt: request.prompt, attachments: request.attachments,
+                                             sessionID: request.resumeSessionID ?? conversationState.sessionID),
+                    messageID: request.userMessageID
+                )
+                conversationState.setError(error.localizedDescription)
+                conversationState.recordRuntimeActivity(
+                    kind: .session, tone: .warning, summary: "Message not sent",
+                    detail: "Another Codex session owns this task. Your message and attachments are saved for retry.",
+                    state: "blocked", turnID: nil
+                )
             } catch {
                 if !Task.isCancelled {
                     didReceiveError = true
-                    pendingStreamDelta = ""
+                    streamBuffer.discard()
                     conversationState.clearToolApprovalRequests()
                     conversationState.clearUserInputRequests()
                     conversationState.setError(error.localizedDescription)
@@ -793,12 +800,12 @@ public final class ConversationService {
             }
 
             if Task.isCancelled {
-                flushPendingStreamDelta()
+                streamBuffer.flush()
                 conversationState.clearToolApprovalRequests()
                 conversationState.clearUserInputRequests()
                 conversationState.finishStreaming(stopReason: "cancelled")
             } else if !didReceiveCompletion && !didReceiveError {
-                flushPendingStreamDelta()
+                streamBuffer.flush()
                 conversationState.finishStreaming()
             }
 
@@ -810,7 +817,10 @@ public final class ConversationService {
             self.activeRequests[agentID] = nil
             self.activeStates[agentID] = nil
             request.onComplete?()
-            self.startNextRequestIfNeeded(for: conversationState)
+            // Do not drain queued requests into the same writer conflict.
+            if !didRejectUnsentPrompt {
+                self.startNextRequestIfNeeded(for: conversationState)
+            }
         }
 
         activeRequests[agentID] = ActiveRequest(

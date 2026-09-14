@@ -1,4 +1,4 @@
-.PHONY: dev build test check clean generate
+.PHONY: dev build test check benchmark-chat benchmark-diff clean generate
 
 generate:
 	xcodegen generate
@@ -64,6 +64,12 @@ test:
 	cd Packages/FXTerminal && swift test --scratch-path ../../build/tests/FXTerminal --quiet
 	cd Packages/FXDesign && swift test --scratch-path ../../build/tests/FXDesign --quiet
 	@echo "All tests passed."
+
+benchmark-chat:
+	cd Packages/FXCore && FLOWX_BENCHMARK_CHAT=1 swift test -c release --scratch-path ../../build/benchmarks/FXCore --filter benchmarkTranscriptPreparation --quiet
+
+benchmark-diff:
+	cd Packages/FXDesign && FLOWX_BENCHMARK_DIFF=1 swift test -c release --scratch-path ../../build/benchmarks/FXDesign --filter codeListOnlyBuildsVisibleRowsAndCanReachTheEnd --quiet
 
 check: test generate
 	xcodebuild -project FlowX.xcodeproj -scheme FlowX -configuration Debug -derivedDataPath build/check CODE_SIGNING_ALLOWED=NO build -quiet

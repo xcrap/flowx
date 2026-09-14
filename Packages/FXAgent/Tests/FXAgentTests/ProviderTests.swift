@@ -504,7 +504,7 @@ private actor CleanupInvocationCounter {
 }
 
 @Test func codexCatalogParsesRuntimeMetadata() throws {
-    #expect(CodexProvider.fallbackModels.allSatisfy { $0.maxContextWindow == 272_000 })
+    #expect(CodexProvider.fallbackModels.allSatisfy { $0.contextWindow == 272_000 })
     #expect(CodexProvider.fallbackModels.allSatisfy { $0.availableContextWindows == [272_000] })
     let data = Data(#"""
     {
@@ -531,6 +531,36 @@ private actor CleanupInvocationCounter {
     #expect(sol.supportedReasoningEfforts == ["low", "ultra"])
     #expect(sol.inputModalities == [.text, .image])
     #expect(sol.serviceTiers.first?.id == "priority")
+}
+
+@Test func codexAstraFallbackAndRuntimeCapabilities() throws {
+    let fallback = try #require(CodexProvider.fallbackModels.first { $0.id == "gpt-6-astra" })
+    #expect(fallback.name == "GPT-6 Astra")
+    #expect(fallback.defaultReasoningEffort == "medium")
+    #expect(fallback.supportedReasoningEfforts == ["low", "medium", "high", "xhigh", "max", "ultra"])
+    #expect(fallback.maxContextWindow == 872_000)
+    #expect(fallback.supportsVision)
+    #expect(fallback.serviceTiers.first?.id == "priority")
+    // Adding support must not change existing fallback preferences.
+    #expect(CodexProvider.fallbackModels.first(where: \.isDefault)?.id == "gpt-5.6-sol")
+
+    let data = Data(#"""
+    {"models":[{
+      "slug":"gpt-6-astra", "visibility":"list",
+      "context_window":272000, "max_context_window":900000,
+      "default_reasoning_level":"high",
+      "supported_reasoning_levels":[{"effort":"high"},{"effort":"max"}],
+      "input_modalities":["text","image"],
+      "service_tiers":[{"id":"priority","name":"Fast","description":"Runtime tier"}]
+    }]}
+    """#.utf8)
+    let astra = try #require(CodexProvider.parseModelCatalog(data)?.first)
+    #expect(astra.id == fallback.id)
+    #expect(astra.name == fallback.name)
+    #expect(astra.maxContextWindow == 900_000)
+    #expect(astra.defaultReasoningEffort == "high")
+    #expect(astra.supportedReasoningEfforts == ["high", "max"])
+    #expect(astra.serviceTiers.first?.description == "Runtime tier")
 }
 
 @Test func codexApprovalResponsesMatchCurrentAndLegacyProtocols() {

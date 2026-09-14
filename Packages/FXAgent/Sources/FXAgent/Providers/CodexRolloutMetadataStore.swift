@@ -270,6 +270,23 @@ struct CodexRolloutMetadataStore {
         return summary
     }
 
+    mutating func revision(threadID: String, createdAt: Date) -> String? {
+        if let file = fileByThreadID[threadID], let fingerprint = fingerprint(forFile: file) {
+            return "\(fingerprint.size):\(fingerprint.modificationDate.timeIntervalSince1970)"
+        }
+        let suffix = "\(threadID).jsonl"
+        for directory in candidateDirectories(for: createdAt) {
+            for file in files(in: directory) where file.lastPathComponent.hasSuffix(suffix) {
+                guard let fingerprint = fingerprint(forFile: file),
+                      sessionID(from: file, fileSize: fingerprint.size) == threadID else { continue }
+                fileByThreadID[threadID] = file
+                trimCachesIfNeeded()
+                return "\(fingerprint.size):\(fingerprint.modificationDate.timeIntervalSince1970)"
+            }
+        }
+        return nil
+    }
+
     private static func needsMetadata(_ summary: ProviderNativeThreadSummary) -> Bool {
         summary.model == nil
             || summary.effort == nil

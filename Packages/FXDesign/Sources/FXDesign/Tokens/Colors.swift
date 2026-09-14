@@ -17,7 +17,7 @@ public enum FXAppearanceMode: String, CaseIterable, Codable {
     }
 }
 
-public enum FXBaseTone: String, CaseIterable, Codable {
+public enum FXBaseTone: String, CaseIterable, Codable, Sendable {
     case slate, zinc, neutral, stone
 
     public var label: String { rawValue.capitalized }
@@ -118,7 +118,7 @@ private struct ToneScale {
 // MARK: - Semantic Palette
 
 /// The "CSS variables" backing layer. Generated from tone + dark/light.
-private struct FXPalette {
+private struct FXPalette: Sendable {
     // Backgrounds
     let bg: Color
     let bgElevated: Color
@@ -155,6 +155,19 @@ private struct FXPalette {
     #if canImport(AppKit)
     let windowBackground: NSColor
     #endif
+
+    // There are only eight tone/appearance combinations. Generate each once,
+    // instead of rebuilding every semantic color and bridging an NSColor for
+    // every FXColors token read throughout a view's body.
+    private static let palettes: [FXBaseTone: (light: FXPalette, dark: FXPalette)] =
+        Dictionary(uniqueKeysWithValues: FXBaseTone.allCases.map { tone in
+            (tone, (light: generate(tone: tone, dark: false), dark: generate(tone: tone, dark: true)))
+        })
+
+    static func cached(tone: FXBaseTone, dark: Bool) -> FXPalette {
+        let pair = palettes[tone]!
+        return dark ? pair.dark : pair.light
+    }
 
     static func generate(tone: FXBaseTone, dark: Bool) -> FXPalette {
         let t = ToneScale.forTone(tone)
@@ -274,7 +287,7 @@ public enum FXTheme {
     }
 
     fileprivate static var currentPalette: FXPalette {
-        .generate(tone: baseTone, dark: isDarkAppearance)
+        .cached(tone: baseTone, dark: isDarkAppearance)
     }
 }
 

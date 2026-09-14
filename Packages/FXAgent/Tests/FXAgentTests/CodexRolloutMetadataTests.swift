@@ -49,6 +49,46 @@ private func makeRolloutContainer(
 
 private let july24UTC = Date(timeIntervalSince1970: 1_784_851_200)
 
+@Test func codexRevisionDetectsWritesWithoutRereadingUnchangedHistory() throws {
+    let fixture = try makeRolloutContainer(named: "revision")
+    defer { try? FileManager.default.removeItem(at: fixture.container) }
+    let id = "11111111-2222-4333-8444-555555555555"
+    let file = fixture.datedDirectory.appendingPathComponent("rollout-\(id).jsonl")
+    var data = try rolloutLine(["type": "session_meta", "payload": ["id": id]])
+    try data.write(to: file)
+    var store = CodexRolloutMetadataStore(sessionsRoot: fixture.sessions)
+    let initialRevision = store.revision(threadID: id, createdAt: july24UTC)
+    let first = try #require(initialRevision)
+    let bytesRead = store.totalBytesRead
+    let directoryScans = store.directoryScanCount
+    for _ in 0..<100 {
+        let revision = store.revision(threadID: id, createdAt: july24UTC)
+        #expect(revision == first)
+    }
+    #expect(store.totalBytesRead == bytesRead)
+    #expect(store.directoryScanCount == directoryScans)
+    let timestamp = try #require(FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date)
+    data.append(try rolloutLine(["type": "event_msg", "payload": ["type": "agent_message", "message": "New content"]]))
+    try data.write(to: file)
+    // A coarse timestamp alone must not hide a write within the same second.
+    try FileManager.default.setAttributes([.modificationDate: timestamp], ofItemAtPath: file.path)
+    let changedRevision = store.revision(threadID: id, createdAt: july24UTC)
+    let changed = try #require(changedRevision)
+    #expect(changed != first)
+    #expect(store.totalBytesRead == bytesRead)
+}
+
+@Test func codexRevisionRejectsMismatchedSessionMetadata() throws {
+    let fixture = try makeRolloutContainer(named: "revision-mismatch")
+    defer { try? FileManager.default.removeItem(at: fixture.container) }
+    let id = "11111111-2222-4333-8444-555555555555"
+    let file = fixture.datedDirectory.appendingPathComponent("rollout-\(id).jsonl")
+    try rolloutLine(["type": "session_meta", "payload": ["id": "different-session"]]).write(to: file)
+    var store = CodexRolloutMetadataStore(sessionsRoot: fixture.sessions)
+    let revision = store.revision(threadID: id, createdAt: july24UTC)
+    #expect(revision == nil)
+}
+
 @Test func codexNativeConfigurationMapsOnlyExactProviderPolicies() {
     let supervised = CodexNativeConfiguration.parse([
         "approval_policy": "untrusted",

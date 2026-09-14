@@ -291,6 +291,8 @@ final class AgentInfo: Identifiable {
     var isLoadingNativeTranscript = false
     var nativeTranscriptError: String?
     var nativeTranscriptLoadedAt: Date?
+    @ObservationIgnored var nativeTranscriptRevision: String?
+    @ObservationIgnored var nativeTranscriptRetryAt: Date?
     /// Ephemeral attention state: completed work is only called out until the
     /// user opens that thread. Historical provider threads stay visually quiet.
     var hasUnseenCompletion = false
@@ -1082,6 +1084,7 @@ final class AppState {
     @ObservationIgnored private var pendingNativeWorkspaceSyncRequest: NativeWorkspaceSyncRequest?
     @ObservationIgnored private var nativeSyncingProjectIDs: Set<UUID> = []
     private var nativeActiveProjectPollingTask: Task<Void, Never>?
+    @ObservationIgnored private var selectedNativeTranscriptPollingTask: Task<Void, Never>?
     private var nativeTranscriptTasks: [UUID: Task<Void, Never>] = [:]
     private var nativeTranscriptLoadIDs: [UUID: UUID] = [:]
     @ObservationIgnored private var steeringPromptTasks: [UUID: Task<Void, Never>] = [:]
@@ -2144,7 +2147,7 @@ final class AppState {
             scheduleNativeThreadSynchronization(prioritizing: project.id, includeAllProjects: false)
         }
         if let agent = activeAgent {
-            loadNativeTranscriptIfNeeded(for: agent, in: project)
+            loadNativeTranscriptIfNeeded(for: agent, in: project, force: true)
         }
         synchronizeActiveProjectPanels()
         persistStateIfBootstrapped()
@@ -2171,7 +2174,7 @@ final class AppState {
             scheduleNativeThreadSynchronization(prioritizing: project.id, includeAllProjects: false)
         }
         if let agent = project.agents.first(where: { $0.id == agentID }) {
-            loadNativeTranscriptIfNeeded(for: agent, in: project)
+            loadNativeTranscriptIfNeeded(for: agent, in: project, force: true)
         }
         synchronizeActiveProjectPanels()
         persistStateIfBootstrapped()
@@ -2223,15 +2226,35 @@ final class AppState {
     }
 
     func resumeConversation(for agent: AgentInfo) {
+        if agent.conversationState.error.map(CodexThreadWriterConflict.matches) == true {
+            retryUnsentPrompt(for: agent)
+            return
+        }
         guard let sessionID = agent.conversationState.sessionID, !sessionID.isEmpty else { return }
         agent.conversationState.dismissError()
         dispatchPrompt("continue", for: agent, resumeSessionID: sessionID)
     }
 
     func retryLastPrompt(for agent: AgentInfo) {
+        if agent.conversationState.unsentPrompt != nil {
+            retryUnsentPrompt(for: agent)
+            return
+        }
         guard let prompt = agent.conversationState.latestUserPrompt, !prompt.isEmpty else { return }
         agent.conversationState.dismissError()
         dispatchPrompt(prompt, for: agent)
+    }
+
+    func retryUnsentPrompt(for agent: AgentInfo) {
+        let state = agent.conversationState
+        guard !state.isStreaming, let unsent = state.unsentPrompt,
+              unsent.sessionID == state.sessionID else { return }
+        if dispatchPrompt(unsent.prompt, attachments: unsent.attachments, for: agent,
+                          resumeSessionID: unsent.sessionID),
+           state.inputText == unsent.prompt, state.pendingAttachments == unsent.attachments {
+            state.inputText = ""
+            state.clearAttachments()
+        }
     }
 
     func restartConversationSession(for agent: AgentInfo) {
@@ -2387,6 +2410,7 @@ final class AppState {
     }
 
     private func startActiveProjectNativePolling() {
+        startSelectedNativeTranscriptPolling()
         nativeActiveProjectPollingTask?.cancel()
         nativeActiveProjectPollingTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
@@ -2399,6 +2423,47 @@ final class AppState {
                 self?.refreshActiveNativeThreadsIfIdle()
             }
         }
+    }
+
+    private func startSelectedNativeTranscriptPolling() {
+        selectedNativeTranscriptPollingTask?.cancel()
+        selectedNativeTranscriptPollingTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                await self?.refreshSelectedNativeTranscriptIfChanged()
+                do {
+                    try await Task.sleep(for: .seconds(1))
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func refreshSelectedNativeTranscriptIfChanged() async {
+        // Visible side-by-side windows must keep updating even while Codex is
+        // the foreground app. Hidden/minimized FlowX windows do no polling.
+        guard isBootstrapped, !isShuttingDown,
+              NSApplication.shared.windows.contains(where: {
+                  $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible)
+              }),
+              let project = activeProject, let agent = activeAgent,
+              !agent.conversationState.isStreaming,
+              agent.nativeTranscriptRetryAt.map({ $0 <= Date() }) ?? true,
+              nativeTranscriptTasks[agent.id] == nil,
+              let binding = agent.nativeThreadBinding,
+              let provider = providerRegistry.provider(for: binding.identity.providerID)
+                as? any AIProviderNativeThreads else { return }
+
+        let revision = await provider.nativeThreadRevision(
+            id: binding.identity.sessionID,
+            createdAt: binding.createdAt
+        )
+        guard !Task.isCancelled, activeProjectID == project.id, activeAgentID == agent.id,
+              agent.nativeThreadBinding?.identity == binding.identity else { return }
+        if let revision, revision == agent.nativeTranscriptRevision { return }
+        if revision == nil, let loadedAt = agent.nativeTranscriptLoadedAt,
+           Date().timeIntervalSince(loadedAt) < 5 { return }
+        loadNativeTranscriptIfNeeded(for: agent, in: project, force: true)
     }
 
     private func refreshActiveNativeThreadsIfIdle() {
@@ -2420,6 +2485,9 @@ final class AppState {
             project.refreshFiles()
         }
         refreshActiveNativeThreadsIfIdle()
+        if let project = activeProject, let agent = activeAgent {
+            loadNativeTranscriptIfNeeded(for: agent, in: project, force: true)
+        }
     }
 
     private func scheduleNativeThreadSynchronization(
@@ -2796,10 +2864,12 @@ final class AppState {
 
     private func updateNativeThreadBinding(_ binding: NativeThreadBinding, for agent: AgentInfo) {
         if let currentContextTokens = binding.currentContextTokens,
-           currentContextTokens >= 0 {
+           currentContextTokens >= 0,
+           agent.conversationState.currentContextTokens != currentContextTokens {
             agent.conversationState.currentContextTokens = currentContextTokens
         }
-        if let contextWindow = binding.contextWindow, contextWindow > 0 {
+        if let contextWindow = binding.contextWindow, contextWindow > 0,
+           agent.conversationState.reportedContextWindow != contextWindow {
             agent.conversationState.reportedContextWindow = contextWindow
         }
         guard agent.nativeThreadBinding != binding else { return }
@@ -2964,14 +3034,14 @@ final class AppState {
               Self.canonicalDirectoryPath(binding.workingDirectory) == project.project.canonicalRootPath else {
             return
         }
+        guard nativeTranscriptTasks[agent.id] == nil else { return }
         if !force,
            let loadedAt = agent.nativeTranscriptLoadedAt,
            loadedAt >= binding.updatedAt {
             return
         }
 
-        nativeTranscriptTasks[agent.id]?.cancel()
-        agent.isLoadingNativeTranscript = true
+        agent.isLoadingNativeTranscript = agent.conversationState.messages.isEmpty
         agent.nativeTranscriptError = nil
         let agentID = agent.id
         let projectID = project.id
@@ -2990,10 +3060,9 @@ final class AppState {
                 }
             }
             do {
-                let cachedConversation = await ConversationPersistence.load(
-                    agentIDs: [agentID],
-                    for: projectID
-                )[agentID]
+                let cachedConversation = agent.nativeTranscriptLoadedAt == nil
+                    ? await ConversationPersistence.load(agentIDs: [agentID], for: projectID)[agentID]
+                    : nil
                 guard !Task.isCancelled,
                       nativeTranscriptLoadIDs[agentID] == loadID,
                       let cachedProject = projects.first(where: { $0.id == projectID }),
@@ -3020,11 +3089,19 @@ final class AppState {
                     )
                 }
 
+                // Capture before reading so writes arriving during the read
+                // remain detectable on the next poll.
+                let revision = await provider.nativeThreadRevision(
+                    id: binding.identity.sessionID,
+                    createdAt: binding.createdAt
+                )
+                let readStartedAt = Date()
                 let nativeThread = try await provider.readNativeThread(
                     id: binding.identity.sessionID,
                     workingDirectory: project.project.rootURL
                 )
                 guard !Task.isCancelled,
+                      nativeTranscriptLoadIDs[agentID] == loadID,
                       let currentProject = projects.first(where: { $0.id == projectID }),
                       let currentAgent = currentProject.agents.first(where: { $0.id == agentID }),
                       !currentAgent.conversationState.isStreaming,
@@ -3035,6 +3112,7 @@ final class AppState {
                     return
                 }
 
+                let bindingChanged = currentAgent.nativeThreadBinding != refreshedBinding
                 updateNativeThreadBinding(refreshedBinding, for: currentAgent)
                 let restoredMessages = ConversationAssetStore.reattachingNativeImages(
                     to: nativeThread.messages,
@@ -3044,16 +3122,24 @@ final class AppState {
                     projectID: projectID,
                     agentID: agentID
                 )
-                currentAgent.conversationState.replaceMessages(restoredMessages)
+                let messagesChanged = currentAgent.conversationState.messages
+                    != Array(restoredMessages.suffix(ConversationState.maxRetainedMessages))
+                if messagesChanged {
+                    currentAgent.conversationState.replaceMessages(restoredMessages)
+                }
                 currentAgent.conversationState.sessionID = refreshedBinding.identity.sessionID
                 currentAgent.conversationState.activeProviderID = refreshedBinding.identity.providerID
                 currentAgent.conversationState.activeModelID = effectiveConfiguration(for: currentAgent).modelID
-                currentAgent.nativeTranscriptLoadedAt = Date()
+                currentAgent.nativeTranscriptLoadedAt = readStartedAt
+                currentAgent.nativeTranscriptRevision = revision
+                currentAgent.nativeTranscriptRetryAt = nil
                 currentAgent.nativeTranscriptError = nil
                 currentAgent.isLoadingNativeTranscript = false
                 currentAgent.syncExecutionStateFromConversation()
-                ConversationPersistence.save(agent: currentAgent, projectID: projectID)
-                scheduleSave()
+                if messagesChanged || bindingChanged {
+                    ConversationPersistence.save(agent: currentAgent, projectID: projectID)
+                    scheduleSave()
+                }
             } catch is CancellationError {
                 return
             } catch {
@@ -3064,6 +3150,7 @@ final class AppState {
                 }
                 currentAgent.isLoadingNativeTranscript = false
                 currentAgent.nativeTranscriptError = error.localizedDescription
+                currentAgent.nativeTranscriptRetryAt = Date().addingTimeInterval(5)
             }
         }
     }
@@ -3766,6 +3853,7 @@ final class AppState {
         pendingNativeWorkspaceSyncRequest = nil
         nativeSyncingProjectIDs.removeAll()
         nativeActiveProjectPollingTask?.cancel()
+        selectedNativeTranscriptPollingTask?.cancel()
         for task in nativeTranscriptTasks.values {
             task.cancel()
         }

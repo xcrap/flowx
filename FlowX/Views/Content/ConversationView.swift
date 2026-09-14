@@ -12,11 +12,16 @@ private struct MessageRenderKey: Hashable {
     let isLoadingNativeTranscript: Bool
 }
 
+private struct ConversationRenderSnapshot: Sendable {
+    var turns = TranscriptTurnCache<ConversationDisplayItem>()
+    var items: [ConversationDisplayItem] = []
+}
+
 @MainActor
 private final class ConversationRenderCache {
     private struct Entry {
         let key: MessageRenderKey
-        let items: [ConversationDisplayItem]
+        let snapshot: ConversationRenderSnapshot
         let cost: Int
         var lastAccess: UInt64
     }
@@ -32,20 +37,21 @@ private final class ConversationRenderCache {
         self.maximumCost = max(1, maximumCost)
     }
 
+    func snapshot(for agentID: UUID) -> ConversationRenderSnapshot? {
+        entriesByAgentID[agentID]?.snapshot
+    }
+
     func items(for key: MessageRenderKey) -> [ConversationDisplayItem]? {
         guard var entry = entriesByAgentID[key.agentID] else { return nil }
-        guard entry.key == key else {
-            removeEntry(for: key.agentID)
-            return nil
-        }
+        guard entry.key == key else { return nil }
 
         entry.lastAccess = nextAccess()
         entriesByAgentID[key.agentID] = entry
-        return entry.items
+        return entry.snapshot.items
     }
 
     func insert(
-        _ items: [ConversationDisplayItem],
+        _ snapshot: ConversationRenderSnapshot,
         for key: MessageRenderKey,
         messageCount: Int
     ) {
@@ -53,7 +59,7 @@ private final class ConversationRenderCache {
 
         let cost = max(
             1,
-            messageCount + items.reduce(into: 0) { total, item in
+            messageCount + snapshot.items.reduce(into: 0) { total, item in
                 total += item.estimatedCacheCost
             }
         )
@@ -61,7 +67,7 @@ private final class ConversationRenderCache {
 
         entriesByAgentID[key.agentID] = Entry(
             key: key,
-            items: items,
+            snapshot: snapshot,
             cost: cost,
             lastAccess: nextAccess()
         )
@@ -99,7 +105,10 @@ struct ConversationView: View {
     @State private var editingQueuedPromptText = ""
     @State private var initialScrollRestorePending = true
     @State private var transcriptPrepared = false
-    @State private var renderedItems: [ConversationDisplayItem] = []
+    @State private var renderSnapshot = ConversationRenderSnapshot()
+    @State private var presentationRevision = 0
+
+    private var renderedItems: [ConversationDisplayItem] { renderSnapshot.items }
 
     private let maxContentWidth: CGFloat = FXLayout.readableContentWidth
     private let lazyTranscriptThreshold = 32
@@ -118,7 +127,8 @@ struct ConversationView: View {
             isLoadingNativeTranscript: agent.isLoadingNativeTranscript
         )
         if let cachedItems = Self.renderCache.items(for: key) {
-            _renderedItems = State(initialValue: cachedItems)
+            _renderSnapshot = State(initialValue: Self.renderCache.snapshot(for: agent.id)
+                ?? ConversationRenderSnapshot(items: cachedItems))
             _transcriptPrepared = State(initialValue: true)
         }
     }
@@ -162,7 +172,8 @@ struct ConversationView: View {
         .task(id: renderKey) {
             let key = renderKey
             if let cachedItems = Self.renderCache.items(for: key) {
-                installRenderedItems(cachedItems)
+                installRenderedItems(Self.renderCache.snapshot(for: agent.id)
+                    ?? ConversationRenderSnapshot(items: cachedItems))
                 return
             }
 
@@ -172,16 +183,18 @@ struct ConversationView: View {
                 return
             }
 
+            let previous = Self.renderCache.snapshot(for: key.agentID) ?? renderSnapshot
             do {
-                let items = try await Self.renderExecutor.run(priority: .userInitiated) {
-                    try Self.makeDisplayItems(
-                        from: messages,
-                        isRunning: key.isRunning
-                    )
+                let snapshot = try await Self.renderExecutor.run(priority: .userInitiated) {
+                    var next = previous
+                    next.items = try next.turns.render(messages: messages, isRunning: key.isRunning) {
+                        try Self.makeDisplayItems(from: $0, isRunning: $1)
+                    }
+                    return next
                 }
                 guard !Task.isCancelled, key == renderKey else { return }
-                Self.renderCache.insert(items, for: key, messageCount: messages.count)
-                installRenderedItems(items)
+                Self.renderCache.insert(snapshot, for: key, messageCount: messages.count)
+                installRenderedItems(snapshot)
             } catch {
                 return
             }
@@ -193,8 +206,9 @@ struct ConversationView: View {
         }
     }
 
-    private func installRenderedItems(_ items: [ConversationDisplayItem]) {
-        renderedItems = items
+    private func installRenderedItems(_ snapshot: ConversationRenderSnapshot) {
+        renderSnapshot = snapshot
+        presentationRevision &+= 1
         if !transcriptPrepared {
             transcriptPrepared = true
         }
@@ -210,11 +224,9 @@ struct ConversationView: View {
                     .padding(.horizontal, FXSpacing.xxl)
                     .padding(.top, FXSpacing.xxl)
                     .background(
-                        ConversationScrollCoordinator(
-                            restoreKey: agent.id,
-                            desiredOffset: agent.workspace.conversationScrollOffset,
-                            stickToBottom: agent.workspace.conversationPinnedToBottom,
-                            contentVersion: contentVersion
+                        ConversationScrollObserver(
+                            agent: agent,
+                            presentationRevision: presentationRevision
                         ) { offset, maxOffset in
                             updateScrollState(offset: offset, maxOffset: maxOffset)
                         } onInitialRestoreCompleted: {
@@ -252,15 +264,7 @@ struct ConversationView: View {
                 .padding(.bottom, displayItemSpacing(for: item))
         }
 
-        if !agent.conversationState.streamingText.isEmpty {
-            MessageBubble(streamingText: agent.conversationState.streamingText)
-                .id("streaming-message")
-                .padding(.bottom, FXSpacing.xl)
-        } else if agent.isTranscriptRunning {
-            streamingIndicator
-                .id("streaming-indicator")
-                .padding(.bottom, FXSpacing.xl)
-        }
+        ConversationStreamingTail(agent: agent)
 
         if let error = agent.conversationState.error {
             errorCard(error)
@@ -297,18 +301,6 @@ struct ConversationView: View {
     }
 
     private var bottomScrollID: String { "conversation-bottom" }
-
-    private var contentVersion: Int {
-        var version = agent.conversationState.messageRevision
-        version = version &* 31 &+ agent.conversationState.streamingRevision
-        version += agent.isTranscriptRunning ? 1 : 0
-        version += agent.conversationState.error == nil ? 0 : 1
-        if let activeGoal = agent.conversationState.activeGoal {
-            version = version &* 31 &+ activeGoal.updatedAt
-            version = version &* 31 &+ activeGoal.status.rawValue.hashValue
-        }
-        return version
-    }
 
     nonisolated private static func makeDisplayItems(
         from messages: [ConversationMessage],
@@ -522,13 +514,14 @@ struct ConversationView: View {
     private func displayItemView(for item: ConversationDisplayItem) -> some View {
         switch item {
         case .message(let message):
-            MessageBubble(message: message)
+            ConversationMessageRow(message: message)
+                .equatable()
         case .workGroup(_, let entries, let isActive, let summary):
             ConversationActivityGroup(
                 entries: entries,
                 isActive: isActive,
                 summary: summary,
-                completedToolUseIDs: agent.conversationState.completedToolUseIDs
+                completedToolUseIDs: isActive ? agent.conversationState.completedToolUseIDs : []
             )
         case .questionExchange(_, let question, let result):
             ConversationQuestionExchange(question: question, result: result)
@@ -615,6 +608,10 @@ struct ConversationView: View {
         return !nonRecoverable.contains(where: { error.contains($0) })
     }
 
+    private var isWriterConflict: Bool {
+        agent.conversationState.error.map(CodexThreadWriterConflict.matches) == true
+    }
+
     private var isStaleSessionError: Bool {
         guard let error = agent.conversationState.error?.lowercased() else { return false }
 
@@ -623,24 +620,6 @@ struct ConversationView: View {
 
         return sessionTerms.contains(where: { error.contains($0) })
             && staleTerms.contains(where: { error.contains($0) })
-    }
-
-    private var streamingIndicator: some View {
-        HStack {
-            HStack(spacing: FXSpacing.sm) {
-                TypingIndicator()
-            }
-            .padding(.horizontal, FXSpacing.lg)
-            .padding(.vertical, FXSpacing.md)
-            .background(FXColors.bgSurface)
-            .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
-            .overlay(
-                RoundedRectangle(cornerRadius: FXRadii.xl)
-                    .strokeBorder(FXColors.border, lineWidth: 0.5)
-            )
-
-            Spacer(minLength: 80)
-        }
     }
 
     private var queueTray: some View {
@@ -977,22 +956,29 @@ struct ConversationView: View {
     }
 
     private func errorCard(_ error: String) -> some View {
-        VStack(alignment: .leading, spacing: FXSpacing.md) {
+        let tint = isWriterConflict ? FXColors.warning : FXColors.error
+        return VStack(alignment: .leading, spacing: FXSpacing.md) {
             HStack(alignment: .top, spacing: FXSpacing.sm) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(FXTypography.icon(.regular))
-                    .foregroundStyle(FXColors.error)
+                    .foregroundStyle(tint)
                     .frame(width: 20, height: 20)
 
-                Text(error)
+                Text(isWriterConflict ? CodexThreadWriterConflict.message : error)
                     .font(FXTypography.body)
-                    .foregroundStyle(FXColors.error)
+                    .foregroundStyle(tint)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             HStack(spacing: FXSpacing.sm) {
-                if isStaleSessionError, agent.conversationState.sessionID != nil {
+                if isWriterConflict {
+                    if agent.conversationState.unsentPrompt != nil {
+                        actionPill(title: "Retry message", icon: "arrow.counterclockwise", tint: tint) {
+                            appState.retryUnsentPrompt(for: agent)
+                        }
+                    }
+                } else if isStaleSessionError, agent.conversationState.sessionID != nil {
                     actionPill(title: "Restart session", icon: "arrow.clockwise.circle", tint: FXColors.error) {
                         appState.restartConversationSession(for: agent)
                     }
@@ -1014,11 +1000,11 @@ struct ConversationView: View {
             }
         }
         .padding(FXSpacing.lg)
-        .background(FXColors.error.opacity(0.08))
+        .background(tint.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.xl)
-                .strokeBorder(FXColors.error.opacity(0.18), lineWidth: 0.5)
+                .strokeBorder(tint.opacity(0.18), lineWidth: 0.5)
         )
     }
 
@@ -1116,6 +1102,84 @@ struct ConversationView: View {
 
 }
 
+/// Only this leaf observes text deltas. Completed rows, approval controls and
+/// the composer no longer rebuild for every stream publication.
+private struct ConversationStreamingTail: View {
+    let agent: AgentInfo
+
+    var body: some View {
+        if !agent.conversationState.streamingText.isEmpty {
+            MessageBubble(streamingText: agent.conversationState.streamingText)
+                .id("streaming-message")
+                .padding(.bottom, FXSpacing.xl)
+        } else if agent.isTranscriptRunning {
+            streamingIndicator
+                .id("streaming-indicator")
+                .padding(.bottom, FXSpacing.xl)
+        }
+    }
+
+    private var streamingIndicator: some View {
+        HStack {
+            HStack(spacing: FXSpacing.sm) {
+                TypingIndicator()
+            }
+            .padding(.horizontal, FXSpacing.lg)
+            .padding(.vertical, FXSpacing.md)
+            .background(FXColors.bgSurface)
+            .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
+            .overlay(
+                RoundedRectangle(cornerRadius: FXRadii.xl)
+                    .strokeBorder(FXColors.border, lineWidth: 0.5)
+            )
+
+            Spacer(minLength: 80)
+        }
+    }
+
+}
+
+/// Construct the expensive message presentation only when its content changes.
+private struct ConversationMessageRow: View, Equatable {
+    let message: ConversationMessage
+
+    var body: some View {
+        MessageBubble(message: message)
+    }
+}
+
+/// Observe streaming/scroll state here, without invalidating the transcript.
+private struct ConversationScrollObserver: View {
+    let agent: AgentInfo
+    let presentationRevision: Int
+    let onScrollSettled: (CGFloat, CGFloat) -> Void
+    let onInitialRestoreCompleted: () -> Void
+
+    var body: some View {
+        ConversationScrollCoordinator(
+            restoreKey: agent.id,
+            desiredOffset: agent.workspace.conversationScrollOffset,
+            stickToBottom: agent.workspace.conversationPinnedToBottom,
+            contentVersion: contentVersion,
+            onScrollSettled: onScrollSettled,
+            onInitialRestoreCompleted: onInitialRestoreCompleted
+        )
+    }
+
+    private var contentVersion: Int {
+        var version = presentationRevision &* 31 &+ agent.conversationState.messageRevision
+        version = version &* 31 &+ agent.conversationState.streamingRevision
+        version += agent.isTranscriptRunning ? 1 : 0
+        version += agent.conversationState.error == nil ? 0 : 1
+        if let activeGoal = agent.conversationState.activeGoal {
+            version = version &* 31 &+ activeGoal.updatedAt
+            version = version &* 31 &+ activeGoal.status.rawValue.hashValue
+        }
+        return version
+    }
+
+}
+
 /// Keeps transcript scrolling under one owner. AppKit performs restoration,
 /// live scrolling, settling, and follow-to-bottom; SwiftUI receives one state
 /// update only after a gesture settles.
@@ -1166,6 +1230,8 @@ private struct ConversationScrollCoordinator: NSViewRepresentable {
         private weak var anchorView: NSView?
         private weak var scrollView: NSScrollView?
         private weak var clipView: NSClipView?
+        private weak var documentView: NSView?
+        private var documentViewPostedFrameChanges = false
         private var clipViewPostedBoundsChanges = false
         private var clipViewPostedFrameChanges = false
         private var observingBounds = false
@@ -1266,11 +1332,21 @@ private struct ConversationScrollCoordinator: NSViewRepresentable {
                 )
             }
 
+            if let documentView {
+                NotificationCenter.default.removeObserver(
+                    self,
+                    name: NSView.frameDidChangeNotification,
+                    object: documentView
+                )
+                documentView.postsFrameChangedNotifications = documentViewPostedFrameChanges
+            }
+
             observingBounds = false
             observingFrame = false
             observingLiveScroll = false
             scrollView = nil
             clipView = nil
+            documentView = nil
             lastClipBounds = nil
             boundsBurstHadViewportResize = false
             anchorView = nil
@@ -1314,6 +1390,17 @@ private struct ConversationScrollCoordinator: NSViewRepresentable {
             }
 
             scrollView = enclosingScrollView
+            if let document = enclosingScrollView.documentView {
+                documentView = document
+                documentViewPostedFrameChanges = document.postsFrameChangedNotifications
+                document.postsFrameChangedNotifications = true
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleDocumentFrameDidChange(_:)),
+                    name: NSView.frameDidChangeNotification,
+                    object: document
+                )
+            }
             let enclosingClipView = enclosingScrollView.contentView
             clipView = enclosingClipView
             lastClipBounds = enclosingClipView.bounds
@@ -1357,8 +1444,7 @@ private struct ConversationScrollCoordinator: NSViewRepresentable {
 
             restoreTask = Task { @MainActor [weak self] in
                 guard let self else { return }
-                var eligiblePasses = 0
-                var attachedLayoutPasses = 0
+                var restoration = ConversationScrollRestoration()
 
                 for _ in 0..<120 {
                     guard
@@ -1370,20 +1456,16 @@ private struct ConversationScrollCoordinator: NSViewRepresentable {
 
                     self.attachIfNeeded()
                     if let scrollView = self.scrollView {
-                        attachedLayoutPasses += 1
                         let maxOffset = self.applyScrollPosition(
                             desiredOffset: self.desiredOffset,
                             stickToBottom: self.stickToBottom,
                             to: scrollView
                         )
-                        let minimumLayoutPasses = self.stickToBottom ? 30 : 8
-                        let targetIsAvailable = self.desiredOffset <= maxOffset + 0.5
-                        if attachedLayoutPasses >= minimumLayoutPasses, targetIsAvailable {
-                            eligiblePasses += 1
-                        } else {
-                            eligiblePasses = 0
-                        }
-                        if eligiblePasses >= 3 {
+                        if restoration.observe(
+                            maxOffset: maxOffset,
+                            desiredOffset: self.desiredOffset,
+                            stickToBottom: self.stickToBottom
+                        ) {
                             self.finishInitialRestore()
                             return
                         }
@@ -1466,6 +1548,15 @@ private struct ConversationScrollCoordinator: NSViewRepresentable {
             scrollView.reflectScrolledClipView(clipView)
             isApplyingProgrammaticScroll = false
             return maxOffset
+        }
+
+        @objc
+        private func handleDocumentFrameDidChange(_ notification: Notification) {
+            // Markdown, lazy rows and images can finish layout after the first
+            // restore. Keep following those changes only while still pinned.
+            guard hasCompletedInitialRestore, !isApplyingProgrammaticScroll,
+                  !isLiveScrolling, stickToBottom else { return }
+            scheduleFollowToBottom()
         }
 
         @objc

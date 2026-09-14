@@ -511,9 +511,15 @@ public protocol AIProviderNativeThreads: AIProvider {
         id: String,
         workingDirectory: URL?
     ) async throws -> ProviderNativeThread
+
+    /// Cheap storage revision for selected-thread freshness checks. Nil means
+    /// the provider needs a time-bounded fallback refresh instead.
+    func nativeThreadRevision(id: String, createdAt: Date) async -> String?
 }
 
 public extension AIProviderNativeThreads {
+    func nativeThreadRevision(id: String, createdAt: Date) async -> String? { nil }
+
     func listNativeThreads(
         workingDirectory: URL,
         limit: Int,

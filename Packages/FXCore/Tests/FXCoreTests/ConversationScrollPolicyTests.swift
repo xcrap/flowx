@@ -2,6 +2,28 @@ import Foundation
 import Testing
 @testable import FXCore
 
+@Test func conversationRestoreFinishesAsSoonAsGeometryStabilizes() {
+    var restoration = ConversationScrollRestoration()
+    let results = (0..<4).map { _ in
+        restoration.observe(maxOffset: 500, desiredOffset: 9_000, stickToBottom: true)
+    }
+    #expect(results == [false, false, false, true])
+}
+
+@Test func conversationRestoreWaitsForLayoutChangesAndSavedOffset() {
+    var restoration = ConversationScrollRestoration()
+    for _ in 0..<10 {
+        let ready = restoration.observe(maxOffset: 100, desiredOffset: 500, stickToBottom: false)
+        #expect(!ready)
+    }
+    for height in [600, 650, 700, 700, 700] {
+        let ready = restoration.observe(maxOffset: CGFloat(height), desiredOffset: 500, stickToBottom: false)
+        #expect(!ready)
+    }
+    let ready = restoration.observe(maxOffset: 700, desiredOffset: 500, stickToBottom: false)
+    #expect(ready)
+}
+
 @Test func conversationScrollMetricsIncludeInsetsAndClampToTheDocument() {
     let metrics = ConversationScrollPolicy.metrics(
         contentOffsetY: 480,

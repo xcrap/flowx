@@ -1,5 +1,17 @@
 import Testing
+import Foundation
 @testable import FXCore
+
+@Test func ordinaryAssistantFastPathPreservesWhitespaceAndNewlineRules() {
+    for source in ["  Hello\n\nWorld  ", "a\r\nb", "a\rb", "a\u{2028}b", "\n\t", "🐬 Olá\nAçores"] {
+        let expected = source.components(separatedBy: .newlines)
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let actual = TranscriptPresentationParser.assistantMessage(source)
+        #expect(actual.visibleText == expected)
+        #expect(actual.directives.isEmpty)
+    }
+}
 
 @Test func userAttachmentEnvelopePresentsOnlyTheRequest() {
     let source = """

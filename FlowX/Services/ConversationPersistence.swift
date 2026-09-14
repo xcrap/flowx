@@ -40,6 +40,7 @@ struct PersistedConversation: Codable, Sendable {
     var reportedContextWindow: Int?
     var activeGoal: ConversationGoal?
     var nativeImageSidecar: [NativeImageSidecarEntry]
+    var unsentPrompt: UnsentConversationPrompt?
 
     private enum CodingKeys: String, CodingKey {
         case agentID
@@ -56,6 +57,7 @@ struct PersistedConversation: Codable, Sendable {
         case reportedContextWindow
         case activeGoal
         case nativeImageSidecar
+        case unsentPrompt
     }
 
     init(
@@ -72,7 +74,8 @@ struct PersistedConversation: Codable, Sendable {
         currentContextTokens: Int?,
         reportedContextWindow: Int?,
         activeGoal: ConversationGoal?,
-        nativeImageSidecar: [NativeImageSidecarEntry]
+        nativeImageSidecar: [NativeImageSidecarEntry],
+        unsentPrompt: UnsentConversationPrompt? = nil
     ) {
         self.agentID = agentID
         self.sessionID = sessionID
@@ -88,6 +91,7 @@ struct PersistedConversation: Codable, Sendable {
         self.reportedContextWindow = reportedContextWindow
         self.activeGoal = activeGoal
         self.nativeImageSidecar = nativeImageSidecar
+        self.unsentPrompt = unsentPrompt
     }
 
     init(from decoder: Decoder) throws {
@@ -109,6 +113,7 @@ struct PersistedConversation: Codable, Sendable {
         currentContextTokens = try? container.decodeIfPresent(Int.self, forKey: .currentContextTokens)
         reportedContextWindow = try? container.decodeIfPresent(Int.self, forKey: .reportedContextWindow)
         activeGoal = try? container.decodeIfPresent(ConversationGoal.self, forKey: .activeGoal)
+        unsentPrompt = try container.decodeIfPresent(UnsentConversationPrompt.self, forKey: .unsentPrompt)
         nativeImageSidecar = (try? container.decode(
             [LossyConversationValue<NativeImageSidecarEntry>].self,
             forKey: .nativeImageSidecar
@@ -344,7 +349,8 @@ enum ConversationPersistence {
             currentContextTokens: state.currentContextTokens,
             reportedContextWindow: state.reportedContextWindow,
             activeGoal: state.activeGoal,
-            nativeImageSidecar: agent.nativeImageSidecar
+            nativeImageSidecar: agent.nativeImageSidecar,
+            unsentPrompt: state.unsentPrompt
         )
         let url = conversationFileURL(agentID: agent.id, projectID: projectID)
         writer.enqueue(
@@ -534,6 +540,10 @@ enum ConversationPersistence {
         state.currentContextTokens = conversation.currentContextTokens
         state.reportedContextWindow = conversation.reportedContextWindow
         state.activeGoal = conversation.activeGoal
+        if let unsentPrompt = conversation.unsentPrompt, unsentPrompt.sessionID == state.sessionID {
+            state.recoverUnsentPrompt(unsentPrompt)
+            state.setError(CodexThreadWriterConflict.message)
+        }
     }
 
     nonisolated fileprivate static func sanitizedConversation(

@@ -69,6 +69,15 @@ public enum TranscriptPresentationParser {
     }
 
     public static func assistantMessage(_ source: String) -> AssistantMessagePresentation {
+        // Most streamed responses contain no app directives. Avoid allocating,
+        // trimming and joining every line again on each streaming update. Keep
+        // the existing newline normalization for non-LF transport text.
+        if !requiresLineParsing(source) {
+            return AssistantMessagePresentation(
+                visibleText: source.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+
         var visibleLines: [String] = []
         var directives: [TranscriptDirective] = []
 
@@ -86,6 +95,25 @@ public enum TranscriptPresentationParser {
                 .trimmingCharacters(in: .whitespacesAndNewlines),
             directives: directives
         )
+    }
+
+    private static func requiresLineParsing(_ source: String) -> Bool {
+        var previousWasColon = false
+        for byte in source.utf8 {
+            if byte == 0x3A {
+                if previousWasColon { return true }
+                previousWasColon = true
+            } else {
+                previousWasColon = false
+                // CR, VT, FF, and leading bytes for NEL/Unicode line separators.
+                // Non-newline characters with these prefixes safely use the
+                // general parser too; LF and other UTF-8 text stay allocation-free.
+                if byte == 0x0D || byte == 0x0B || byte == 0x0C || byte == 0xC2 || byte == 0xE2 {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     private static func firstRange(

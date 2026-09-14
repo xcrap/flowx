@@ -8,6 +8,8 @@ import FXCore
 /// native history import must never turn transcript rendering into network or
 /// arbitrary-resource access.
 enum ProviderNativeImageImporter {
+    private static let localCache = NativeLocalImageCache()
+    static var localCacheRevision: UInt64 { localCache.revision }
     static let maximumImageBytes = ProviderAttachmentStore.maximumAttachmentBytes
     static let maximumTranscriptImageBytes = ProviderAttachmentStore.maximumTotalBytes
 
@@ -62,6 +64,21 @@ enum ProviderNativeImageImporter {
         return validatedContent(
             data: data,
             declaredMIMEType: nil,
+            remainingBytes: &remainingBytes
+        )
+    }
+
+    static func cachedLocalFile(atPath path: String, remainingBytes: inout Int) -> MessageContent? {
+        guard !path.isEmpty, path.utf8.count <= maximumPathBytes,
+              path.first == "/", !path.contains("\0"),
+              !NSString(string: path).pathComponents.contains("..") else { return nil }
+        let url = URL(fileURLWithPath: path)
+        guard let values = try? url.resourceValues(forKeys: [
+            .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey
+        ]), values.isRegularFile == true, values.isSymbolicLink != true,
+              let size = values.fileSize, size <= maximumImageBytes else { return nil }
+        return localCache.content(
+            for: .init(path: path, size: size, modifiedAt: values.contentModificationDate ?? .distantPast),
             remainingBytes: &remainingBytes
         )
     }
