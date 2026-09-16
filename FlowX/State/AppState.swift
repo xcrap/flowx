@@ -288,14 +288,19 @@ final class AgentInfo: Identifiable {
     var workspace: WorkspaceState
     var nativeThreadBinding: NativeThreadBinding?
     var nativeImageSidecar: [NativeImageSidecarEntry]
-    var isLoadingNativeTranscript = false
-    var nativeTranscriptError: String?
-    var nativeTranscriptLoadedAt: Date?
-    @ObservationIgnored var nativeTranscriptRevision: String?
-    @ObservationIgnored var nativeTranscriptRetryAt: Date?
+    let nativeTranscriptRefresh = NativeTranscriptRefreshState()
+    @ObservationIgnored private(set) var hasHydratedNativeCache = false
+    var isLoadingNativeTranscript: Bool { nativeTranscriptRefresh.isLoading }
+    var nativeTranscriptError: String? { nativeTranscriptRefresh.error }
+    var nativeTranscriptLoadedAt: Date? { nativeTranscriptRefresh.loadedAt }
+    var nativeTranscriptRevision: String? { nativeTranscriptRefresh.revision }
     /// Ephemeral attention state: completed work is only called out until the
     /// user opens that thread. Historical provider threads stay visually quiet.
     var hasUnseenCompletion = false
+
+    func markNativeCacheHydrated() {
+        hasHydratedNativeCache = true
+    }
 
     var onChange: (() -> Void)?
     init(
@@ -1084,6 +1089,8 @@ final class AppState {
     @ObservationIgnored private var pendingNativeWorkspaceSyncRequest: NativeWorkspaceSyncRequest?
     @ObservationIgnored private var nativeSyncingProjectIDs: Set<UUID> = []
     private var nativeActiveProjectPollingTask: Task<Void, Never>?
+    @ObservationIgnored private var nativeArchiveRevisions: [String: String] = [:]
+    @ObservationIgnored private var lastNativeIndexRefreshAt: Date?
     @ObservationIgnored private var selectedNativeTranscriptPollingTask: Task<Void, Never>?
     private var nativeTranscriptTasks: [UUID: Task<Void, Never>] = [:]
     private var nativeTranscriptLoadIDs: [UUID: UUID] = [:]
@@ -1094,7 +1101,7 @@ final class AppState {
     private var prunedNativePresentations: [UUID: [NativeThreadIdentity: AgentInfo]] = [:]
     private var isShuttingDown = false
 
-    nonisolated private static let maximumAttachmentBytes = 20 * 1_024 * 1_024
+    private static let attachmentPreparationExecutor = BoundedTaskExecutor(maxConcurrentTasks: 2)
     nonisolated private static let maximumPendingAttachmentBytes = 50 * 1_024 * 1_024
     nonisolated private static let maximumPendingAttachmentCount = 10
     nonisolated private static let maximumPrunedNativePresentationsPerProject = 32
@@ -1412,7 +1419,7 @@ final class AppState {
         guard canRenameNativeThread(agent) else {
             return "This provider task cannot be renamed."
         }
-        if project.isSyncingNativeThreads {
+        if project.isSyncingNativeThreads || nativeSyncingProjectIDs.contains(project.id) {
             return "Wait for provider task refresh to finish, then try again."
         }
         if threadLifecycleAgentIDs.contains(agent.id) {
@@ -1428,7 +1435,7 @@ final class AppState {
         if agent.nativeThreadBinding?.status?.lowercased() == "active" {
             return "This task is currently running in Codex. Stop it before managing it."
         }
-        if project.isSyncingNativeThreads {
+        if project.isSyncingNativeThreads || nativeSyncingProjectIDs.contains(project.id) {
             return "Wait for provider task refresh to finish, then try again."
         }
         if threadLifecycleAgentIDs.contains(agent.id) {
@@ -1512,7 +1519,7 @@ final class AppState {
             project.threadLifecycleNoticeIsError = true
             return
         }
-        guard !project.isSyncingNativeThreads,
+        guard !project.isSyncingNativeThreads, !nativeSyncingProjectIDs.contains(project.id),
               !archivedThreadLifecycleIdentities.contains(identity) else {
             project.threadLifecycleNotice = "Wait for the current task action to finish, then try again."
             project.threadLifecycleNoticeIsError = true
@@ -1553,7 +1560,7 @@ final class AppState {
             project.threadLifecycleNoticeIsError = true
             return
         }
-        guard !project.isSyncingNativeThreads else {
+        guard !project.isSyncingNativeThreads, !nativeSyncingProjectIDs.contains(project.id) else {
             project.threadLifecycleNotice = "Wait for provider task refresh to finish, then try again."
             project.threadLifecycleNoticeIsError = true
             return
@@ -1586,7 +1593,7 @@ final class AppState {
         name: String
     ) async {
         guard let project = projects.first(where: { $0.id == request.projectID }),
-              !project.isSyncingNativeThreads,
+              !project.isSyncingNativeThreads, !nativeSyncingProjectIDs.contains(project.id),
               let provider = providerRegistry.provider(for: request.providerIdentity.providerID)
                 as? any AIProviderNativeThreadRenaming else {
             return
@@ -1657,7 +1664,7 @@ final class AppState {
         let identity = binding.identity
         let projectID = project.id
         guard projects.contains(where: { $0.id == project.id }) else { return }
-        guard !project.isSyncingNativeThreads else {
+        guard !project.isSyncingNativeThreads, !nativeSyncingProjectIDs.contains(project.id) else {
             project.threadLifecycleNotice = "Wait for provider task refresh to finish, then restore the task."
             project.threadLifecycleNoticeIsError = true
             return
@@ -1694,7 +1701,7 @@ final class AppState {
         guard let project = projects.first(where: { $0.id == confirmation.projectID }) else {
             return
         }
-        guard !project.isSyncingNativeThreads else {
+        guard !project.isSyncingNativeThreads, !nativeSyncingProjectIDs.contains(project.id) else {
             project.threadLifecycleNotice = "The task list changed while confirmation was open. Refresh completed actions and try again."
             project.threadLifecycleNoticeIsError = true
             return
@@ -2027,14 +2034,23 @@ final class AppState {
         }
         let existingCount = agent.conversationState.pendingAttachments.count
 
-        let result = await Task.detached(priority: .userInitiated) {
-            Self.loadAttachments(
-                from: urls,
-                existingBytes: existingBytes,
-                existingCount: existingCount,
-                supportedKinds: supportedKinds
-            )
-        }.value
+        agent.conversationState.attachmentPreparationCount += 1
+        defer { agent.conversationState.attachmentPreparationCount -= 1 }
+        let result: AttachmentLoadResult
+        do {
+            result = try await Self.attachmentPreparationExecutor.run(priority: .userInitiated) {
+                Self.loadAttachments(
+                    from: urls,
+                    existingBytes: existingBytes,
+                    existingCount: existingCount,
+                    supportedKinds: supportedKinds
+                )
+            }
+        } catch is CancellationError {
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
         guard project(for: agent.id) != nil else { return nil }
         return applyLoadedAttachments(result, to: agent)
     }
@@ -2047,17 +2063,19 @@ final class AppState {
         guard !data.isEmpty else {
             return "The pasted image is empty."
         }
-        guard data.count <= Self.maximumAttachmentBytes else {
-            return "The pasted image exceeds the 20 MB per-file limit."
+        agent.conversationState.attachmentPreparationCount += 1
+        defer { agent.conversationState.attachmentPreparationCount -= 1 }
+        do {
+            let attachment = try await Self.attachmentPreparationExecutor.run(priority: .userInitiated) {
+                try AttachmentImagePreparer.prepare(Attachment(data: data, mimeType: mimeType, filename: filename))
+            }
+            guard project(for: agent.id) != nil else { return nil }
+            return applyLoadedAttachments(AttachmentLoadResult(attachments: [attachment], errors: []), to: agent)
+        } catch is CancellationError {
+            return nil
+        } catch {
+            return error.localizedDescription
         }
-
-        return applyLoadedAttachments(
-            AttachmentLoadResult(
-                attachments: [Attachment(data: data, mimeType: mimeType, filename: filename)],
-                errors: []
-            ),
-            to: agent
-        )
     }
 
     private func supportedAttachmentKinds(for agent: AgentInfo) -> Set<ProviderAttachmentKind> {
@@ -2086,7 +2104,7 @@ final class AppState {
         for agent: AgentInfo,
         followUpMode: PromptFollowUpMode? = nil
     ) {
-        guard !isSubmittingSteer(for: agent.id) else { return }
+        guard !isSubmittingSteer(for: agent.id), !agent.conversationState.isPreparingAttachments else { return }
         let prompt = agent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         let attachments = agent.conversationState.pendingAttachments
         guard !prompt.isEmpty || !attachments.isEmpty else { return }
@@ -2415,14 +2433,44 @@ final class AppState {
         nativeActiveProjectPollingTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 do {
-                    try await Task.sleep(for: .seconds(60))
+                    try await Task.sleep(for: .seconds(2))
                 } catch {
                     return
                 }
-                guard !Task.isCancelled, NSApplication.shared.isActive else { continue }
-                self?.refreshActiveNativeThreadsIfIdle()
+                guard !Task.isCancelled else { return }
+                await self?.refreshNativeThreadIndexIfChanged()
             }
         }
+    }
+
+    private var hasVisibleWindow: Bool {
+        NSApplication.shared.windows.contains {
+            $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible)
+        }
+    }
+
+    private func refreshNativeThreadIndexIfChanged() async {
+        guard isBootstrapped, !isShuttingDown, hasVisibleWindow else { return }
+        var archiveChanged = false
+        for provider in providerRegistry.allProviders {
+            guard runtimeHealth[provider.id]?.isUsable != false,
+                  let archiving = provider as? any AIProviderNativeThreadArchiving else { continue }
+            if let revision = await archiving.nativeThreadArchiveRevision() {
+                if nativeArchiveRevisions[provider.id] != revision { archiveChanged = true }
+                nativeArchiveRevisions[provider.id] = revision
+            }
+        }
+        guard !Task.isCancelled, !isShuttingDown, hasVisibleWindow else { return }
+        // Reconcile every project on archive changes. A bounded fallback also
+        // discovers new tasks and supports runtimes without storage revisions.
+        let fallbackDue = lastNativeIndexRefreshAt.map { Date().timeIntervalSince($0) >= 30 } ?? true
+        guard archiveChanged || fallbackDue else { return }
+        lastNativeIndexRefreshAt = Date()
+        scheduleNativeThreadSynchronization(
+            prioritizing: activeProjectID,
+            includeAllProjects: true,
+            repeatActiveProjects: archiveChanged
+        )
     }
 
     private func startSelectedNativeTranscriptPolling() {
@@ -2443,12 +2491,10 @@ final class AppState {
         // Visible side-by-side windows must keep updating even while Codex is
         // the foreground app. Hidden/minimized FlowX windows do no polling.
         guard isBootstrapped, !isShuttingDown,
-              NSApplication.shared.windows.contains(where: {
-                  $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible)
-              }),
+              hasVisibleWindow,
               let project = activeProject, let agent = activeAgent,
               !agent.conversationState.isStreaming,
-              agent.nativeTranscriptRetryAt.map({ $0 <= Date() }) ?? true,
+              agent.nativeTranscriptRefresh.canRetry(),
               nativeTranscriptTasks[agent.id] == nil,
               let binding = agent.nativeThreadBinding,
               let provider = providerRegistry.provider(for: binding.identity.providerID)
@@ -2468,13 +2514,13 @@ final class AppState {
 
     private func refreshActiveNativeThreadsIfIdle() {
         guard isBootstrapped,
-              NSApplication.shared.isActive,
-              let project = activeProject else {
+              !isShuttingDown else {
             return
         }
+        lastNativeIndexRefreshAt = Date()
         scheduleNativeThreadSynchronization(
-            prioritizing: project.id,
-            includeAllProjects: false
+            prioritizing: activeProjectID,
+            includeAllProjects: true
         )
     }
 
@@ -2494,7 +2540,8 @@ final class AppState {
         prioritizing projectID: UUID?,
         includeAllProjects: Bool,
         forceTranscriptRefresh: Bool = false,
-        discoveryMode: ProviderNativeThreadDiscoveryMode = .indexed
+        discoveryMode: ProviderNativeThreadDiscoveryMode = .indexed,
+        repeatActiveProjects: Bool = false
     ) {
         var projectIDs: [UUID] = []
         if let projectID, projects.contains(where: { $0.id == projectID }) {
@@ -2513,7 +2560,7 @@ final class AppState {
         if let activeRequest = activeNativeWorkspaceSyncRequest {
             let upgradesActiveRequest = forceTranscriptRefresh && !activeRequest.forceTranscriptRefresh
                 || discoveryMode == .repair && activeRequest.discoveryMode != .repair
-            if !upgradesActiveRequest {
+            if !upgradesActiveRequest && !repeatActiveProjects {
                 request.projectIDs.removeAll { activeRequest.projectIDs.contains($0) }
             }
             guard !request.projectIDs.isEmpty else { return }
@@ -2559,7 +2606,11 @@ final class AppState {
         discoveryMode: ProviderNativeThreadDiscoveryMode
     ) async {
         guard let project = projects.first(where: { $0.id == projectID }),
-              !nativeSyncingProjectIDs.contains(projectID) else {
+              !nativeSyncingProjectIDs.contains(projectID),
+              !project.agents.contains(where: { threadLifecycleAgentIDs.contains($0.id) }),
+              !project.archivedNativeThreadBindings.contains(where: {
+                  archivedThreadLifecycleIdentities.contains($0.identity)
+              }) else {
             return
         }
         nativeSyncingProjectIDs.insert(projectID)
@@ -2664,7 +2715,10 @@ final class AppState {
             return
         }
 
-        let orderedBindings = bindingsByIdentity.values.sorted {
+        let confirmedArchivedIdentities = Set(archivedBindingsByIdentity.keys)
+        let orderedBindings = bindingsByIdentity.values.filter {
+            !confirmedArchivedIdentities.contains($0.identity)
+        }.sorted {
             if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
             return Self.nativeIdentitySortKey($0.identity) < Self.nativeIdentitySortKey($1.identity)
         }
@@ -2673,7 +2727,8 @@ final class AppState {
         // clears that provider's archived tasks as expected.
         for binding in currentProject.archivedNativeThreadBindings
             where !successfullyListedArchivedProviderIDs.contains(binding.identity.providerID) {
-            if archivedBindingsByIdentity[binding.identity] == nil {
+            if archivedBindingsByIdentity[binding.identity] == nil,
+               bindingsByIdentity[binding.identity] == nil {
                 archivedBindingsByIdentity[binding.identity] = binding
             }
         }
@@ -2687,6 +2742,7 @@ final class AppState {
         await mergeNativeBindings(
             orderedBindings,
             successfullyListedProviderIDs: successfullyListedProviderIDs,
+            confirmedArchivedIdentities: confirmedArchivedIdentities,
             into: currentProject
         )
         let resolvedSyncError = errors.isEmpty ? nil : errors.joined(separator: "\n")
@@ -2719,12 +2775,14 @@ final class AppState {
     private func mergeNativeBindings(
         _ bindings: [NativeThreadBinding],
         successfullyListedProviderIDs: Set<String>,
+        confirmedArchivedIdentities: Set<NativeThreadIdentity>,
         into project: ProjectState
     ) async {
         removeStaleNativeAgents(
             from: project,
             retaining: Set(bindings.map(\.identity)),
-            successfullyListedProviderIDs: successfullyListedProviderIDs
+            successfullyListedProviderIDs: successfullyListedProviderIDs,
+            confirmedArchivedIdentities: confirmedArchivedIdentities
         )
 
         var agentsByIdentity: [NativeThreadIdentity: AgentInfo] = [:]
@@ -2908,7 +2966,8 @@ final class AppState {
     private func removeStaleNativeAgents(
         from project: ProjectState,
         retaining currentIdentities: Set<NativeThreadIdentity>,
-        successfullyListedProviderIDs: Set<String>
+        successfullyListedProviderIDs: Set<String>,
+        confirmedArchivedIdentities: Set<NativeThreadIdentity>
     ) {
         let visibleIdentities = project.agents.compactMap { $0.nativeThreadBinding?.identity }
         let streamingIdentities: Set<NativeThreadIdentity> = Set(project.agents.compactMap { agent -> NativeThreadIdentity? in
@@ -2926,6 +2985,7 @@ final class AppState {
             returnedIdentities: currentIdentities,
             successfullyListedProviders: successfullyListedProviderIDs,
             protectedIdentities: protectedIdentities,
+            confirmedArchivedIdentities: confirmedArchivedIdentities,
             providerID: \.providerID
         )
         let staleAgents: [AgentInfo] = project.agents.filter { agent in
@@ -2960,7 +3020,7 @@ final class AppState {
 
     private func cachePrunedNativePresentation(_ agent: AgentInfo, projectID: UUID) {
         guard let identity = agent.nativeThreadBinding?.identity else { return }
-        agent.isLoadingNativeTranscript = false
+        agent.nativeTranscriptRefresh.cancel()
         for terminal in agent.terminalSessions {
             terminal.shutdown()
         }
@@ -3035,14 +3095,14 @@ final class AppState {
             return
         }
         guard nativeTranscriptTasks[agent.id] == nil else { return }
-        if !force,
-           let loadedAt = agent.nativeTranscriptLoadedAt,
-           loadedAt >= binding.updatedAt {
-            return
+        if !force {
+            guard agent.nativeTranscriptRefresh.canRetry() else { return }
+            if let loadedAt = agent.nativeTranscriptLoadedAt, loadedAt >= binding.updatedAt {
+                return
+            }
         }
 
-        agent.isLoadingNativeTranscript = agent.conversationState.messages.isEmpty
-        agent.nativeTranscriptError = nil
+        agent.nativeTranscriptRefresh.begin(hasMessages: !agent.conversationState.messages.isEmpty)
         let agentID = agent.id
         let projectID = project.id
         let loadID = UUID()
@@ -3056,11 +3116,11 @@ final class AppState {
                     nativeTranscriptLoadIDs[agentID] = nil
                     projects.first(where: { $0.id == projectID })?
                         .agents.first(where: { $0.id == agentID })?
-                        .isLoadingNativeTranscript = false
+                        .nativeTranscriptRefresh.cancel()
                 }
             }
             do {
-                let cachedConversation = agent.nativeTranscriptLoadedAt == nil
+                let cachedConversation = !agent.hasHydratedNativeCache
                     ? await ConversationPersistence.load(agentIDs: [agentID], for: projectID)[agentID]
                     : nil
                 guard !Task.isCancelled,
@@ -3071,6 +3131,9 @@ final class AppState {
                       cachedAgent.nativeThreadBinding?.identity == binding.identity else {
                     return
                 }
+                // Cache hydration is independent of provider read success. A
+                // missing native file must not reload images/JSON on each retry.
+                cachedAgent.markNativeCacheHydrated()
                 if let cachedConversation,
                    cachedConversation.sessionID == binding.identity.sessionID {
                     if cachedAgent.conversationState.messages.isEmpty {
@@ -3130,11 +3193,7 @@ final class AppState {
                 currentAgent.conversationState.sessionID = refreshedBinding.identity.sessionID
                 currentAgent.conversationState.activeProviderID = refreshedBinding.identity.providerID
                 currentAgent.conversationState.activeModelID = effectiveConfiguration(for: currentAgent).modelID
-                currentAgent.nativeTranscriptLoadedAt = readStartedAt
-                currentAgent.nativeTranscriptRevision = revision
-                currentAgent.nativeTranscriptRetryAt = nil
-                currentAgent.nativeTranscriptError = nil
-                currentAgent.isLoadingNativeTranscript = false
+                currentAgent.nativeTranscriptRefresh.succeed(revision: revision, loadedAt: readStartedAt)
                 currentAgent.syncExecutionStateFromConversation()
                 if messagesChanged || bindingChanged {
                     ConversationPersistence.save(agent: currentAgent, projectID: projectID)
@@ -3148,9 +3207,7 @@ final class AppState {
                       let currentAgent = currentProject.agents.first(where: { $0.id == agentID }) else {
                     return
                 }
-                currentAgent.isLoadingNativeTranscript = false
-                currentAgent.nativeTranscriptError = error.localizedDescription
-                currentAgent.nativeTranscriptRetryAt = Date().addingTimeInterval(5)
+                currentAgent.nativeTranscriptRefresh.fail(error.localizedDescription)
             }
         }
     }
@@ -3161,7 +3218,7 @@ final class AppState {
             nativeTranscriptTasks[agentID] = nil
             nativeTranscriptLoadIDs[agentID] = nil
             project(for: agentID)?.agents.first(where: { $0.id == agentID })?
-                .isLoadingNativeTranscript = false
+                .nativeTranscriptRefresh.cancel()
         }
     }
 
@@ -3702,6 +3759,7 @@ final class AppState {
     }
 
     private func preflightPromptDispatch(for agent: AgentInfo) -> ProjectState? {
+        guard !agent.conversationState.isPreparingAttachments else { return nil }
         guard let project = project(for: agent.id) else { return nil }
         guard runtimeHealth[agent.providerID]?.isUsable == true else {
             let isChecking = runtimeHealth[agent.providerID] == .checking
@@ -3915,38 +3973,21 @@ final class AppState {
                 errors.append("Only \(maximumPendingAttachmentCount) attachments can be queued at once.")
                 break
             }
-            guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
-                  values.isRegularFile == true,
-                  let fileSize = values.fileSize,
-                  fileSize > 0 else {
-                errors.append("\(filename) is empty or unreadable.")
-                continue
-            }
-            guard fileSize <= maximumAttachmentBytes else {
-                errors.append("\(filename) exceeds the 20 MB per-file limit.")
-                continue
-            }
-            guard totalBytes + fileSize <= maximumPendingAttachmentBytes else {
-                errors.append("Attachments cannot exceed 50 MB in total.")
-                break
-            }
-
             do {
-                let data = try Data(contentsOf: url)
-                guard !data.isEmpty else {
-                    errors.append("\(filename) is empty.")
-                    continue
+                let attachment = try autoreleasepool {
+                    try AttachmentImagePreparer.prepare(fileURL: url)
                 }
-                guard data.count <= maximumAttachmentBytes,
-                      totalBytes + data.count <= maximumPendingAttachmentBytes else {
-                    errors.append("\(filename) exceeds the attachment size limit.")
-                    continue
+                guard totalBytes + attachment.data.count <= maximumPendingAttachmentBytes else {
+                    errors.append("Attachments cannot exceed 50 MB in total.")
+                    break
                 }
-                attachments.append(Attachment(data: data, mimeType: mimeType, filename: filename))
-                totalBytes += data.count
+                attachments.append(attachment)
+                totalBytes += attachment.data.count
                 totalCount += 1
+            } catch is CancellationError {
+                break
             } catch {
-                errors.append("\(filename) could not be read.")
+                errors.append(error.localizedDescription)
             }
         }
 

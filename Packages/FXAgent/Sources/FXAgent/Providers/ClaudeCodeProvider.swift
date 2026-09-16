@@ -732,7 +732,7 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
                 processReference.stop()
             },
             steer: { prompt, attachments in
-                let prepared = try ProviderAttachmentStore.prepare(attachments)
+                let prepared = try await ProviderAttachmentStore.prepareForSending(attachments)
                 defer { prepared.remove() }
                 try controller.sendFollowUpPrompt(prompt, imageFiles: prepared.files)
             },
@@ -864,7 +864,7 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
         if let resumedSessionID {
             try await ensureSessionIsNotActiveElsewhere(resumedSessionID)
         }
-        let prepared = try ProviderAttachmentStore.prepare(attachments)
+        let prepared = try await ProviderAttachmentStore.prepareForSending(attachments)
         defer { prepared.remove() }
 
         let process = Process()

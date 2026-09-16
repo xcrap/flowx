@@ -68,6 +68,19 @@ struct ChatInputBar: View {
                     .allowsHitTesting(!isSubmittingSteer)
                 }
 
+                if agent.conversationState.isPreparingAttachments {
+                    HStack(spacing: FXSpacing.sm) {
+                        ProgressView().controlSize(.mini)
+                        Text("Preparing images…")
+                            .font(FXTypography.caption)
+                            .foregroundStyle(FXColors.fgSecondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, FXSpacing.lg)
+                    .padding(.bottom, FXSpacing.sm)
+                    .accessibilityLabel("Preparing images")
+                }
+
                 if let attachmentFeedback {
                     Label(attachmentFeedback, systemImage: "exclamationmark.circle.fill")
                         .font(FXTypography.caption)
@@ -175,6 +188,7 @@ struct ChatInputBar: View {
                         (composerAction == .send && !hasDraftInput)
                             || hasUnsupportedAttachments
                             || isSubmittingSteer
+                            || (composerAction != .cancel && agent.conversationState.isPreparingAttachments)
                     )
                     .help(composerHelpText)
                     .accessibilityLabel(composerAccessibilityLabel)

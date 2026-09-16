@@ -1,6 +1,4 @@
 import Foundation
-import ImageIO
-import UniformTypeIdentifiers
 import FXCore
 
 struct PreparedProviderAttachments: Sendable {
@@ -45,9 +43,15 @@ enum ProviderAttachmentStore {
     static let maximumAttachmentCount = 10
     static let maximumAttachmentBytes = 25 * 1_024 * 1_024
     static let maximumTotalBytes = 50 * 1_024 * 1_024
+    // Existing provider transcripts may contain larger, unoptimized images.
     static let maximumPixelCount = 50_000_000
     static let maximumPixelDimension = 16_384
-    static let convertedMaximumPixelDimension = 2_048
+    private static let preparationExecutor = BoundedTaskExecutor(maxConcurrentTasks: 2)
+
+    static func prepareForSending(_ attachments: [Attachment]) async throws -> PreparedProviderAttachments {
+        guard !attachments.isEmpty else { return .empty }
+        return try await preparationExecutor.run(priority: .userInitiated) { try prepare(attachments) }
+    }
 
     static func prepare(_ attachments: [Attachment]) throws -> PreparedProviderAttachments {
         guard !attachments.isEmpty else { return .empty }
@@ -55,19 +59,8 @@ enum ProviderAttachmentStore {
             throw ProviderAttachmentError.tooMany(maximumAttachmentCount)
         }
 
-        var totalBytes = 0
-        for attachment in attachments {
-            guard attachment.isImage else {
-                throw ProviderAttachmentError.unsupported(attachment.filename)
-            }
-            guard attachment.data.count <= maximumAttachmentBytes else {
-                throw ProviderAttachmentError.tooLarge(attachment.filename)
-            }
-            let (newTotal, overflow) = totalBytes.addingReportingOverflow(attachment.data.count)
-            guard !overflow, newTotal <= maximumTotalBytes else {
-                throw ProviderAttachmentError.totalTooLarge
-            }
-            totalBytes = newTotal
+        for attachment in attachments where !attachment.isImage {
+            throw ProviderAttachmentError.unsupported(attachment.filename)
         }
 
         let manager = FileManager.default
@@ -111,36 +104,8 @@ enum ProviderAttachmentStore {
     }
 
     private static func write(_ attachment: Attachment, index: Int, to directory: URL) throws -> URL {
-        guard let source = CGImageSourceCreateWithData(
-            attachment.data as CFData,
-            [kCGImageSourceShouldCache: false] as CFDictionary
-        ), CGImageSourceGetCount(source) > 0,
-        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-        let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
-        let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
-        width > 0, height > 0,
-        width <= maximumPixelDimension, height <= maximumPixelDimension,
-        width <= maximumPixelCount / height else {
-            throw ProviderAttachmentError.invalidImage(attachment.filename)
-        }
-
-        let mimeType = attachment.mimeType.lowercased()
-        let output: (data: Data, extension: String)
-        switch mimeType {
-        case "image/jpeg", "image/jpg":
-            output = (attachment.data, "jpg")
-        case "image/png":
-            output = (attachment.data, "png")
-        case "image/webp":
-            output = (attachment.data, "webp")
-        case "image/gif", "image/heic", "image/heif", "image/tiff", "image/bmp", "image/x-bmp":
-            // Provider image inputs are static. Animated GIFs are deliberately
-            // flattened to their first frame, and less portable formats are
-            // normalized to PNG before either CLI sees them.
-            output = (try pngData(from: source, filename: attachment.filename), "png")
-        default:
-            throw ProviderAttachmentError.unsupported(attachment.filename)
-        }
+        let prepared = try AttachmentImagePreparer.prepare(attachment)
+        let output = (data: prepared.data, extension: (prepared.filename as NSString).pathExtension)
 
         let url = directory.appendingPathComponent(String(format: "%02d-%@.%@", index, attachment.id.uuidString, output.extension))
         do {
@@ -152,38 +117,4 @@ enum ProviderAttachmentStore {
         return url
     }
 
-    private static func pngData(from source: CGImageSource, filename: String) throws -> Data {
-        let thumbnailOptions: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: convertedMaximumPixelDimension,
-            kCGImageSourceShouldCacheImmediately: false,
-        ]
-        guard let image = CGImageSourceCreateThumbnailAtIndex(
-            source,
-            0,
-            thumbnailOptions as CFDictionary
-        ) else {
-            throw ProviderAttachmentError.invalidImage(filename)
-        }
-
-        let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(
-            data,
-            UTType.png.identifier as CFString,
-            1,
-            nil
-        ) else {
-            throw ProviderAttachmentError.invalidImage(filename)
-        }
-        CGImageDestinationAddImage(destination, image, nil)
-        guard CGImageDestinationFinalize(destination) else {
-            throw ProviderAttachmentError.invalidImage(filename)
-        }
-        let result = data as Data
-        guard result.count <= maximumAttachmentBytes else {
-            throw ProviderAttachmentError.tooLarge(filename)
-        }
-        return result
-    }
 }

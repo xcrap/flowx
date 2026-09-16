@@ -180,6 +180,44 @@ import Testing
     #expect(retained == ["active-a", "active-b", "recent-a", "recent-b"])
 }
 
+@Test func confirmedArchiveOverridesSelectionAndRacingActiveList() {
+    let removed = NativeProjectionPolicy.identitiesToRemove(
+        visibleIdentities: ["selected", "running", "unchanged"],
+        returnedIdentities: ["selected", "unchanged"],
+        successfullyListedProviders: ["codex"],
+        protectedIdentities: ["selected", "running"],
+        confirmedArchivedIdentities: ["selected"],
+        providerID: { _ in "codex" }
+    )
+    #expect(removed == ["selected"])
+}
+
+@Test func confirmedArchiveWorksDuringActiveListFailureWithoutCrossingProviders() {
+    struct Identity: Hashable {
+        var provider: String
+        var session: String
+    }
+    let codex = Identity(provider: "codex", session: "shared")
+    let claude = Identity(provider: "claude", session: "shared")
+    let removed = NativeProjectionPolicy.identitiesToRemove(
+        visibleIdentities: [codex, claude],
+        returnedIdentities: [],
+        successfullyListedProviders: Set<String>(),
+        protectedIdentities: [codex, claude],
+        confirmedArchivedIdentities: [codex],
+        providerID: \.provider
+    )
+    #expect(removed == [codex])
+    // A restored task and a transient provider error must both remain visible.
+    let restored = NativeProjectionPolicy.identitiesToRemove(
+        visibleIdentities: [codex, claude],
+        returnedIdentities: [codex],
+        successfullyListedProviders: ["codex"],
+        providerID: \.provider
+    )
+    #expect(restored.isEmpty)
+}
+
 @Test func imageMaterializationIsIndependentOfNativeTranscriptCacheWindow() {
     let imagePrompt = ConversationMessage(
         role: .user,

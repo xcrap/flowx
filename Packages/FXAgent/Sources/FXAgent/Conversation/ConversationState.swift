@@ -41,6 +41,8 @@ public final class ConversationState {
     public var pendingToolApprovals: [ToolApprovalRequest] = []
     public var pendingUserInputRequests: [ProviderUserInputRequest] = []
     public var pendingAttachments: [Attachment] = []
+    public var attachmentPreparationCount = 0
+    public var isPreparingAttachments: Bool { attachmentPreparationCount > 0 }
 
     public init(agentID: UUID) {
         self.agentID = agentID

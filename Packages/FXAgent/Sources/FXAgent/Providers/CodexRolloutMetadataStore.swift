@@ -789,6 +789,24 @@ struct CodexRolloutMetadataStore {
         }
     }
 
+    /// Archive/unarchive moves rollouts into/out of this flat directory. Stat
+    /// its metadata rather than enumerating files or watching the busy WAL.
+    func archiveRevision() -> String? {
+        let directory = sessionsRoot.deletingLastPathComponent()
+            .appendingPathComponent("archived_sessions", isDirectory: true)
+        do {
+            let attributes = try fileManager.attributesOfItem(atPath: directory.path)
+            guard attributes[.type] as? FileAttributeType == .typeDirectory,
+                  let modified = attributes[.modificationDate] as? Date else { return nil }
+            return "\(directory.path):\(attributes[.systemFileNumber] ?? ""):" +
+                "\(modified.timeIntervalSince1970):\(attributes[.size] ?? "")"
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return "\(directory.path):missing"
+        } catch {
+            return nil
+        }
+    }
+
     private static func defaultSessionsRoot() -> URL {
         let environment = ProcessInfo.processInfo.environment
         let root: URL

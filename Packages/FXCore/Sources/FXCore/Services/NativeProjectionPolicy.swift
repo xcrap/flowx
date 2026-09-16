@@ -10,10 +10,15 @@ public enum NativeProjectionPolicy {
         returnedIdentities: Set<Identity>,
         successfullyListedProviders: Set<ProviderID>,
         protectedIdentities: Set<Identity> = [],
+        confirmedArchivedIdentities: Set<Identity> = [],
         providerID: (Identity) -> ProviderID
     ) -> Set<Identity> {
         Set(visibleIdentities.filter { identity in
-            successfullyListedProviders.contains(providerID(identity))
+            // Explicit archive evidence is stronger than selection protection
+            // or a racing active list. Absence alone still preserves drafts
+            // and running/selected tasks outside a capped listing.
+            confirmedArchivedIdentities.contains(identity)
+                || successfullyListedProviders.contains(providerID(identity))
                 && !returnedIdentities.contains(identity)
                 && !protectedIdentities.contains(identity)
         })

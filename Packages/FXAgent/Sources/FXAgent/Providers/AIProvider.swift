@@ -543,6 +543,10 @@ public protocol AIProviderNativeThreadRenaming: AIProvider {
 /// Provider-native archive support. Archive and unarchive must be real
 /// provider operations; FlowX must not present a local hide as provider state.
 public protocol AIProviderNativeThreadArchiving: AIProvider {
+    /// Cheap archive-store fingerprint. Used only to invalidate lists, never
+    /// as evidence that any particular task is archived. Nil uses timed refresh.
+    func nativeThreadArchiveRevision() async -> String?
+
     func listArchivedNativeThreads(
         workingDirectory: URL,
         limit: Int
@@ -557,6 +561,10 @@ public protocol AIProviderNativeThreadArchiving: AIProvider {
         id: String,
         workingDirectory: URL
     ) async throws
+}
+
+public extension AIProviderNativeThreadArchiving {
+    func nativeThreadArchiveRevision() async -> String? { nil }
 }
 
 /// Provider-native irreversible deletion. This capability is intentionally

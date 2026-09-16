@@ -898,7 +898,7 @@ private actor CleanupInvocationCounter {
         archived: true
     )
     #expect(archived["archived"] as? Bool == true)
-    #expect(indexed["archived"] == nil)
+    #expect(indexed["archived"] as? Bool == false)
 }
 
 @Test func codexControlRPCsHaveBoundedTimeouts() {

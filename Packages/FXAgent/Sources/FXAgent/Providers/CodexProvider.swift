@@ -388,10 +388,8 @@ private actor CodexSession {
             "sortKey": "recency_at",
             "sortDirection": "desc",
             "useStateDbOnly": discoveryMode == .indexed,
+            "archived": archived,
         ]
-        if archived {
-            params["archived"] = true
-        }
         if let cursor, !cursor.isEmpty { params["cursor"] = cursor }
         return params
     }
@@ -516,6 +514,10 @@ private actor CodexSession {
         }
     }
 
+    func nativeThreadArchiveRevision() -> String? {
+        rolloutMetadataStore.archiveRevision()
+    }
+
     func readNativeThread(
         id: String,
         workingDirectory: URL?
@@ -631,9 +633,11 @@ private actor CodexSession {
         continuation: AsyncThrowingStream<StreamEvent, Error>.Continuation
     ) async throws -> String {
         try Task.checkCancellation()
-        guard activeContinuation == nil else {
+        guard activeContinuation == nil, !isPreparingTurn else {
             throw Self.makeError("This Codex session is already running a turn.")
         }
+        isPreparingTurn = true
+        defer { isPreparingTurn = false }
         let trimmedModel = model?.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedModel = trimmedModel?.isEmpty == false ? trimmedModel : nil
 
@@ -644,7 +648,7 @@ private actor CodexSession {
             agentMode: resolvedMode
         )
         try Task.checkCancellation()
-        let preparedAttachments = try ProviderAttachmentStore.prepare(attachments)
+        let preparedAttachments = try await ProviderAttachmentStore.prepareForSending(attachments)
         do {
             try Task.checkCancellation()
         } catch {
@@ -742,7 +746,7 @@ private actor CodexSession {
             )
         }
 
-        let preparedAttachments = try ProviderAttachmentStore.prepare(attachments)
+        let preparedAttachments = try await ProviderAttachmentStore.prepareForSending(attachments)
         var retainedAttachments = false
         defer {
             if !retainedAttachments {
@@ -2995,8 +2999,10 @@ private actor CodexSession {
         pendingUserInputs.removeAll()
     }
 
+    private var isPreparingTurn = false
+
     var isIdle: Bool {
-        activeContinuation == nil
+        activeContinuation == nil && !isPreparingTurn
     }
 
     func shutdown() async {
@@ -3188,6 +3194,10 @@ public final class CodexProvider: AIProviderThreadControls, AIProviderSessionMan
             name: name,
             workingDirectory: workingDirectory
         )
+    }
+
+    public func nativeThreadArchiveRevision() async -> String? {
+        await nativeReader.nativeThreadArchiveRevision()
     }
 
     public func listArchivedNativeThreads(

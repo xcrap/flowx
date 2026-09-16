@@ -29,6 +29,7 @@ public struct Attachment: Identifiable, Codable, Sendable, Equatable {
         "public.heic",
         "public.heif",
         "public.tiff",
+        "com.microsoft.bmp",
         "public.bmp",
     ]
 
@@ -45,7 +46,7 @@ public struct Attachment: Identifiable, Codable, Sendable, Equatable {
         case "public.webp": "image/webp"
         case "public.heic", "public.heif": "image/heic"
         case "public.tiff": "image/tiff"
-        case "public.bmp": "image/bmp"
+        case "public.bmp", "com.microsoft.bmp": "image/bmp"
         case "com.adobe.pdf": "application/pdf"
         default: "application/octet-stream"
         }

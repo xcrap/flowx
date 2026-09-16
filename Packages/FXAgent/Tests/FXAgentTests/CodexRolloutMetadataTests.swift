@@ -49,6 +49,30 @@ private func makeRolloutContainer(
 
 private let july24UTC = Date(timeIntervalSince1970: 1_784_851_200)
 
+@Test func archiveRevisionDetectsMovesWithoutReadingHistory() throws {
+    let fixture = try makeRolloutContainer(named: "archive-revision")
+    defer { try? FileManager.default.removeItem(at: fixture.container) }
+    let store = CodexRolloutMetadataStore(sessionsRoot: fixture.sessions)
+    let missing = try #require(store.archiveRevision())
+    let archive = fixture.container.appendingPathComponent("archived_sessions")
+    try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true)
+    let empty = try #require(store.archiveRevision())
+    #expect(empty != missing)
+    let source = fixture.datedDirectory.appendingPathComponent("rollout.jsonl")
+    let destination = archive.appendingPathComponent(source.lastPathComponent)
+    try Data("large transcript".utf8).write(to: source)
+    try FileManager.default.moveItem(at: source, to: destination)
+    let archived = try #require(store.archiveRevision())
+    #expect(archived != empty)
+    for _ in 0..<100 {
+        #expect(store.archiveRevision() == archived)
+    }
+    try FileManager.default.moveItem(at: destination, to: source)
+    #expect(store.archiveRevision() != archived)
+    #expect(store.totalBytesRead == 0)
+    #expect(store.directoryScanCount == 0)
+}
+
 @Test func codexRevisionDetectsWritesWithoutRereadingUnchangedHistory() throws {
     let fixture = try makeRolloutContainer(named: "revision")
     defer { try? FileManager.default.removeItem(at: fixture.container) }

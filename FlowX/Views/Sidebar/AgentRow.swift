@@ -80,12 +80,7 @@ struct ThreadRow: View {
                 .help(sourceAndStatusHelp)
                 .accessibilityLabel(sourceAndStatusHelp)
 
-            Text(displayTitle)
-                .font(FXTypography.bodyMedium)
-                .foregroundStyle(isSelected ? FXColors.fg : FXColors.fgSecondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .allowsTightening(true)
+            FXTaskLabel(displayTitle, provider: agent.providerName, isSelected: isSelected)
                 .layoutPriority(1)
 
             Spacer(minLength: 0)

@@ -61,6 +61,19 @@ FlowX stores workspace layout and a bounded UI cache in those directories. The
 provider's own Codex or Claude session remains authoritative and can be opened
 from the provider's other native clients.
 
+Codex archive and restore actions use the provider's own API in both directions.
+While FlowX is visible, a lightweight archive-folder check runs every two seconds
+and refreshes every project's task list when it changes, including selected tasks.
+Index refreshes also run on activation and every 30 seconds as a fallback; hidden
+windows do no periodic polling. Archived Codex tasks are in **Settings → Archived
+Tasks**. Claude sessions remain separate and are labeled with their provider in
+the sidebar; archiving a Codex task does not archive an unrelated Claude session.
+
+Failed transcript refreshes keep the cached chat and its error indicator visible
+through retries, so an unavailable session cannot repeatedly resize the viewport.
+Automatic retries back off from 5 seconds to at most 60 seconds; a successful read
+clears the error and resets the delay. Selecting the task again retries immediately.
+
 Codex permits one writer per task. If another Codex app or session owns a task,
 FlowX can continue displaying its transcript but cannot send to it. A rejected
 resume preserves the unsent text and attachments independently of transcript
@@ -69,6 +82,16 @@ Codex app or session, then choose **Retry message**. Retry uses the original
 request, and queued requests remain paused until the conflict is resolved.
 
 ## Chat performance
+
+Image attachments from the file picker, drag-and-drop, and clipboard are prepared
+in the background before sending. FlowX accepts source images up to 128 MiB and
+creates a copy of at most 2 MiB and 2,000 pixels on the longest side, preserving
+aspect ratio and orientation. Small compatible images keep their original bytes.
+Screenshots retain PNG when it fits; opaque photos can use JPEG compression,
+transparent images remain PNG, and animations use their first frame. HEIC,
+TIFF, and BMP are converted automatically. Original files are never changed.
+The composer shows **Preparing images…** and waits before sending. Up to ten
+prepared images keep image payloads below 20 MiB before base64 encoding.
 
 Completed turns reuse their prepared presentation until their contents change.
 Text streaming updates only the streaming row and scroll observer, with an
