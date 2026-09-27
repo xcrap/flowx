@@ -118,11 +118,11 @@ struct MessageBubble: View {
                 )
                 .padding(.horizontal, isUser ? FXSpacing.xl : 0)
                 .padding(.vertical, isUser ? FXSpacing.md : FXSpacing.xs)
-                .background(isUser ? FXColors.accent.opacity(0.12) : Color.clear)
+                .background(isUser ? FXColors.accentMuted : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: isUser ? FXRadii.xl : 0))
                 .overlay(
                     RoundedRectangle(cornerRadius: isUser ? FXRadii.xl : 0)
-                        .strokeBorder(isUser ? FXColors.accent.opacity(0.2) : Color.clear, lineWidth: 0.5)
+                        .strokeBorder(isUser ? FXColors.accent.opacity(0.2) : Color.clear, lineWidth: FXBorderWidth.hairline)
                 )
                 .onHover { isHovering in
                     guard isUser else { return }
@@ -155,11 +155,12 @@ struct MessageBubble: View {
             }
         }
         .animation(FXAnimation.micro, value: isHoveringUserMessage)
-        .contextMenu {
-            if !copyableText.isEmpty {
-                Button("Copy", systemImage: "doc.on.doc", action: copyMessage)
-            }
-        }
+        .fxContextMenu(sections: copyableText.isEmpty ? [] : [
+            FXDropdownSection(
+                id: "message",
+                items: [FXDropdownItem(id: "copy", title: "Copy", action: copyMessage)]
+            ),
+        ])
         .accessibilityElement(children: .contain)
         .accessibilityLabel(isUser ? "Your message" : "Assistant message")
     }
@@ -341,7 +342,7 @@ struct MessageBubble: View {
                 if questionIndex > 0 {
                     Rectangle()
                         .fill(FXColors.borderSubtle)
-                        .frame(height: 0.5)
+                        .frame(height: FXBorderWidth.hairline)
                 }
 
                 historicalClaudeQuestion(question)
@@ -353,7 +354,7 @@ struct MessageBubble: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.lg)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
         )
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Recorded Claude question in transcript")
@@ -385,7 +386,7 @@ struct MessageBubble: View {
                         HStack(alignment: .top, spacing: FXSpacing.sm) {
                             Text("\(optionIndex + 1)")
                                 .font(FXTypography.captionMedium)
-                                .foregroundStyle(FXColors.fgQuaternary)
+                                .foregroundStyle(FXColors.fgTertiary)
                                 .frame(width: 16, alignment: .trailing)
 
                             VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
@@ -481,7 +482,7 @@ struct MessageBubble: View {
             if let detail, !detail.isEmpty {
                 Text("·")
                     .font(FXTypography.caption)
-                    .foregroundStyle(FXColors.fgQuaternary)
+                    .foregroundStyle(FXColors.fgTertiary)
 
                 Text(detail)
                     .font(FXTypography.caption)
@@ -821,7 +822,7 @@ private struct TranscriptActionSummaryView: View {
 
             Text("·")
                 .font(FXTypography.caption)
-                .foregroundStyle(FXColors.fgQuaternary)
+                .foregroundStyle(FXColors.fgTertiary)
 
             Text(detail)
                 .font(FXTypography.caption)
@@ -838,7 +839,7 @@ private struct TranscriptActionSummaryView: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.md)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
         )
     }
 
@@ -1233,7 +1234,7 @@ struct MessageCodeBlock: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.md)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
         )
     }
 
@@ -1346,11 +1347,14 @@ struct MessageImageView: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.lg)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
         )
-        .contextMenu {
-            Button("Copy Image", systemImage: "doc.on.doc", action: copyImage)
-        }
+        .fxContextMenu(sections: [
+            FXDropdownSection(
+                id: "image",
+                items: [FXDropdownItem(id: "copy-image", title: "Copy Image", action: copyImage)]
+            ),
+        ])
         .contentShape(RoundedRectangle(cornerRadius: FXRadii.lg))
         .onTapGesture {
             isPreviewPresented = true
@@ -1376,7 +1380,7 @@ struct MessageImageView: View {
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
                 .overlay(
                     RoundedRectangle(cornerRadius: FXRadii.lg)
-                        .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                        .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
                 )
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel(accessibilityLabel)
@@ -1387,7 +1391,7 @@ struct MessageImageView: View {
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
                 .overlay(
                     RoundedRectangle(cornerRadius: FXRadii.lg)
-                        .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                        .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
                 )
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel(accessibilityLabel)
@@ -1555,13 +1559,14 @@ struct MessageAssetImageView: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.lg)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
         )
-        .contextMenu {
-            if assetURL != nil {
-                Button("Copy Image File", systemImage: "doc.on.doc", action: copyImageFile)
-            }
-        }
+        .fxContextMenu(sections: assetURL == nil ? [] : [
+            FXDropdownSection(
+                id: "image-file",
+                items: [FXDropdownItem(id: "copy-image-file", title: "Copy Image File", action: copyImageFile)]
+            ),
+        ])
         .contentShape(RoundedRectangle(cornerRadius: FXRadii.lg))
         .onTapGesture {
             isPreviewPresented = true
@@ -1587,7 +1592,7 @@ struct MessageAssetImageView: View {
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
                 .overlay(
                     RoundedRectangle(cornerRadius: FXRadii.lg)
-                        .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                        .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
                 )
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel(accessibilityLabel)
@@ -1598,7 +1603,7 @@ struct MessageAssetImageView: View {
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
                 .overlay(
                     RoundedRectangle(cornerRadius: FXRadii.lg)
-                        .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                        .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
                 )
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel(accessibilityLabel)

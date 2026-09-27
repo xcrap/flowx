@@ -80,7 +80,7 @@ struct TerminalPanel: View {
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
                 .overlay(
                     RoundedRectangle(cornerRadius: FXRadii.xs)
-                        .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                        .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
                 )
         }
         .buttonStyle(.plain)

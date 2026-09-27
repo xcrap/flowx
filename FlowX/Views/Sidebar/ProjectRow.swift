@@ -62,7 +62,7 @@ struct ProjectRow: View {
                 FXDropdown(
                     sections: threadProviderSections,
                     enabled: !threadProviderSections.isEmpty,
-                    panelWidth: 220,
+                    panelWidth: FXLayout.menuWidth,
                     placement: .below,
                     alignment: .trailing
                 ) { isExpanded in
@@ -77,26 +77,7 @@ struct ProjectRow: View {
             }
             .padding(.leading, FXSpacing.md)
             .padding(.vertical, FXSpacing.xxxs)
-            .contextMenu {
-                Button(action: createDefaultThread) {
-                    Label("New Thread", systemImage: "plus.bubble")
-                }
-                .disabled(!canCreateDefaultThread)
-                Button(action: refreshThreads) {
-                    Label("Refresh Provider Threads", systemImage: "arrow.clockwise")
-                }
-                Divider()
-                Button(action: showInFinder) {
-                    Label("Show in Finder", systemImage: "folder")
-                }
-                Button(action: copyPath) {
-                    Label("Copy Path", systemImage: "doc.on.doc")
-                }
-                Divider()
-                Button(role: .destructive, action: { appState.requestProjectRemoval(project.id) }) {
-                    Label("Remove Project", systemImage: "trash")
-                }
-            }
+            .fxContextMenu(sections: projectMenuSections)
 
             // Provider-native thread list
             if project.isExpanded || isSearching {
@@ -209,7 +190,7 @@ struct ProjectRow: View {
 
                 Text("\(remainingCount) remaining")
                     .font(FXTypography.monoSmall)
-                    .foregroundStyle(FXColors.fgQuaternary)
+                    .foregroundStyle(FXColors.fgTertiary)
             }
             .foregroundStyle(FXColors.fgTertiary)
             .padding(.horizontal, FXSpacing.md)
@@ -247,6 +228,43 @@ struct ProjectRow: View {
                     }
                 }
             )
+        ]
+    }
+
+    private var projectMenuSections: [FXDropdownSection] {
+        [
+            FXDropdownSection(
+                id: "project-threads",
+                items: [
+                    FXDropdownItem(
+                        id: "new-thread",
+                        title: "New Thread",
+                        isEnabled: canCreateDefaultThread,
+                        action: createDefaultThread
+                    ),
+                    FXDropdownItem(
+                        id: "refresh-threads",
+                        title: "Refresh Provider Threads",
+                        isEnabled: !project.isSyncingNativeThreads,
+                        action: refreshThreads
+                    ),
+                ]
+            ),
+            FXDropdownSection(
+                id: "project-location",
+                items: [
+                    FXDropdownItem(id: "show-in-finder", title: "Show in Finder", action: showInFinder),
+                    FXDropdownItem(id: "copy-path", title: "Copy Path", action: copyPath),
+                ]
+            ),
+            FXDropdownSection(
+                id: "project-remove",
+                items: [
+                    FXDropdownItem(id: "remove-project", title: "Remove Project", tone: .destructive) {
+                        appState.requestProjectRemoval(project.id)
+                    },
+                ]
+            ),
         ]
     }
 
@@ -340,7 +358,7 @@ struct ProjectRow: View {
         }
         .padding(.horizontal, FXSpacing.md)
         .padding(.vertical, FXSpacing.xs)
-        .background(FXColors.warning.opacity(0.06))
+        .background(FXColors.warningMuted)
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
     }
 

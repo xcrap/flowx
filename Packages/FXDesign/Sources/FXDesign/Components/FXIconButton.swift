@@ -52,7 +52,7 @@ public struct FXIconButton: View {
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
                 .overlay(
                     RoundedRectangle(cornerRadius: cornerRadius)
-                        .strokeBorder(borderColor, lineWidth: 0.5)
+                        .strokeBorder(borderColor, lineWidth: FXBorderWidth.hairline)
                 )
                 .contentShape(Rectangle())
         }

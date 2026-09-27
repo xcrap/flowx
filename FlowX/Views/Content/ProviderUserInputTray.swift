@@ -79,7 +79,7 @@ struct ProviderUserInputTray: View {
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.xl)
-                    .strokeBorder(FXColors.accent.opacity(0.22), lineWidth: 0.5)
+                    .strokeBorder(FXColors.accent.opacity(0.22), lineWidth: FXBorderWidth.hairline)
             )
             .padding(.top, FXSpacing.md)
             .padding(.bottom, FXSpacing.sm)
@@ -212,11 +212,11 @@ struct ProviderUserInputTray: View {
             }
             .padding(.horizontal, FXSpacing.md)
             .padding(.vertical, FXSpacing.sm)
-            .background(selected ? FXColors.accent.opacity(0.12) : FXColors.bgSurface)
+            .background(selected ? FXColors.accentMuted : FXColors.bgSurface)
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.md)
-                    .strokeBorder(selected ? FXColors.accent.opacity(0.38) : FXColors.borderSubtle, lineWidth: 0.5)
+                    .strokeBorder(selected ? FXColors.accent.opacity(0.38) : FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
             )
             .contentShape(Rectangle())
         }
@@ -243,7 +243,7 @@ struct ProviderUserInputTray: View {
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
                 .overlay(
                     RoundedRectangle(cornerRadius: FXRadii.md)
-                        .strokeBorder(FXColors.border, lineWidth: 0.5)
+                        .strokeBorder(FXColors.border, lineWidth: FXBorderWidth.hairline)
                 )
                 .accessibilityLabel(question.options.isEmpty ? placeholder : "Other answer")
         } else {
@@ -258,7 +258,7 @@ struct ProviderUserInputTray: View {
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
                 .overlay(
                     RoundedRectangle(cornerRadius: FXRadii.md)
-                        .strokeBorder(FXColors.border, lineWidth: 0.5)
+                        .strokeBorder(FXColors.border, lineWidth: FXBorderWidth.hairline)
                 )
                 .accessibilityLabel(question.options.isEmpty ? placeholder : "Other answer")
         }
@@ -333,7 +333,7 @@ struct ProviderUserInputTray: View {
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.md)
-                    .strokeBorder(FXColors.border, lineWidth: 0.5)
+                    .strokeBorder(FXColors.border, lineWidth: FXBorderWidth.hairline)
             )
 
             FXButton("Open secure page", icon: "arrow.up.right.square", style: .secondary) {
@@ -376,7 +376,7 @@ struct ProviderUserInputTray: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(FXSpacing.md)
-        .background(FXColors.warning.opacity(0.08))
+        .background(FXColors.warningMuted)
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
     }
 

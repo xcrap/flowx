@@ -1,6 +1,16 @@
 import SwiftUI
 
 public enum FXLayout {
+    // Shell
+    public static let titleBarHeight: CGFloat = 44
+    public static let sidebarWidth: CGFloat = 260
+    public static let settingsPanelWidth: CGFloat = 420
+    public static let commandPaletteWidth: CGFloat = 560
+    public static let dialogWidth: CGFloat = 440
+    /// Row action menus: context menus and the "…" and "+" dropdowns beside them.
+    public static let menuWidth: CGFloat = 220
+
+    // Content and panels
     public static let readableContentWidth: CGFloat = 760
     public static let userMessageMaxWidth: CGFloat = 600
     public static let userAttachmentThumbnailWidth: CGFloat = 176
@@ -18,5 +28,4 @@ public enum FXLayout {
     public static let diffNavigatorWidth: CGFloat = 248
     public static let diffNavigatorSideBySideWidth: CGFloat = 720
     public static let diffNavigatorCompactHeight: CGFloat = 200
-    public static let modalWidth: CGFloat = 440
 }

@@ -70,7 +70,7 @@ struct FilesPanel: View {
                 Button(action: { searchText = "" }) {
                     Image(systemName: "xmark.circle.fill")
                         .font(FXTypography.icon(.regular))
-                        .foregroundStyle(FXColors.fgQuaternary)
+                        .foregroundStyle(FXColors.fgTertiary)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Clear file search")
@@ -341,7 +341,7 @@ private struct FilesTreeRow: View {
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: FXRadii.md)
-                            .strokeBorder(isSelected ? FXColors.borderMedium : .clear, lineWidth: 0.5)
+                            .strokeBorder(isSelected ? FXColors.borderMedium : .clear, lineWidth: FXBorderWidth.hairline)
                     )
                 }
                 .buttonStyle(.plain)

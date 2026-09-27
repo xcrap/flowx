@@ -29,13 +29,19 @@ struct SidebarView: View {
                     .padding(.bottom, FXSpacing.lg)
                 }
             }
+            // Scoped to the list so the search field keeps its own text menu.
+            .fxContextMenu(sections: [
+                FXDropdownSection(
+                    id: "sidebar",
+                    items: [
+                        FXDropdownItem(id: "add-project", title: "Add Project") {
+                            appState.openAddProjectPanel()
+                        },
+                    ]
+                ),
+            ])
         }
         .background(FXColors.sidebarBg)
-        .contextMenu {
-            Button(action: { appState.openAddProjectPanel() }) {
-                Label("Add Project", systemImage: "folder.badge.plus")
-            }
-        }
     }
 
     private var taskToolbar: some View {
@@ -67,7 +73,7 @@ struct SidebarView: View {
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.md)
-                    .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                    .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
             )
             .frame(maxWidth: .infinity)
 
@@ -106,7 +112,7 @@ struct SidebarView: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.xl)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
         )
     }
 }

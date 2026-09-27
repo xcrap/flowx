@@ -39,9 +39,11 @@ The color system works like CSS custom properties — semantic tokens that resol
 
 - **Views use `FXColors.*`** — never hardcode colors. `FXColors.bg`, `FXColors.fg`, `FXColors.accent`, `FXColors.success`, `FXColors.diffAddedBg`, etc.
 - **`FXColors` → `FXTheme` → `FXPalette.generate(tone, dark)`** — colors resolve at render time from the active tone + appearance mode
-- **Base tones** (slate, zinc, neutral, stone): Tailwind-derived 11-shade scales (50→950). Dark mode reads top-down (950=bg, 900=elevated, 800=surface), light mode reads bottom-up (50=bg, 100=elevated, 200=surface). Same scale, both modes cohesive.
-- **Accent colors** (violet, blue, emerald, orange, rose): independent of the base tone
+- **Base tones** (slate, zinc, neutral, stone): Tailwind-derived 11-shade scales (50→950). Dark mode reads top-down (900=bg, 800=elevated, 700=surface), light mode reads bottom-up (50=bg, 100=elevated, 200=surface). Same scale, both modes cohesive.
+- **Text contrast**: `fg`, `fgSecondary`, and `fgTertiary` each clear WCAG AA (4.5:1) on `bg` and `bgElevated` in every tone and mode, and keep that order; `fgTertiary` clears 3:1 on `bgSurface`. `DesignTokenTests` enforces this — rerun it after touching any foreground or background token.
+- **Accent colors** (violet, blue, emerald, orange, rose): independent of the base tone. `onAccent` is white, or the tone's darkest ink for emerald and orange, which cannot carry white text. `accentSecondary` (teal) adapts per mode.
 - **Semantic colors** (success, warning, error, info): adapt per mode — brighter on dark, deeper on light
+- **Muted tints** (`successMuted`, `warningMuted`, `errorMuted`, `infoMuted`, `accentMuted`, `accentSecondaryMuted`): tinted backgrounds for banners, badges, and highlighted rows
 - **Diff colors** (`diffAddedBg`, `diffRemovedBg`, `diffAddedFg`, `diffRemovedFg`): proper semantic tokens with GitHub-style pastels in light mode, Codex-style muted darks in dark mode. Do NOT use `FXColors.success.opacity(0.08)` for diffs — use the diff tokens.
 - **Theme changes trigger full re-render** via `preferences.themeVersion` incrementing and `.id()` on MainLayout
 
@@ -50,7 +52,9 @@ The color system works like CSS custom properties — semantic tokens that resol
 - Never use system `.background` materials or vibrancy — FlowX uses opaque custom backgrounds
 - Never use native macOS menus/popovers with glass — use `FXDropdown` for custom flat menus
 - Diff views must use `FXColors.diffAddedBg` / `FXColors.diffRemovedBg`, not opacity-modified semantic colors
-- When adding a new base tone or accent, follow the existing pattern in `Colors.swift`
+- Tinted backgrounds use the `*Muted` tokens, not `FXColors.warning.opacity(0.08)` and friends
+- `fgQuaternary` is only for disabled states and decorative glyphs; text and a control's only icon use `fgTertiary` or stronger
+- When adding a new base tone or accent, follow the existing pattern in `Colors.swift` and keep `DesignTokenTests` passing
 
 ### Typography
 
@@ -59,10 +63,13 @@ The color system works like CSS custom properties — semantic tokens that resol
 - Text sizes scale via `FXTextSizePreset` (compact 0.93x → large 1.16x)
 - Use `FXTypography.*` constants, never hardcode font sizes in views
 
-### Spacing & Radii
+### Spacing, Radii, Borders & Elevation
 
 - 8px baseline grid: `FXSpacing.xxxs` (2) through `FXSpacing.huge` (48)
 - Corner radii: `FXRadii.xs` (4) through `FXRadii.xxl` (16)
+- Border widths: `FXBorderWidth.hairline` (0.5, the default edge), `.regular` (1, focus), `.strong` (1.5, drop targets)
+- Shadows: `.fxShadow(FXShadow.popover | .dialog | .palette | .trailingPanel)`; never hand-write `.shadow(...)`
+- Shell dimensions (title bar, sidebar, settings panel, command palette, dialogs, row menus) live in `FXLayout`
 
 ### Animations
 
@@ -105,3 +112,4 @@ Debug and release use separate app-support directories so local development does
 - Preserve current FlowX product behavior unless a change is intentional
 - Treat the FlowX design system as binding guidance, not loose inspiration
 - Do not ship native glassy menus, left-side menu indicators, or improvised control styles when FlowX defines a flatter custom alternative
+- Never use SwiftUI's `.contextMenu`; use `.fxContextMenu(sections:)`, which opens the `FXDropdown` panel at the pointer. Build a row's `[FXDropdownSection]` once and pass it to both the context menu and the row's "…" dropdown

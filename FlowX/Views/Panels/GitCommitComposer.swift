@@ -29,7 +29,7 @@ struct GitCommitComposer: View {
                     .clipShape(RoundedRectangle(cornerRadius: FXRadii.sm))
                     .overlay(
                         RoundedRectangle(cornerRadius: FXRadii.sm)
-                            .strokeBorder(FXColors.border, lineWidth: 0.5)
+                            .strokeBorder(FXColors.border, lineWidth: FXBorderWidth.hairline)
                     )
                     .focused($commitMessageFocused)
                     .onSubmit {

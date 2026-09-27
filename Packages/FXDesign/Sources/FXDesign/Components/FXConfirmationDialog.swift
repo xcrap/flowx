@@ -66,14 +66,14 @@ public struct FXConfirmationDialog: View {
                 }
             }
             .padding(FXSpacing.xl)
-            .frame(width: FXLayout.modalWidth)
+            .frame(width: FXLayout.dialogWidth)
             .background(FXColors.bgElevated)
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.xxl))
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.xxl)
-                    .strokeBorder(FXColors.borderMedium, lineWidth: 0.5)
+                    .strokeBorder(FXColors.borderMedium, lineWidth: FXBorderWidth.hairline)
             )
-            .shadow(color: FXColors.overlay, radius: 24, y: 14)
+            .fxShadow(FXShadow.dialog)
         }
         // Keyboard focus usually stays in whatever the person was using: a
         // text field eats Escape, and the terminal forwards it to the shell.
