@@ -72,6 +72,12 @@ struct MainLayout: View {
                         .zIndex(20)
                 }
 
+                if let confirmation = appState.projectRemovalConfirmation {
+                    ProjectRemovalConfirmationView(confirmation: confirmation)
+                        .transition(.opacity)
+                        .zIndex(20)
+                }
+
                 if let request = appState.threadRenameRequest {
                     ThreadRenameView(request: request)
                         .transition(.opacity)
@@ -250,8 +256,8 @@ struct MainLayout: View {
             HStack {
                 Spacer()
 
-                if appState.activeAgent != nil {
-                    HStack(spacing: FXSpacing.xxs) {
+                HStack(spacing: FXSpacing.xxs) {
+                    if appState.activeAgent != nil {
                         headerButton(
                             icon: "terminal",
                             label: "Toggle terminal",
@@ -275,9 +281,10 @@ struct MainLayout: View {
                         ) {
                             appState.toggleBrowserPreview()
                         }
-                        headerButton(icon: "gearshape", label: "Toggle settings", active: appState.settingsVisible) {
-                            appState.settingsVisible.toggle()
-                        }
+                    }
+                    // Settings stays reachable before any project or thread exists.
+                    headerButton(icon: "gearshape", label: "Toggle settings", active: appState.settingsVisible) {
+                        appState.settingsVisible.toggle()
                     }
                 }
             }
@@ -358,15 +365,15 @@ struct MainLayout: View {
     }
 
     private func headerButton(icon: String, label: String, active: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(FXTypography.icon(.control))
-                .foregroundStyle(active ? FXColors.accent : FXColors.fgTertiary)
-                .frame(width: 40, height: 40)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(label)
+        FXIconButton(
+            icon: icon,
+            label: label,
+            isSelected: active,
+            size: 32,
+            iconSize: .control,
+            variant: .ghost,
+            action: action
+        )
         .accessibilityValue(active ? "Visible" : "Hidden")
     }
 }
@@ -474,65 +481,35 @@ private struct ThreadRenameView: View {
 
 private struct ThreadLifecycleConfirmationView: View {
     @Environment(AppState.self) private var appState
-    @FocusState private var cancelFocused: Bool
     let confirmation: ThreadLifecycleConfirmation
 
     var body: some View {
-        ZStack {
-            FXColors.overlay
-                .ignoresSafeArea()
+        FXConfirmationDialog(
+            title: confirmation.title,
+            message: confirmation.message,
+            systemImage: confirmation.action.systemImage,
+            confirmTitle: confirmation.action.shortTitle,
+            isDestructive: confirmation.action.isDestructive,
+            onCancel: { appState.cancelThreadLifecycleConfirmation() },
+            onConfirm: { appState.confirmThreadLifecycleAction() }
+        )
+    }
+}
 
-            VStack(alignment: .leading, spacing: FXSpacing.lg) {
-                HStack(spacing: FXSpacing.md) {
-                    Image(systemName: confirmation.action.systemImage)
-                        .font(FXTypography.icon(.large))
-                        .foregroundStyle(confirmation.action.isDestructive ? FXColors.error : FXColors.accent)
+private struct ProjectRemovalConfirmationView: View {
+    @Environment(AppState.self) private var appState
+    let confirmation: ProjectRemovalConfirmation
 
-                    Text(confirmation.title)
-                        .font(FXTypography.title2)
-                        .foregroundStyle(FXColors.fg)
-                }
-
-                Text(confirmation.message)
-                    .font(FXTypography.body)
-                    .foregroundStyle(FXColors.fgSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack(spacing: FXSpacing.sm) {
-                    Spacer(minLength: 0)
-
-                    FXButton("Cancel", style: .secondary) {
-                        appState.cancelThreadLifecycleConfirmation()
-                    }
-                    .focused($cancelFocused)
-                    .keyboardShortcut(.cancelAction)
-
-                    FXButton(
-                        confirmation.action.shortTitle,
-                        style: confirmation.action.isDestructive ? .danger : .primary
-                    ) {
-                        appState.confirmThreadLifecycleAction()
-                    }
-                }
-            }
-            .padding(FXSpacing.xl)
-            .frame(width: 440)
-            .background(FXColors.bgElevated)
-            .clipShape(RoundedRectangle(cornerRadius: FXRadii.xxl))
-            .overlay(
-                RoundedRectangle(cornerRadius: FXRadii.xxl)
-                    .strokeBorder(FXColors.borderMedium, lineWidth: 0.5)
-            )
-            .shadow(color: FXColors.overlay, radius: 24, y: 14)
-        }
-        .onExitCommand {
-            appState.cancelThreadLifecycleConfirmation()
-        }
-        .onAppear {
-            cancelFocused = true
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(confirmation.title)
+    var body: some View {
+        FXConfirmationDialog(
+            title: "Remove Project",
+            message: confirmation.message,
+            systemImage: "trash",
+            confirmTitle: "Remove",
+            isDestructive: true,
+            onCancel: { appState.cancelProjectRemoval() },
+            onConfirm: { appState.confirmProjectRemoval() }
+        )
     }
 }
 
@@ -542,6 +519,7 @@ private struct CommandPaletteView: View {
     @FocusState private var searchFocused: Bool
     @State private var query = ""
     @State private var selectedActionID: String?
+    @State private var escapeMonitor = FXEscapeKeyMonitor()
 
     private struct PaletteAction: Identifiable {
         let id: String
@@ -597,6 +575,12 @@ private struct CommandPaletteView: View {
             query = ""
             selectedActionID = actions.first?.id
             searchFocused = true
+            // Escape must close the palette even if focus stayed in a view
+            // that consumes it (a text field or the terminal).
+            escapeMonitor.start(onEscape: dismiss)
+        }
+        .onDisappear {
+            escapeMonitor.stop()
         }
         .onChange(of: query) { _, _ in
             selectedActionID = filteredActions.first?.id
@@ -617,6 +601,16 @@ private struct CommandPaletteView: View {
                 .foregroundStyle(FXColors.fg)
                 .focused($searchFocused)
                 .accessibilityLabel("Command palette search")
+                // The focused field editor consumes arrow keys before an
+                // ancestor's onMoveCommand sees them.
+                .onKeyPress(.downArrow) {
+                    moveSelection(.down)
+                    return .handled
+                }
+                .onKeyPress(.upArrow) {
+                    moveSelection(.up)
+                    return .handled
+                }
                 .onSubmit {
                     if let selected = selectedAction {
                         run(selected)
@@ -640,68 +634,76 @@ private struct CommandPaletteView: View {
     }
 
     private var actionList: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: FXSpacing.xxs) {
-                if filteredActions.isEmpty {
-                    VStack(spacing: FXSpacing.sm) {
-                        Image(systemName: "sparkle.magnifyingglass")
-                            .font(FXTypography.icon(.large))
-                            .foregroundStyle(FXColors.fgTertiary)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: FXSpacing.xxs) {
+                    if filteredActions.isEmpty {
+                        VStack(spacing: FXSpacing.sm) {
+                            Image(systemName: "sparkle.magnifyingglass")
+                                .font(FXTypography.icon(.large))
+                                .foregroundStyle(FXColors.fgTertiary)
 
-                        Text("No matching actions")
-                            .font(FXTypography.bodyMedium)
-                            .foregroundStyle(FXColors.fgSecondary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, FXSpacing.xxxl)
-                } else {
-                    ForEach(filteredActions) { action in
-                        Button(action: { run(action) }) {
-                            HStack(spacing: FXSpacing.md) {
-                                Image(systemName: action.systemImage)
-                                    .font(FXTypography.icon(.control))
-                                    .foregroundStyle(FXColors.accent)
-                                    .frame(width: 20)
+                            Text("No matching actions")
+                                .font(FXTypography.bodyMedium)
+                                .foregroundStyle(FXColors.fgSecondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, FXSpacing.xxxl)
+                    } else {
+                        ForEach(filteredActions) { action in
+                            Button(action: { run(action) }) {
+                                HStack(spacing: FXSpacing.md) {
+                                    Image(systemName: action.systemImage)
+                                        .font(FXTypography.icon(.control))
+                                        .foregroundStyle(FXColors.accent)
+                                        .frame(width: 20)
 
-                                VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
-                                    Text(action.title)
-                                        .font(FXTypography.bodyMedium)
-                                        .foregroundStyle(FXColors.fg)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    VStack(alignment: .leading, spacing: FXSpacing.xxxs) {
+                                        Text(action.title)
+                                            .font(FXTypography.bodyMedium)
+                                            .foregroundStyle(FXColors.fg)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
 
-                                    Text(action.subtitle)
-                                        .font(FXTypography.caption)
-                                        .foregroundStyle(FXColors.fgTertiary)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        Text(action.subtitle)
+                                            .font(FXTypography.caption)
+                                            .foregroundStyle(FXColors.fgTertiary)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+
+                                    if let shortcut = action.shortcut {
+                                        Text(shortcut)
+                                            .font(FXTypography.monoSmall)
+                                            .foregroundStyle(FXColors.fgTertiary)
+                                            .padding(.horizontal, FXSpacing.xs)
+                                            .padding(.vertical, FXSpacing.xxxs)
+                                            .background(FXColors.bgElevated)
+                                            .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
+                                    }
                                 }
-
-                                if let shortcut = action.shortcut {
-                                    Text(shortcut)
-                                        .font(FXTypography.monoSmall)
-                                        .foregroundStyle(FXColors.fgTertiary)
-                                        .padding(.horizontal, FXSpacing.xs)
-                                        .padding(.vertical, FXSpacing.xxxs)
-                                        .background(FXColors.bgElevated)
-                                        .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
-                                }
+                                .padding(.horizontal, FXSpacing.lg)
+                                .padding(.vertical, FXSpacing.md)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(selectedActionID == action.id ? FXColors.bgSelected : FXColors.bgSurface.opacity(0.45))
+                                .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
                             }
-                            .padding(.horizontal, FXSpacing.lg)
-                            .padding(.vertical, FXSpacing.md)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(selectedActionID == action.id ? FXColors.bgSelected : FXColors.bgSurface.opacity(0.45))
-                            .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
+                            .buttonStyle(.plain)
+                            .onHover { hovering in
+                                if hovering { selectedActionID = action.id }
+                            }
+                            .accessibilityValue(selectedActionID == action.id ? "Selected" : "")
+                            .id(action.id)
                         }
-                        .buttonStyle(.plain)
-                        .onHover { hovering in
-                            if hovering { selectedActionID = action.id }
-                        }
-                        .accessibilityValue(selectedActionID == action.id ? "Selected" : "")
                     }
                 }
+                .padding(FXSpacing.sm)
             }
-            .padding(FXSpacing.sm)
+            .frame(maxHeight: 440)
+            .onChange(of: selectedActionID) { _, newValue in
+                // Keyboard selection must stay visible; hover targets already are.
+                guard let newValue else { return }
+                proxy.scrollTo(newValue)
+            }
         }
-        .frame(maxHeight: 440)
     }
 
     private var filteredActions: [PaletteAction] {
@@ -761,7 +763,7 @@ private struct CommandPaletteView: View {
         ]
 
         if let agent = appState.activeAgent {
-            let hasDraft = !agent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let hasDraft = agent.conversationState.hasDraftText
                 || !agent.conversationState.pendingAttachments.isEmpty
             let selectedModelID = agent.explicitModelID ?? agent.nativeModelID
             let currentModel = selectedModelID.flatMap { modelID in

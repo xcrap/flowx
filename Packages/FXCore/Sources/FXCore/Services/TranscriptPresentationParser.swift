@@ -98,20 +98,19 @@ public enum TranscriptPresentationParser {
     }
 
     private static func requiresLineParsing(_ source: String) -> Bool {
-        var previousWasColon = false
+        var previous: UInt8 = 0
+        var beforePrevious: UInt8 = 0
         for byte in source.utf8 {
-            if byte == 0x3A {
-                if previousWasColon { return true }
-                previousWasColon = true
-            } else {
-                previousWasColon = false
-                // CR, VT, FF, and leading bytes for NEL/Unicode line separators.
-                // Non-newline characters with these prefixes safely use the
-                // general parser too; LF and other UTF-8 text stay allocation-free.
-                if byte == 0x0D || byte == 0x0B || byte == 0x0C || byte == 0xC2 || byte == 0xE2 {
-                    return true
-                }
-            }
+            // `::` directives, CR/VT/FF, and the exact UTF-8 sequences for NEL
+            // (C2 85) and LINE/PARAGRAPH SEPARATOR (E2 80 A8/A9). Matching only
+            // lead bytes would send nearly every reply (em dashes, curly
+            // quotes, ellipses, arrows) down the allocating path.
+            if byte == 0x3A, previous == 0x3A { return true }
+            if byte == 0x0D || byte == 0x0B || byte == 0x0C { return true }
+            if byte == 0x85, previous == 0xC2 { return true }
+            if byte == 0xA8 || byte == 0xA9, previous == 0x80, beforePrevious == 0xE2 { return true }
+            beforePrevious = previous
+            previous = byte
         }
         return false
     }

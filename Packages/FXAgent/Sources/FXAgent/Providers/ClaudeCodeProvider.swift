@@ -231,10 +231,23 @@ final class ClaudeTurnController: @unchecked Sendable {
     }
 
     func event(forControlEnvelope envelope: [String: Any]) -> StreamEvent? {
-        guard let requestID = Self.nonEmpty(envelope["request_id"] as? String),
-              let request = envelope["request"] as? [String: Any],
+        guard let requestID = Self.nonEmpty(envelope["request_id"] as? String) else {
+            return nil
+        }
+        guard let request = envelope["request"] as? [String: Any],
               request["subtype"] as? String == "can_use_tool",
               let toolName = Self.nonEmpty(request["tool_name"] as? String) else {
+            // Claude blocks on every control request; an unanswered one
+            // (e.g. a subtype from a newer CLI) would hang the turn.
+            let subtype = (envelope["request"] as? [String: Any])?["subtype"] as? String ?? "unknown"
+            try? write([
+                "type": "control_response",
+                "response": [
+                    "subtype": "error",
+                    "request_id": requestID,
+                    "error": "FlowX does not support the '\(subtype)' control request.",
+                ],
+            ])
             return nil
         }
         let input = request["input"] as? [String: Any] ?? [:]
@@ -759,6 +772,10 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
         try await nativeStore.read(id: id, workingDirectory: workingDirectory)
     }
 
+    public func nativeThreadRevision(id: String, createdAt: Date) async -> String? {
+        await nativeStore.revision(id: id)
+    }
+
     public func moveNativeThreadToTrash(
         id: String,
         workingDirectory: URL
@@ -918,7 +935,12 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
         let readerTask = Task { () -> Bool in
             for await data in outputStream {
                 let output = outputState.appendOutput(data)
-                if output.overflow { return false }
+                if output.overflow {
+                    // Nothing reads Claude's output any more, so its approvals
+                    // could never be answered; end the run instead of hanging.
+                    processReference.stop()
+                    return false
+                }
                 for line in output.lines {
                     for event in parser.events(for: line) { continuation.yield(event) }
                 }

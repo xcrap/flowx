@@ -34,12 +34,6 @@ enum InspectorComparisonMode: String, CaseIterable, Codable, Sendable {
     case base = "Base"
 }
 
-enum InspectorContentKind {
-    case diff
-    case file
-    case message
-}
-
 enum InspectorDiffDisplayMode: String, CaseIterable, Codable, Sendable {
     case inline = "Inline"
     case split = "Split"
@@ -115,6 +109,16 @@ struct ThreadLifecycleConfirmation: Identifiable {
         case .moveProviderTaskToTrash:
             "Move “\(threadTitle)” and its Claude session data to macOS Trash? If the session files are already missing, FlowX will preserve its remaining cache and attachments in a recovery folder in Trash. Stop any Claude Code process using it first."
         }
+    }
+}
+
+struct ProjectRemovalConfirmation: Identifiable {
+    let id = UUID()
+    let projectID: UUID
+    let projectName: String
+
+    var message: String {
+        "Remove “\(projectName)” from FlowX? Its FlowX conversation cache, drafts, attachments, and terminals will be deleted. The project folder and its Codex and Claude sessions are left untouched, so you can add it again later."
     }
 }
 
@@ -674,8 +678,6 @@ final class ProjectState: Identifiable {
     var gitInfo = GitStatusService.GitInfo()
     var repositoryFiles: [String] = []
     var selectedInspectorPath: String? { didSet { onChange?() } }
-    var selectedInspectorText: String = ""
-    var selectedInspectorContentKind: InspectorContentKind = .message
     var inspectorComparisonMode: InspectorComparisonMode = .unstaged { didSet { onChange?() } }
     var inspectorDiffDisplayMode: InspectorDiffDisplayMode = .inline { didSet { onChange?() } }
     var commitComposerVisible = false
@@ -724,10 +726,6 @@ final class ProjectState: Identifiable {
 
             guard let self, !Task.isCancelled else { return }
             self.repositoryFiles = files
-            if self.selectedInspectorPath == nil
-                || !files.contains(self.selectedInspectorPath ?? "") {
-                self.selectedInspectorPath = files.first
-            }
         }
     }
 
@@ -789,6 +787,9 @@ final class ProjectState: Identifiable {
         process.standardError = FileHandle.nullDevice
         var environment = ProcessInfo.processInfo.environment
         environment["GIT_TERMINAL_PROMPT"] = "0"
+        // Read-only polling must never take .git/index.lock, or concurrent
+        // agent/user commands fail with "index.lock: File exists".
+        environment["GIT_OPTIONAL_LOCKS"] = "0"
         environment["LC_ALL"] = "C"
         process.environment = environment
 
@@ -925,6 +926,8 @@ final class AppPreferences {
 
     var themeVersion: Int = 0
 
+    @ObservationIgnored private var systemAppearanceObservation: NSKeyValueObservation?
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let restoredProviderID = AgentInfo.normalizedProviderID(defaults.string(forKey: Keys.defaultProviderID))
@@ -1008,6 +1011,18 @@ final class AppPreferences {
         themeVersion &+= 1
     }
 
+    /// FXColors resolve the System appearance when read, so a macOS light/dark
+    /// switch must re-render the tree the same way a preference change does.
+    func observeSystemAppearance(of application: NSApplication) {
+        guard systemAppearanceObservation == nil else { return }
+        systemAppearanceObservation = application.observe(\.effectiveAppearance) { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.appearanceMode == .system else { return }
+                self.themeVersion &+= 1
+            }
+        }
+    }
+
     private static func fallbackModelID(for providerID: String) -> String {
         switch providerID {
         case "codex":
@@ -1073,6 +1088,7 @@ final class AppState {
     var settingsTab: SettingsPanel.SettingsTab = .general
     var commandPaletteVisible = false
     var threadLifecycleConfirmation: ThreadLifecycleConfirmation?
+    var projectRemovalConfirmation: ProjectRemovalConfirmation?
     var threadRenameRequest: ThreadRenameRequest?
     var runtimeHealth: [String: BinaryHealth] = [:]
     var isBootstrapped = false
@@ -1306,6 +1322,24 @@ final class AppState {
         hydrate(state)
         refreshNativeThreads(for: state)
         scheduleSave()
+    }
+
+    func requestProjectRemoval(_ projectID: UUID) {
+        guard let project = projects.first(where: { $0.id == projectID }) else { return }
+        projectRemovalConfirmation = ProjectRemovalConfirmation(
+            projectID: projectID,
+            projectName: project.project.name
+        )
+    }
+
+    func cancelProjectRemoval() {
+        projectRemovalConfirmation = nil
+    }
+
+    func confirmProjectRemoval() {
+        guard let confirmation = projectRemovalConfirmation else { return }
+        projectRemovalConfirmation = nil
+        removeProject(confirmation.projectID)
     }
 
     func removeProject(_ projectID: UUID) {
@@ -1925,7 +1959,7 @@ final class AppState {
 
     private func hasMeaningfulDraftContent(_ agent: AgentInfo) -> Bool {
         !agent.messages.isEmpty
-            || !agent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || agent.conversationState.hasDraftText
             || !agent.conversationState.pendingAttachments.isEmpty
             || agent.conversationState.queuedPromptCount > 0
             || agent.conversationState.sessionID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
@@ -2236,6 +2270,15 @@ final class AppState {
         conversationService.queuedPrompt(at: index, for: agent.id)
     }
 
+    func queuedPromptIndex(of prompt: String, preferring index: Int?, for agent: AgentInfo) -> Int? {
+        if let index, queuedPromptText(at: index, for: agent) == prompt {
+            return index
+        }
+        return (0..<agent.conversationState.queuedPromptCount).first { candidate in
+            queuedPromptText(at: candidate, for: agent) == prompt
+        }
+    }
+
     func updateQueuedPrompt(at index: Int, with prompt: String, for agent: AgentInfo) {
         conversationService.updateQueuedPrompt(
             at: index,
@@ -2412,9 +2455,6 @@ final class AppState {
         } else if project.selectedInspectorPath == nil {
             project.selectedInspectorPath = visiblePaths.first
         }
-        Task { @MainActor in
-            await refreshInspector(for: project)
-        }
     }
 
     /// Refreshes the provider-owned thread index for one project. FlowX only
@@ -2536,7 +2576,6 @@ final class AppState {
         guard isBootstrapped else { return }
         if let project = activeProject {
             gitStatusService.forceRefresh(projectID: project.id)
-            project.refreshFiles()
         }
         refreshActiveNativeThreadsIfIdle()
         if let project = activeProject, let agent = activeAgent {
@@ -2849,6 +2888,7 @@ final class AppState {
                 identity: binding.identity,
                 projectID: project.id
             ) {
+                ConversationPersistence.reviveConversation(agentID: cachedAgent.id, projectID: project.id)
                 updateNativeThreadBinding(binding, for: cachedAgent)
                 cachedAgent.agent.configuration.providerID = binding.identity.providerID
                 cachedAgent.conversationState.sessionID = binding.identity.sessionID
@@ -2884,6 +2924,7 @@ final class AppState {
                 nativeThreadBinding: binding,
                 nativeImageSidecar: persistedConversation?.nativeImageSidecar ?? []
             )
+            ConversationPersistence.reviveConversation(agentID: nativeAgentID, projectID: project.id)
             configureAgent(info)
             reconcileConfiguration(for: info)
             project.agents.append(info)
@@ -3369,7 +3410,6 @@ final class AppState {
             includeUntracked: project.includeUntrackedInCommit
         )
         project.isPerformingGitAction = false
-        await refreshInspector(for: project)
 
         if success {
             project.commitMessageDraft = ""
@@ -3379,96 +3419,6 @@ final class AppState {
             }
         } else {
             project.gitActionMessage = gitStatusService.lastFailureMessage[project.id] ?? "Commit failed."
-        }
-    }
-
-    func refreshInspector(for project: ProjectState) async {
-        guard let selectedPath = project.selectedInspectorPath else {
-            project.selectedInspectorText = ""
-            project.selectedInspectorContentKind = .message
-            return
-        }
-
-        let fileStatus = project.gitInfo.files.first(where: { $0.path == selectedPath })
-
-        switch project.inspectorComparisonMode {
-        case .unstaged:
-            guard fileStatus?.hasUnstagedChanges == true else {
-                project.selectedInspectorText = fileStatus?.hasStagedChanges == true
-                    ? "This file only has staged changes right now."
-                    : "This file has no unstaged changes."
-                project.selectedInspectorContentKind = .message
-                return
-            }
-
-            let diff = await gitStatusService.diffUnstaged(projectID: project.id, path: selectedPath)
-            if !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                project.selectedInspectorText = diff
-                project.selectedInspectorContentKind = .diff
-                return
-            }
-
-            let contents = await gitStatusService.fileContents(projectID: project.id, path: selectedPath)
-            if !contents.isEmpty {
-                project.selectedInspectorText = contents
-                project.selectedInspectorContentKind = .file
-            } else {
-                project.selectedInspectorText = "No local content available for this file."
-                project.selectedInspectorContentKind = .message
-            }
-
-        case .staged:
-            guard fileStatus?.hasStagedChanges == true else {
-                project.selectedInspectorText = fileStatus?.hasUnstagedChanges == true
-                    ? "This file has unstaged changes, but nothing staged yet."
-                    : "This file has no staged changes."
-                project.selectedInspectorContentKind = .message
-                return
-            }
-
-            let diff = await gitStatusService.diffStaged(projectID: project.id, path: selectedPath)
-            if !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                project.selectedInspectorText = diff
-                project.selectedInspectorContentKind = .diff
-                return
-            }
-
-            if let stagedContents = await gitStatusService.fileContentsFromIndex(projectID: project.id, path: selectedPath),
-               !stagedContents.isEmpty {
-                project.selectedInspectorText = stagedContents
-                project.selectedInspectorContentKind = .file
-            } else {
-                project.selectedInspectorText = "No staged content is available for this file."
-                project.selectedInspectorContentKind = .message
-            }
-
-        case .base:
-            guard project.gitInfo.hasCommits else {
-                project.selectedInspectorText = "This repository has no committed base revision yet."
-                project.selectedInspectorContentKind = .message
-                return
-            }
-
-            if fileStatus?.isUntracked == true {
-                project.selectedInspectorText = "This file is new locally and does not exist in HEAD."
-                project.selectedInspectorContentKind = .message
-                return
-            }
-
-            let diff = await gitStatusService.diffAgainstHead(projectID: project.id, path: selectedPath)
-            if !diff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                project.selectedInspectorText = diff
-                project.selectedInspectorContentKind = .diff
-                return
-            }
-
-            if let baseContents = await gitStatusService.fileContentsAtHead(projectID: project.id, path: selectedPath) {
-                project.selectedInspectorText = baseContents
-                project.selectedInspectorContentKind = .file
-            } else {
-                project.selectedInspectorText = "This file does not exist in the current base revision."
-                project.selectedInspectorContentKind = .message
-            }
         }
     }
 
@@ -3501,7 +3451,6 @@ final class AppState {
         }
 
         gitStatusService.pollOnly(projectID: project.id, rootPath: project.project.rootPath)
-        project.refreshFiles()
     }
 
     private func reconcileConfiguration(for agent: AgentInfo) {
@@ -3585,7 +3534,7 @@ final class AppState {
         }
 
         if project.selectedInspectorPath == nil {
-            project.selectedInspectorPath = gitInfo.files.first?.path ?? project.repositoryFiles.first
+            project.selectedInspectorPath = gitInfo.files.first?.path
         }
     }
 
@@ -3753,7 +3702,6 @@ final class AppState {
                         && self.completionNeedsAttention(for: agent)
                     ConversationPersistence.save(agent: agent, projectID: project.id)
                     gitStatusService.forceRefresh(projectID: project.id)
-                    await refreshInspector(for: project)
                     refreshNativeThreads(for: project, discoveryMode: .indexed)
                     scheduleSave()
                 }

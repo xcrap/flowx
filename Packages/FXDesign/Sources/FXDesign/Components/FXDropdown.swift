@@ -61,6 +61,14 @@ private extension Notification.Name {
     static let fxDropdownDidOpen = Notification.Name("FXDropdown.didOpen")
 }
 
+/// Row highlight shared by pointer hover and keyboard navigation, so arrow
+/// keys continue from wherever the pointer last was.
+@Observable
+@MainActor
+private final class FXDropdownHighlight {
+    var key: String?
+}
+
 public enum FXDropdownPlacement {
     case automatic
     case above
@@ -79,6 +87,7 @@ public struct FXDropdown<Label: View>: View {
     private let maxPanelHeight: CGFloat
     private let placement: FXDropdownPlacement
     private let alignment: FXDropdownAlignment
+    private let onExpandedChange: ((Bool) -> Void)?
     private let label: (Bool) -> Label
 
     @State private var isExpanded = false
@@ -86,6 +95,7 @@ public struct FXDropdown<Label: View>: View {
     @State private var dropdownID = UUID()
     @State private var anchorBox = FXDropdownAnchorBox()
     @State private var presenter = FXDropdownPresenter()
+    @State private var highlight = FXDropdownHighlight()
 
     public init(
         sections: [FXDropdownSection],
@@ -94,6 +104,7 @@ public struct FXDropdown<Label: View>: View {
         maxPanelHeight: CGFloat = 320,
         placement: FXDropdownPlacement = .automatic,
         alignment: FXDropdownAlignment = .leading,
+        onExpandedChange: ((Bool) -> Void)? = nil,
         @ViewBuilder label: @escaping (_ isExpanded: Bool) -> Label
     ) {
         self.sections = sections
@@ -102,6 +113,7 @@ public struct FXDropdown<Label: View>: View {
         self.maxPanelHeight = maxPanelHeight
         self.placement = placement
         self.alignment = alignment
+        self.onExpandedChange = onExpandedChange
         self.label = label
     }
 
@@ -120,6 +132,11 @@ public struct FXDropdown<Label: View>: View {
         .disabled(!enabled)
         .background(FXDropdownAnchorView(anchorBox: anchorBox))
         .onPreferenceChange(FXDropdownSizeKey.self) { labelSize = $0 }
+        // Lets hover-revealed triggers stay visible while their panel is open;
+        // moving into the panel (a child window) ends the row's hover.
+        .onChange(of: isExpanded) { _, expanded in
+            onExpandedChange?(expanded)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .fxDropdownDidOpen)) { notification in
             guard let otherID = notification.object as? UUID, otherID != dropdownID, isExpanded else { return }
             dismissDropdown()
@@ -131,38 +148,50 @@ public struct FXDropdown<Label: View>: View {
         max(panelWidth ?? 0, labelSize.width, 160)
     }
 
-    private var dropdownPanel: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
-                    if let title = section.title, !title.isEmpty {
-                        Text(title)
-                            .font(FXTypography.caption)
-                            .foregroundStyle(FXColors.fgTertiary)
-                            .textCase(.uppercase)
-                            .tracking(0.5)
-                            .padding(.horizontal, FXSpacing.md)
-                            .padding(.top, index == 0 ? FXSpacing.sm : FXSpacing.md)
-                            .padding(.bottom, FXSpacing.xs)
-                    }
+    private static func highlightKey(section: FXDropdownSection, item: FXDropdownItem) -> String {
+        "\(section.id)|\(item.id)"
+    }
 
-                    ForEach(section.items) { item in
-                        FXDropdownRow(item: item) {
-                            item.action()
-                            dismissDropdown()
+    private var dropdownPanel: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
+                        if let title = section.title, !title.isEmpty {
+                            Text(title)
+                                .font(FXTypography.caption)
+                                .foregroundStyle(FXColors.fgTertiary)
+                                .textCase(.uppercase)
+                                .tracking(0.5)
+                                .padding(.horizontal, FXSpacing.md)
+                                .padding(.top, index == 0 ? FXSpacing.sm : FXSpacing.md)
+                                .padding(.bottom, FXSpacing.xs)
+                        }
+
+                        ForEach(section.items) { item in
+                            let key = Self.highlightKey(section: section, item: item)
+                            FXDropdownRow(item: item, highlightKey: key, highlight: highlight) {
+                                item.action()
+                                dismissDropdown()
+                            }
+                            .id(key)
+                        }
+
+                        if index < sections.count - 1 {
+                            FXDivider()
+                                .padding(.horizontal, FXSpacing.md)
+                                .padding(.vertical, FXSpacing.sm)
                         }
                     }
-
-                    if index < sections.count - 1 {
-                        FXDivider()
-                            .padding(.horizontal, FXSpacing.md)
-                            .padding(.vertical, FXSpacing.sm)
-                    }
                 }
+                .padding(.vertical, FXSpacing.xs)
             }
-            .padding(.vertical, FXSpacing.xs)
+            .scrollIndicators(.hidden)
+            .onChange(of: highlight.key) { _, key in
+                guard let key else { return }
+                proxy.scrollTo(key)
+            }
         }
-        .scrollIndicators(.hidden)
         .frame(maxHeight: maxPanelHeight)
         .background(FXColors.bgSurface)
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
@@ -170,7 +199,6 @@ public struct FXDropdown<Label: View>: View {
             RoundedRectangle(cornerRadius: FXRadii.xl)
                 .strokeBorder(FXColors.borderMedium, lineWidth: 0.5)
         )
-        .shadow(color: FXColors.overlay.opacity(0.35), radius: 18, x: 0, y: 10)
     }
 
     private func toggleExpanded() {
@@ -187,13 +215,24 @@ public struct FXDropdown<Label: View>: View {
 
         NotificationCenter.default.post(name: .fxDropdownDidOpen, object: dropdownID)
         isExpanded = true
+        highlight.key = sections.lazy.flatMap { section in
+            section.items.lazy
+                .filter { $0.isSelected && $0.isEnabled }
+                .map { Self.highlightKey(section: section, item: $0) }
+        }.first
+        let navigableItems = sections.flatMap { section in
+            section.items.filter(\.isEnabled).map { (key: Self.highlightKey(section: section, item: $0), item: $0) }
+        }
         presenter.present(
             anchorView: anchorView,
             width: resolvedPanelWidth,
             maxHeight: maxPanelHeight,
             placement: placement,
             alignment: alignment,
-            content: AnyView(dropdownPanel.frame(width: resolvedPanelWidth, alignment: .leading))
+            content: AnyView(dropdownPanel.frame(width: resolvedPanelWidth, alignment: .leading)),
+            onKeyDown: { keyCode in
+                handleKey(keyCode, navigableItems: navigableItems)
+            }
         ) {
             isExpanded = false
         }
@@ -203,13 +242,47 @@ public struct FXDropdown<Label: View>: View {
         presenter.dismiss()
         isExpanded = false
     }
+
+    /// ↑/↓ move the highlight across enabled rows, Return/Enter chooses it.
+    /// Returns whether the key was consumed so it does not reach the view
+    /// behind the panel (e.g. the composer).
+    private func handleKey(
+        _ keyCode: UInt16,
+        navigableItems: [(key: String, item: FXDropdownItem)]
+    ) -> Bool {
+        guard !navigableItems.isEmpty else { return false }
+        let currentIndex = highlight.key.flatMap { key in
+            navigableItems.firstIndex { $0.key == key }
+        }
+        switch keyCode {
+        case 125: // down arrow
+            let next = currentIndex.map { min($0 + 1, navigableItems.count - 1) } ?? 0
+            highlight.key = navigableItems[next].key
+            return true
+        case 126: // up arrow
+            let previous = currentIndex.map { max($0 - 1, 0) } ?? navigableItems.count - 1
+            highlight.key = navigableItems[previous].key
+            return true
+        case 36, 76: // return, keypad enter
+            guard let currentIndex else { return false }
+            navigableItems[currentIndex].item.action()
+            dismissDropdown()
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 private struct FXDropdownRow: View {
     let item: FXDropdownItem
+    let highlightKey: String
+    let highlight: FXDropdownHighlight
     let action: () -> Void
 
-    @State private var isHovered = false
+    private var isHighlighted: Bool {
+        item.isEnabled && highlight.key == highlightKey
+    }
 
     var body: some View {
         Button(action: action) {
@@ -239,12 +312,18 @@ private struct FXDropdownRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, FXSpacing.md)
             .padding(.vertical, FXSpacing.sm)
-            .background(isHovered ? FXColors.bgHover : .clear)
+            .background(isHighlighted ? FXColors.bgHover : .clear)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(!item.isEnabled)
-        .onHover { isHovered = $0 }
+        .onHover { hovering in
+            if hovering, item.isEnabled {
+                highlight.key = highlightKey
+            } else if !hovering, highlight.key == highlightKey {
+                highlight.key = nil
+            }
+        }
     }
 
     private var titleColor: Color {
@@ -281,6 +360,7 @@ private final class FXDropdownPresenter {
     private var eventMonitors: [Any] = []
     private var observers: [NSObjectProtocol] = []
     private var onDismiss: (() -> Void)?
+    private var onKeyDown: ((UInt16) -> Bool)?
 
     func present(
         anchorView: NSView,
@@ -289,6 +369,7 @@ private final class FXDropdownPresenter {
         placement: FXDropdownPlacement,
         alignment: FXDropdownAlignment,
         content: AnyView,
+        onKeyDown: @escaping (UInt16) -> Bool,
         onDismiss: @escaping () -> Void
     ) {
         close(notify: false)
@@ -298,6 +379,7 @@ private final class FXDropdownPresenter {
         self.parentWindow = window
         self.anchorView = anchorView
         self.onDismiss = onDismiss
+        self.onKeyDown = onKeyDown
 
         let panel = FXDropdownPanel()
         let hostingController = NSHostingController(
@@ -319,6 +401,9 @@ private final class FXDropdownPresenter {
 
         window.addChildWindow(panel, ordered: .above)
         panel.orderFront(nil)
+        // The window server derives the shadow from the rounded, transparent
+        // content. A SwiftUI shadow would be clipped by the content-sized panel.
+        panel.invalidateShadow()
 
         self.panel = panel
         installObservers()
@@ -344,6 +429,7 @@ private final class FXDropdownPresenter {
 
         let dismissal = onDismiss
         onDismiss = nil
+        onKeyDown = nil
 
         if notify {
             dismissal?()
@@ -400,26 +486,35 @@ private final class FXDropdownPresenter {
 
     private func installEventMonitors() {
         let mouseMask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        let localMask: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        let localMask: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
 
         if let localMonitor = NSEvent.addLocalMonitorForEvents(
             matching: localMask,
             handler: { [weak self] event in
                 guard let self else { return event }
 
-                if event.type == .keyDown, event.keyCode == 53 {
-                    MainActor.assumeIsolated {
-                        self.close(notify: true)
+                if event.type == .keyDown {
+                    if event.keyCode == 53 {
+                        MainActor.assumeIsolated {
+                            self.close(notify: true)
+                        }
+                        return nil
                     }
-                    return nil
+                    let handled = MainActor.assumeIsolated {
+                        self.onKeyDown?(event.keyCode) ?? false
+                    }
+                    if handled { return nil }
                 }
 
-                let isMouseDown =
+                // Scrolling the content under an open panel would leave it
+                // floating away from its trigger, so treat it like a click.
+                let isDismissingEvent =
                     event.type == .leftMouseDown ||
                     event.type == .rightMouseDown ||
-                    event.type == .otherMouseDown
+                    event.type == .otherMouseDown ||
+                    event.type == .scrollWheel
 
-                if isMouseDown, !self.containsMouseLocation(NSEvent.mouseLocation) {
+                if isDismissingEvent, !self.containsMouseLocation(NSEvent.mouseLocation) {
                     MainActor.assumeIsolated {
                         self.close(notify: true)
                     }
@@ -526,7 +621,7 @@ private final class FXDropdownPanel: NSPanel {
 
         isOpaque = false
         backgroundColor = .clear
-        hasShadow = false
+        hasShadow = true
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         level = .floating

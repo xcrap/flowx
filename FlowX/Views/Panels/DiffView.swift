@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import AppKit
 import FXCore
 import FXDesign
@@ -795,19 +796,58 @@ struct DiffView: View {
             nextID += 1
         }
 
-        for (index, rawLine) in text.components(separatedBy: .newlines).enumerated() {
+        // Lines still expected in the current hunk, from its `@@` counts.
+        // Inside a hunk only the first character classifies a line, so
+        // content such as `-- comment`, `---` or `++i` is never mistaken for
+        // a file header.
+        var remainingOld = 0
+        var remainingNew = 0
+
+        for (index, rawLine) in Self.diffLines(text).enumerated() {
             if index.isMultiple(of: 256), Task.isCancelled {
                 return []
             }
             if rawLine.hasPrefix("@@") {
-                let hunkLines = Self.hunkLineNumbers(from: rawLine)
-                oldLine = hunkLines?.0
-                newLine = hunkLines?.1
+                let hunk = Self.hunkHeader(from: rawLine)
+                oldLine = hunk?.oldStart
+                newLine = hunk?.newStart
+                // An unparseable header still classifies following lines by
+                // prefix until the next header.
+                remainingOld = hunk?.oldCount ?? .max
+                remainingNew = hunk?.newCount ?? .max
                 appendLine(kind: .hunk, text: rawLine, oldLine: nil, newLine: nil)
                 continue
             }
 
-            if rawLine.hasPrefix("diff --git")
+            if remainingOld > 0 || remainingNew > 0 {
+                switch rawLine.first {
+                case "+":
+                    appendLine(kind: .addition, text: rawLine, oldLine: nil, newLine: newLine)
+                    newLine = newLine.map { $0 + 1 }
+                    remainingNew -= 1
+                    continue
+                case "-":
+                    appendLine(kind: .deletion, text: rawLine, oldLine: oldLine, newLine: nil)
+                    oldLine = oldLine.map { $0 + 1 }
+                    remainingOld -= 1
+                    continue
+                case " ", nil:
+                    appendLine(kind: .context, text: rawLine, oldLine: oldLine, newLine: newLine)
+                    oldLine = oldLine.map { $0 + 1 }
+                    newLine = newLine.map { $0 + 1 }
+                    remainingOld -= 1
+                    remainingNew -= 1
+                    continue
+                case "\\":
+                    continue
+                default:
+                    remainingOld = 0
+                    remainingNew = 0
+                }
+            }
+
+            if rawLine.isEmpty
+                || rawLine.hasPrefix("diff --git")
                 || rawLine.hasPrefix("index ")
                 || rawLine.hasPrefix("--- ")
                 || rawLine.hasPrefix("+++ ")
@@ -815,24 +855,19 @@ struct DiffView: View {
                 continue
             }
 
-            if rawLine.hasPrefix("+"), !rawLine.hasPrefix("+++") {
-                appendLine(kind: .addition, text: rawLine, oldLine: nil, newLine: newLine)
-                newLine = newLine.map { $0 + 1 }
-                continue
-            }
-
-            if rawLine.hasPrefix("-"), !rawLine.hasPrefix("---") {
-                appendLine(kind: .deletion, text: rawLine, oldLine: oldLine, newLine: nil)
-                oldLine = oldLine.map { $0 + 1 }
-                continue
-            }
-
-            appendLine(kind: .context, text: rawLine, oldLine: oldLine, newLine: newLine)
-            oldLine = oldLine.map { $0 + 1 }
-            newLine = newLine.map { $0 + 1 }
+            appendLine(kind: .context, text: rawLine, oldLine: nil, newLine: nil)
         }
 
         return lines
+    }
+
+    /// Splits on LF and drops a trailing CR, so CRLF files do not gain a
+    /// phantom blank line per row and Unicode line separators inside content
+    /// do not split a diff line.
+    nonisolated private static func diffLines(_ text: String) -> [String] {
+        text.components(separatedBy: "\n").map { line in
+            line.hasSuffix("\r") ? String(line.dropLast()) : line
+        }
     }
 
     nonisolated private static func splitRows(from parsedLines: [ParsedDiffLine]) -> SplitSectionRows {
@@ -1060,7 +1095,7 @@ struct DiffView: View {
             currentRawLines.removeAll(keepingCapacity: true)
         }
 
-        for (index, rawLine) in text.components(separatedBy: .newlines).enumerated() {
+        for (index, rawLine) in Self.diffLines(text).enumerated() {
             if index.isMultiple(of: 256), Task.isCancelled {
                 return []
             }
@@ -1152,20 +1187,26 @@ struct DiffView: View {
         return columns
     }
 
-    nonisolated private static func hunkLineNumbers(from line: String) -> (Int, Int)? {
+    nonisolated private static func hunkHeader(
+        from line: String
+    ) -> (oldStart: Int, oldCount: Int, newStart: Int, newCount: Int)? {
         let components = line.split(separator: " ")
         guard components.count >= 3,
-              let oldValue = Self.hunkComponentStart(String(components[1])),
-              let newValue = Self.hunkComponentStart(String(components[2])) else {
+              let old = Self.hunkRange(components[1]),
+              let new = Self.hunkRange(components[2]) else {
             return nil
         }
-        return (oldValue, newValue)
+        return (old.start, old.count, new.start, new.count)
     }
 
-    nonisolated private static func hunkComponentStart(_ component: String) -> Int? {
+    /// Parses `-a,b` / `+c,d`; a missing count means one line.
+    nonisolated private static func hunkRange(_ component: Substring) -> (start: Int, count: Int)? {
         let trimmed = component.trimmingCharacters(in: CharacterSet(charactersIn: "-+"))
-        let start = trimmed.split(separator: ",").first.map(String.init) ?? trimmed
-        return Int(start)
+        let parts = trimmed.split(separator: ",", omittingEmptySubsequences: false)
+        guard let start = parts.first.flatMap({ Int($0) }) else { return nil }
+        let count = parts.count > 1 ? Int(parts[1]) : 1
+        guard let count else { return nil }
+        return (start, count)
     }
 
     nonisolated private static func diffAnchorPath(from line: String) -> String? {
@@ -1173,6 +1214,17 @@ struct DiffView: View {
         guard line.hasPrefix(prefix) else { return nil }
 
         let header = line.dropFirst(prefix.count)
+        // Git leaves paths with spaces unquoted (`a/My Notes.md b/My Notes.md`),
+        // so whitespace tokenizing would yield `Notes.md`. When both sides name
+        // the same path the header is exactly `a/P b/P`; split it by length.
+        if header.hasPrefix("a/"), header.count > 5, (header.count - 5).isMultiple(of: 2) {
+            let pathLength = (header.count - 5) / 2
+            let oldPath = header.dropFirst(2).prefix(pathLength)
+            let rest = header.dropFirst(2 + pathLength)
+            if rest.hasPrefix(" b/"), rest.dropFirst(3) == oldPath {
+                return String(oldPath)
+            }
+        }
         var cursor = header.startIndex
         guard let oldToken = gitPathToken(in: header, cursor: &cursor),
               let newToken = gitPathToken(in: header, cursor: &cursor) else {
@@ -1539,7 +1591,23 @@ struct DiffView: View {
     }
 
     private func openFile(_ path: String, in project: ProjectState) {
-        NSWorkspace.shared.open(project.project.rootURL.appendingPathComponent(path))
+        let url = project.project.rootURL.appendingPathComponent(path)
+        let workspace = NSWorkspace.shared
+        // Agents write these files. A plain `open(url)` would launch an
+        // `.app`, `.command` or `.terminal` file instead of showing it, so only
+        // passive viewer types use the default handler; everything else goes
+        // to the user's code/text editor, or is revealed in Finder.
+        if let type = UTType(filenameExtension: url.pathExtension),
+           [.image, .pdf, .audiovisualContent].contains(where: type.conforms(to:)) {
+            workspace.open(url)
+            return
+        }
+        guard let editor = workspace.urlForApplication(toOpen: .sourceCode)
+            ?? workspace.urlForApplication(toOpen: .plainText) else {
+            workspace.activateFileViewerSelecting([url])
+            return
+        }
+        workspace.open([url], withApplicationAt: editor, configuration: NSWorkspace.OpenConfiguration())
     }
 
 }

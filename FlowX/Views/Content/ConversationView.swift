@@ -102,16 +102,26 @@ struct ConversationView: View {
     @Bindable var agent: AgentInfo
 
     @State private var editingQueuedPromptIndex: Int?
+    /// The queue drains from the front, so an edit follows its prompt text
+    /// rather than a position that may now hold a different prompt.
+    @State private var editingQueuedPromptOriginal: String?
     @State private var editingQueuedPromptText = ""
     @State private var initialScrollRestorePending = true
     @State private var transcriptPrepared = false
     @State private var renderSnapshot = ConversationRenderSnapshot()
     @State private var presentationRevision = 0
+    /// Chosen once per task view. Swapping stacks changes every row's identity,
+    /// which resets expanded groups, parsed markdown and decoded images. A
+    /// growing transcript may upgrade to lazy once (never mid-stream), but a
+    /// shrink never swaps it back.
+    @State private var usesLazyTranscript: Bool?
+    @State private var isRenderingTranscript = false
+    @State private var isTranscriptVisible = false
 
     private var renderedItems: [ConversationDisplayItem] { renderSnapshot.items }
 
     private let maxContentWidth: CGFloat = FXLayout.readableContentWidth
-    private let lazyTranscriptThreshold = 32
+    private static let lazyTranscriptThreshold = 32
     private static let renderExecutor = BoundedTaskExecutor(maxConcurrentTasks: 2)
     private static let renderCache = ConversationRenderCache(
         maximumEntryCount: 6,
@@ -130,6 +140,7 @@ struct ConversationView: View {
             _renderSnapshot = State(initialValue: Self.renderCache.snapshot(for: agent.id)
                 ?? ConversationRenderSnapshot(items: cachedItems))
             _transcriptPrepared = State(initialValue: true)
+            _usesLazyTranscript = State(initialValue: cachedItems.count > Self.lazyTranscriptThreshold)
         }
     }
 
@@ -170,43 +181,68 @@ struct ConversationView: View {
         }
         .background(FXColors.contentBg)
         .task(id: renderKey) {
-            let key = renderKey
-            if let cachedItems = Self.renderCache.items(for: key) {
-                installRenderedItems(Self.renderCache.snapshot(for: agent.id)
-                    ?? ConversationRenderSnapshot(items: cachedItems))
-                return
-            }
-
-            let messages = agent.messages
-            if messages.isEmpty, key.isLoadingNativeTranscript {
-                transcriptPrepared = false
-                return
-            }
-
-            let previous = Self.renderCache.snapshot(for: key.agentID) ?? renderSnapshot
-            do {
-                let snapshot = try await Self.renderExecutor.run(priority: .userInitiated) {
-                    var next = previous
-                    next.items = try next.turns.render(messages: messages, isRunning: key.isRunning) {
-                        try Self.makeDisplayItems(from: $0, isRunning: $1)
-                    }
-                    return next
-                }
-                guard !Task.isCancelled, key == renderKey else { return }
-                Self.renderCache.insert(snapshot, for: key, messageCount: messages.count)
-                installRenderedItems(snapshot)
-            } catch {
-                return
+            // Coalesce rather than restart. Cancelling the pass in flight on
+            // every change starved the display whenever changes arrived faster
+            // than a render (a busy provider task refreshing every second):
+            // nothing was ever installed. One pass runs at a time, installs
+            // its result, then loops until it has rendered the latest state.
+            guard !isRenderingTranscript else { return }
+            isRenderingTranscript = true
+            defer { isRenderingTranscript = false }
+            while true {
+                let key = renderKey
+                await renderTranscript(for: key)
+                guard isTranscriptVisible, key != renderKey else { break }
             }
         }
+        .onAppear {
+            isTranscriptVisible = true
+        }
         .onDisappear {
+            isTranscriptVisible = false
             if appState.isBootstrapped {
                 appState.scheduleSave()
             }
         }
     }
 
+    private func renderTranscript(for key: MessageRenderKey) async {
+        if let cachedItems = Self.renderCache.items(for: key) {
+            installRenderedItems(Self.renderCache.snapshot(for: agent.id)
+                ?? ConversationRenderSnapshot(items: cachedItems))
+            return
+        }
+
+        let messages = agent.messages
+        if messages.isEmpty, key.isLoadingNativeTranscript {
+            transcriptPrepared = false
+            return
+        }
+
+        let previous = Self.renderCache.snapshot(for: key.agentID) ?? renderSnapshot
+        // Unstructured, so SwiftUI cancelling this `.task` when the key
+        // changes does not discard work that is about to finish.
+        let render = Task {
+            try await Self.renderExecutor.run(priority: .userInitiated) {
+                var next = previous
+                next.items = try next.turns.render(messages: messages, isRunning: key.isRunning) {
+                    try Self.makeDisplayItems(from: $0, isRunning: $1)
+                }
+                return next
+            }
+        }
+        guard let snapshot = try? await render.value else { return }
+        Self.renderCache.insert(snapshot, for: key, messageCount: messages.count)
+        installRenderedItems(snapshot)
+    }
+
     private func installRenderedItems(_ snapshot: ConversationRenderSnapshot) {
+        let wantsLazy = snapshot.items.count > Self.lazyTranscriptThreshold
+        if usesLazyTranscript == nil {
+            usesLazyTranscript = wantsLazy
+        } else if usesLazyTranscript == false, wantsLazy, !agent.isTranscriptRunning {
+            usesLazyTranscript = true
+        }
         renderSnapshot = snapshot
         presentationRevision &+= 1
         if !transcriptPrepared {
@@ -245,12 +281,12 @@ struct ConversationView: View {
 
     @ViewBuilder
     private var transcriptStack: some View {
-        if renderedItems.count <= lazyTranscriptThreshold {
-            VStack(spacing: 0) {
+        if usesLazyTranscript == true {
+            LazyVStack(spacing: 0) {
                 transcriptRows
             }
         } else {
-            LazyVStack(spacing: 0) {
+            VStack(spacing: 0) {
                 transcriptRows
             }
         }
@@ -738,6 +774,9 @@ struct ConversationView: View {
         .frame(maxWidth: maxContentWidth, alignment: .leading)
         .frame(maxWidth: .infinity)
         .padding(.horizontal, FXSpacing.xxl)
+        .onChange(of: agent.conversationState.queuedPromptCount) { _, _ in
+            relocateEditedQueuedPrompt()
+        }
     }
 
     private var approvalTray: some View {
@@ -1049,17 +1088,35 @@ struct ConversationView: View {
     }
 
     private func beginEditingQueuedPrompt(at index: Int) {
+        guard let original = appState.queuedPromptText(at: index, for: agent) else { return }
         editingQueuedPromptIndex = index
-        editingQueuedPromptText = appState.queuedPromptText(at: index, for: agent)
-            ?? agent.conversationState.visibleQueuedPromptPreviews[index]
+        editingQueuedPromptOriginal = original
+        editingQueuedPromptText = original
     }
 
     private func cancelEditingQueuedPrompt() {
         editingQueuedPromptIndex = nil
+        editingQueuedPromptOriginal = nil
         editingQueuedPromptText = ""
     }
 
+    /// Re-finds the edited prompt after the queue changes; if it was already
+    /// sent or removed, the edit is abandoned instead of overwriting another.
+    private func relocateEditedQueuedPrompt() {
+        guard let original = editingQueuedPromptOriginal else { return }
+        if let index = appState.queuedPromptIndex(
+            of: original,
+            preferring: editingQueuedPromptIndex,
+            for: agent
+        ) {
+            editingQueuedPromptIndex = index
+        } else {
+            cancelEditingQueuedPrompt()
+        }
+    }
+
     private func saveQueuedPromptEdit() {
+        relocateEditedQueuedPrompt()
         guard let index = editingQueuedPromptIndex else { return }
         appState.updateQueuedPrompt(at: index, with: editingQueuedPromptText, for: agent)
         cancelEditingQueuedPrompt()
@@ -1237,6 +1294,7 @@ private struct ConversationScrollCoordinator: NSViewRepresentable {
         private var observingBounds = false
         private var observingFrame = false
         private var observingLiveScroll = false
+        private var scrollWheelMonitor: Any?
 
         private var activeRestoreKey: UUID?
         private var hasCompletedInitialRestore = false
@@ -1296,6 +1354,10 @@ private struct ConversationScrollCoordinator: NSViewRepresentable {
         }
 
         func detach() {
+            if let scrollWheelMonitor {
+                NSEvent.removeMonitor(scrollWheelMonitor)
+            }
+            scrollWheelMonitor = nil
             restoreTask?.cancel()
             followTask?.cancel()
             settleTimer?.invalidate()
@@ -1437,6 +1499,51 @@ private struct ConversationScrollCoordinator: NSViewRepresentable {
                 object: enclosingScrollView
             )
             observingLiveScroll = true
+
+            scrollWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                MainActor.assumeIsolated {
+                    self?.handleScrollWheel(event)
+                }
+                return event
+            }
+        }
+
+        /// Trackpads and Magic Mouse post live-scroll notifications, but a
+        /// classic wheel's discrete ticks do not, so streaming flushes kept
+        /// snapping it back to the bottom. Treat an upward tick over this
+        /// transcript as the reader taking over; the settle timer then
+        /// reports where they stopped (re-pinning if back at the bottom).
+        /// Detecting it from the event, not from bounds changes, keeps content
+        /// that shrinks at the top (message cap, lazy row sizing) from
+        /// unpinning the view.
+        private func handleScrollWheel(_ event: NSEvent) {
+            guard hasCompletedInitialRestore,
+                  let scrollView,
+                  event.window === scrollView.window,
+                  event.phase.isEmpty,
+                  event.momentumPhase.isEmpty,
+                  event.scrollingDeltaY > 0 else {
+                return
+            }
+            let location = scrollView.convert(event.locationInWindow, from: nil)
+            guard scrollView.bounds.contains(location) else { return }
+            isLiveScrolling = true
+            stickToBottom = false
+            followTask?.cancel()
+            followTask = nil
+            // A tick that cannot move the view (already at the top, or short
+            // content) posts no bounds change; settle anyway so following
+            // resumes if the reader is still at the bottom.
+            lastBoundsChangeTime = ProcessInfo.processInfo.systemUptime
+            if settleTimer == nil {
+                settleTimer = Timer.scheduledTimer(
+                    timeInterval: 0.05,
+                    target: self,
+                    selector: #selector(handleSettleTimer(_:)),
+                    userInfo: nil,
+                    repeats: true
+                )
+            }
         }
 
         private func scheduleInitialRestore() {

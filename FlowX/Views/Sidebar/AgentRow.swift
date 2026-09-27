@@ -12,6 +12,7 @@ struct ThreadRow: View {
     @Bindable var project: ProjectState
 
     @State private var isHovered = false
+    @State private var isLifecycleMenuOpen = false
     @FocusState private var isFocused: Bool
 
     private var isSelected: Bool {
@@ -66,7 +67,7 @@ struct ThreadRow: View {
                 }
             }
         }
-        .accessibilityAddTraits(.isButton)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
         .accessibilityLabel("\(agent.providerName) thread, \(displayTitle)")
         .accessibilityHint("Open this thread in \(project.project.name)")
         .accessibilityAction {
@@ -112,7 +113,8 @@ struct ThreadRow: View {
             enabled: !isLifecycleActionInProgress,
             panelWidth: 220,
             placement: .automatic,
-            alignment: .trailing
+            alignment: .trailing,
+            onExpandedChange: { isLifecycleMenuOpen = $0 }
         ) { isExpanded in
             Group {
                 if isLifecycleActionInProgress {
@@ -213,7 +215,7 @@ struct ThreadRow: View {
     }
 
     private var showsLifecycleMenu: Bool {
-        (isHovered || isFocused) && hasLifecycleMenu
+        (isHovered || isFocused || isLifecycleMenuOpen) && hasLifecycleMenu
     }
 
     private var hasLifecycleMenu: Bool {

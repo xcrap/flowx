@@ -321,7 +321,11 @@ enum ProjectPersistence {
         let url = saveURL
         let maxBytes = maxProjectFileBytes
         guard let payload = await Task.detached(priority: .userInitiated, operation: {
-            decode(PersistedFlowXAppState.self, primaryURL: url, maxBytes: maxBytes)
+            let payload = decode(PersistedFlowXAppState.self, primaryURL: url, maxBytes: maxBytes)
+            if payload == nil {
+                preserveUnreadableState(primaryURL: url)
+            }
+            return payload
         }).value else {
             return
         }
@@ -564,6 +568,30 @@ enum ProjectPersistence {
             PersistedNativePresentationID(identity: $0.key, agentID: $0.value)
         }.sorted {
             Self.nativeIdentitySortKey($0.identity) < Self.nativeIdentitySortKey($1.identity)
+        }
+    }
+
+    /// The app starts empty when neither copy decodes (e.g. after a downgrade
+    /// or past the size cap), and its first save rewrites both. Keep the old
+    /// state beside them so projects can still be recovered by hand.
+    nonisolated private static func preserveUnreadableState(primaryURL: URL) {
+        let manager = FileManager.default
+        guard let source = [primaryURL, primaryURL.appendingPathExtension("backup")]
+            .first(where: { manager.fileExists(atPath: $0.path) }) else {
+            return
+        }
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let destination = primaryURL.deletingLastPathComponent()
+            .appendingPathComponent("projects.unreadable-\(timestamp).json")
+        do {
+            try manager.copyItem(at: source, to: destination)
+            projectPersistenceLogger.error(
+                "Could not read saved projects; preserved a copy at \(destination.path, privacy: .public)"
+            )
+        } catch {
+            projectPersistenceLogger.error(
+                "Could not preserve unreadable projects file: \(error.localizedDescription, privacy: .public)"
+            )
         }
     }
 

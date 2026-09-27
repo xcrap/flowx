@@ -8,6 +8,9 @@ struct FlowXApp: App {
     @State private var appState: AppState
 
     init() {
+        // Provider CLIs and git run as child processes. Writing to one that
+        // just exited must surface as EPIPE, not terminate FlowX.
+        signal(SIGPIPE, SIG_IGN)
         let preferences = AppPreferences()
         _preferences = State(initialValue: preferences)
         _appState = State(initialValue: AppState(preferences: preferences))
@@ -29,6 +32,7 @@ struct FlowXApp: App {
                         themeVersion: preferences.themeVersion
                     )
                 )
+                .onAppear { preferences.observeSystemAppearance(of: NSApplication.shared) }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1400, height: 900)

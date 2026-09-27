@@ -180,6 +180,12 @@ private final class ConversationPersistenceWriter: @unchecked Sendable {
         }
     }
 
+    func allowConversation(at url: URL) {
+        lock.lock()
+        removedConversations.remove(url)
+        lock.unlock()
+    }
+
     func removeConversation(at url: URL, assetDirectoryURL: URL) {
         lock.lock()
         removedConversations.insert(url)
@@ -322,6 +328,16 @@ enum ConversationPersistence {
 
     static func save(agent: AgentInfo, projectID: UUID) {
         let state = agent.conversationState
+        // Provider-native tasks hydrate their cache lazily on first open. An
+        // unopened task is empty in memory, and saving it (e.g. at quit) would
+        // replace its cache and backup and prune every image asset it owns.
+        if agent.nativeThreadBinding != nil,
+           !agent.hasHydratedNativeCache,
+           state.messages.isEmpty,
+           state.unsentPrompt == nil,
+           agent.nativeImageSidecar.isEmpty {
+            return
+        }
         agent.nativeImageSidecar = ConversationAssetStore.updatedNativeImageSidecar(
             existing: agent.nativeImageSidecar,
             messages: state.messages,
@@ -386,6 +402,13 @@ enum ConversationPersistence {
         for agent in project.agents {
             save(agent: agent, projectID: project.id)
         }
+    }
+
+    /// Removal blocks late writes for that agent ID. Provider tasks reuse a
+    /// deterministic ID, so one that returns (e.g. put back from Trash) must
+    /// lift the block or its conversation would silently never save again.
+    static func reviveConversation(agentID: UUID, projectID: UUID) {
+        writer.allowConversation(at: conversationFileURL(agentID: agentID, projectID: projectID))
     }
 
     static func remove(agentID: UUID, projectID: UUID) {

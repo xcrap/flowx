@@ -31,6 +31,23 @@ public final class TerminalClippingHostView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// SwiftTerm renders through an `MTKView` subview. Default hit-testing
+    /// returns that view, which cannot become first responder, so clicking
+    /// the terminal never gave it keyboard focus (typing kept going to the
+    /// composer). Route clicks on passive subviews to the terminal itself;
+    /// real controls such as the scroller or find bar keep their hits.
+    public override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        guard hit !== terminalView,
+              hit.isDescendant(of: terminalView),
+              !(hit is NSControl),
+              !(hit is NSText),
+              !hit.acceptsFirstResponder else {
+            return hit
+        }
+        return terminalView
+    }
+
     public override func layout() {
         super.layout()
         if terminalView.frame != bounds {

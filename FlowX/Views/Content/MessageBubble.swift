@@ -911,9 +911,14 @@ enum MessageImagePresentation {
 
 @MainActor
 private enum MessageRenderCache {
-    private static let maximumEntries = 48
+    private static let maximumEntries = 256
     private static var blocksByKey: [MessageTextRenderKey: [MessageRichBlock]] = [:]
     private static var orderedKeys: [MessageTextRenderKey] = []
+
+    /// Lookup without LRU bookkeeping, cheap enough for view initializers.
+    static func peek(_ key: MessageTextRenderKey) -> [MessageRichBlock]? {
+        blocksByKey[key]
+    }
 
     static func blocks(for key: MessageTextRenderKey) -> [MessageRichBlock]? {
         guard let blocks = blocksByKey[key] else { return nil }
@@ -947,6 +952,22 @@ private struct MessageTextView: View {
 
     @State private var blocks: [MessageRichBlock] = []
     @State private var renderedKey: MessageTextRenderKey?
+
+    init(text: String, cacheKey: String?, isStreaming: Bool) {
+        self.text = text
+        self.cacheKey = cacheKey
+        self.isStreaming = isStreaming
+        // A recreated row (scrolling back, switching tasks, end of a stream)
+        // should draw its rich layout on the first frame instead of flashing
+        // raw markdown and then changing height under the reader.
+        if !isStreaming, let cacheKey {
+            let key = MessageTextRenderKey(identity: cacheKey, text: text)
+            if let cached = MessageRenderCache.peek(key) {
+                _blocks = State(initialValue: cached)
+                _renderedKey = State(initialValue: key)
+            }
+        }
+    }
 
     private var renderKey: MessageTextRenderKey? {
         guard !isStreaming, let cacheKey else { return nil }

@@ -65,7 +65,7 @@ struct TranscriptSelectionMenuLimiter: NSViewRepresentable {
                   let window = scopeView.window,
                   window.isKeyWindow,
                   event.window === window,
-                  let textView = selectedReadOnlyTextView(in: window),
+                  let textView = selectedReadOnlyTextView(at: event, in: window),
                   let text = selectedString(in: textView),
                   !text.isEmpty else {
                 return false
@@ -118,28 +118,21 @@ struct TranscriptSelectionMenuLimiter: NSViewRepresentable {
             return item
         }
 
-        private func selectedReadOnlyTextView(in window: NSWindow) -> NSTextView? {
-            if let textView = window.firstResponder as? NSTextView,
-               !textView.isEditable,
-               textView.selectedRange().length > 0 {
-                return textView
-            }
-
+        /// Only the text view under the pointer qualifies. Text views keep
+        /// their selection after losing focus, so a window-wide search would
+        /// replace the context menu of every other control (sidebar, terminal,
+        /// browser, images) after any transcript selection.
+        private func selectedReadOnlyTextView(at event: NSEvent, in window: NSWindow) -> NSTextView? {
             guard let contentView = window.contentView else { return nil }
-            return selectedReadOnlyTextView(in: contentView)
-        }
-
-        private func selectedReadOnlyTextView(in view: NSView) -> NSTextView? {
-            if let textView = view as? NSTextView,
-               !textView.isEditable,
-               textView.selectedRange().length > 0 {
-                return textView
-            }
-
-            for subview in view.subviews.reversed() {
-                if let match = selectedReadOnlyTextView(in: subview) {
-                    return match
+            let point = contentView.superview?.convert(event.locationInWindow, from: nil)
+                ?? event.locationInWindow
+            var candidate = contentView.hitTest(point)
+            while let view = candidate {
+                if let textView = view as? NSTextView {
+                    guard !textView.isEditable, textView.selectedRange().length > 0 else { return nil }
+                    return textView
                 }
+                candidate = view.superview
             }
             return nil
         }

@@ -1263,6 +1263,24 @@ private actor CleanupInvocationCounter {
     }
 }
 
+@Test func claudeAnswersUnsupportedControlRequestsSoTheTurnCannotHang() throws {
+    let controller = ClaudeTurnController()
+    let responsePipe = Pipe()
+    controller.setWriter(responsePipe.fileHandleForWriting)
+    let parser = ClaudeStreamParser(controller: controller)
+    let events = parser.events(for: #"{"type":"control_request","request_id":"request-hook","request":{"subtype":"hook_callback","callback_id":"hook-1"}}"#)
+    #expect(events.isEmpty)
+    controller.closeInput()
+
+    let responseData = responsePipe.fileHandleForReading.readDataToEndOfFile()
+    let envelope = try #require(JSONSerialization.jsonObject(with: responseData) as? [String: Any])
+    #expect(envelope["type"] as? String == "control_response")
+    let response = try #require(envelope["response"] as? [String: Any])
+    #expect(response["subtype"] as? String == "error")
+    #expect(response["request_id"] as? String == "request-hook")
+    #expect((response["error"] as? String)?.contains("hook_callback") == true)
+}
+
 @Test func claudeControllerWritesASecondLiveUserMessageAndRejectsClosedInput() throws {
     let controller = ClaudeTurnController()
     let inputPipe = Pipe()
@@ -1373,12 +1391,23 @@ private actor CleanupInvocationCounter {
     #expect(summaries.first?.model == "claude-fable-5")
     #expect(summaries.first?.currentContextTokens == 37_417)
 
+    #expect(await store.revision(id: sessionID) == nil)
     let thread = try await store.read(id: sessionID, workingDirectory: workspace)
     #expect(thread.summary.currentContextTokens == 37_417)
     #expect(thread.messages.count == 2)
     #expect(thread.messages.first?.textContent == "Build it")
     #expect(thread.messages.last?.textContent == "Built")
     #expect(thread.messages.last?.content.count == 2)
+
+    // Polling compares this cheap stat-based revision instead of re-reading.
+    let revision = try #require(await store.revision(id: sessionID))
+    #expect(await store.revision(id: sessionID) == revision)
+    let transcript = project.appendingPathComponent(sessionID).appendingPathExtension("jsonl")
+    let handle = try FileHandle(forWritingTo: transcript)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data((#"{"type":"last-prompt","sessionId":"11111111-2222-4333-8444-555555555555","lastPrompt":"More"}"# + "\n").utf8))
+    try handle.close()
+    #expect(await store.revision(id: sessionID) != revision)
 }
 
 @Test func claudeNativeStoreImportsUserImagesInBlockOrderWithoutPlaceholders() async throws {

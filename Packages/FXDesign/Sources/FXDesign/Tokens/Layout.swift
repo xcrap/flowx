@@ -18,4 +18,5 @@ public enum FXLayout {
     public static let diffNavigatorWidth: CGFloat = 248
     public static let diffNavigatorSideBySideWidth: CGFloat = 720
     public static let diffNavigatorCompactHeight: CGFloat = 200
+    public static let modalWidth: CGFloat = 440
 }

@@ -52,6 +52,9 @@ final class BrowserSessionCache {
 @MainActor
 final class BrowserViewModel: NSObject, ObservableObject {
     @Published var urlText: String = ""
+    /// While the address field is focused, navigation callbacks (e.g. a dev
+    /// server hot reload) must not replace what the user is typing.
+    var isEditingAddress = false
     @Published var pageTitle: String = ""
     @Published var canGoBack = false
     @Published var canGoForward = false
@@ -102,6 +105,7 @@ final class BrowserViewModel: NSObject, ObservableObject {
         attachedWebViewID = webViewID
         self.webView = webView
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
 
         if let pendingURLString {
@@ -127,7 +131,12 @@ final class BrowserViewModel: NSObject, ObservableObject {
         return webView
     }
 
+    func setAddressEditing(_ isEditing: Bool) {
+        isEditingAddress = isEditing
+    }
+
     func loadCurrentInput() {
+        isEditingAddress = false
         load(urlText)
     }
 
@@ -273,7 +282,9 @@ final class BrowserViewModel: NSObject, ObservableObject {
 
         if let currentURL = webView?.url, isPreviewURL(currentURL) {
             let currentURLString = currentURL.absoluteString
-            urlText = currentURLString
+            if !isEditingAddress {
+                urlText = currentURLString
+            }
             if lastCommittedURLString != currentURLString {
                 lastCommittedURLString = currentURLString
                 onCommittedURLChange?(currentURLString)
@@ -312,6 +323,26 @@ final class BrowserViewModel: NSObject, ObservableObject {
         }
 
         errorMessage = detail
+    }
+}
+
+extension BrowserViewModel: WKUIDelegate {
+    /// A single-pane preview has nowhere to open a second window. Load
+    /// `target=_blank` links and `window.open` (e.g. OAuth pop-ups) in place
+    /// instead of silently dropping them.
+    nonisolated func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        MainActor.assumeIsolated {
+            let request = navigationAction.request
+            if let scheme = request.url?.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+                _ = webView.load(request)
+            }
+        }
+        return nil
     }
 }
 
@@ -370,6 +401,7 @@ struct BrowserPanel: View {
     let agent: AgentInfo
 
     @ObservedObject private var browser: BrowserViewModel
+    @FocusState private var addressFocused: Bool
 
     init(agent: AgentInfo, browser: BrowserViewModel) {
         self.agent = agent
@@ -433,6 +465,10 @@ struct BrowserPanel: View {
                 .clipShape(RoundedRectangle(cornerRadius: FXRadii.xs))
                 .focusEffectDisabled()
                 .accessibilityLabel("Browser address")
+                .focused($addressFocused)
+                .onChange(of: addressFocused) { _, isFocused in
+                    browser.setAddressEditing(isFocused)
+                }
                 .onSubmit(browser.loadCurrentInput)
 
             toolbarButton("xmark", label: "Clear page", enabled: browser.hasPage) {

@@ -17,7 +17,15 @@ public final class ConversationState {
     public var streamingText: String = ""
     public var streamingRevision: Int = 0
     public private(set) var completedToolUseIDs: Set<String> = []
-    public var inputText: String = ""
+    public var inputText: String = "" {
+        didSet {
+            let hasText = inputText.contains { !$0.isWhitespace }
+            if hasText != hasDraftText { hasDraftText = hasText }
+        }
+    }
+    /// Changes only when the draft flips between blank and non-blank, so
+    /// app-wide observers (menu commands) don't re-evaluate per keystroke.
+    public private(set) var hasDraftText = false
     public var unsentPrompt: UnsentConversationPrompt?
     public var error: String?
     public var sessionID: String?

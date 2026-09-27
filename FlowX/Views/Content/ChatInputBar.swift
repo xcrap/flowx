@@ -9,7 +9,8 @@ struct ChatInputBar: View {
     @Environment(AppState.self) private var appState
     @Environment(AppPreferences.self) private var preferences
     @Bindable var agent: AgentInfo
-    @State private var composerFocused = false
+    @State private var composerFocusRequest = 0
+    @State private var controlsOverflowTrailing = false
     @State private var composerEditorHeight: CGFloat = 28
     @State private var isDropTargeted = false
     @State private var attachmentFeedback: String?
@@ -38,9 +39,8 @@ struct ChatInputBar: View {
                     ComposerNativeTextEditor(
                         text: $agent.conversationState.inputText,
                         measuredHeight: $composerEditorHeight,
-                        isFocused: composerFocused,
+                        focusRequest: composerFocusRequest,
                         isEnabled: !isSubmittingSteer,
-                        onFocusChange: { composerFocused = $0 },
                         onPasteImage: pasteImageFromClipboard,
                         onDropImages: addDroppedImages,
                         onDropTargeted: { isDropTargeted = $0 }
@@ -163,6 +163,26 @@ struct ChatInputBar: View {
                             )
                             .accessibilityLabel("Agent access")
                             .accessibilityValue(accessMenuLabel)
+                        }
+                    }
+                    // Narrow layouts (git panel or browser open) clip this row;
+                    // fade the trailing edge while more controls are off-screen.
+                    .onScrollGeometryChange(for: Bool.self) { geometry in
+                        geometry.contentSize.width - geometry.contentOffset.x - geometry.containerSize.width > 1
+                    } action: { _, hasMore in
+                        controlsOverflowTrailing = hasMore
+                    }
+                    .mask {
+                        HStack(spacing: 0) {
+                            Rectangle()
+                            if controlsOverflowTrailing {
+                                LinearGradient(
+                                    colors: [FXColors.fg, FXColors.fg.opacity(0)],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                                .frame(width: FXSpacing.xxl)
+                            }
                         }
                     }
 
@@ -634,17 +654,20 @@ struct ChatInputBar: View {
         }
     }
 
+    // Unset values defer to the provider's own configuration. Each control
+    // names what it controls so a native task does not show several
+    // identical "Provider setting" chips.
     private func resolvedAccessLabel(_ access: AgentAccess?) -> String {
-        access.map(accessLabel) ?? "Provider setting"
+        access.map(accessLabel) ?? "Provider access"
     }
 
     private func resolvedModeLabel(_ mode: AgentMode?) -> String {
-        guard let mode else { return "Provider setting" }
+        guard let mode else { return "Provider mode" }
         return mode == .plan ? "Plan" : "Chat"
     }
 
     private func modelName(for modelID: String?) -> String {
-        guard let modelID else { return "Provider setting" }
+        guard let modelID else { return "Provider model" }
         let advertisedName = currentProvider?.availableModels
             .first(where: { $0.id == modelID })?
             .name
@@ -652,7 +675,7 @@ struct ChatInputBar: View {
     }
 
     private func resolvedEffortLabel(_ effort: String?) -> String {
-        guard let effort else { return "Provider setting" }
+        guard let effort else { return "Provider effort" }
         return effortLabel(for: effort)
     }
 
@@ -748,12 +771,26 @@ struct ChatInputBar: View {
     @discardableResult
     private func pasteImageFromClipboard() -> Bool {
         guard !isSubmittingSteer else { return false }
+        let pasteboard = NSPasteboard.general
         guard canAttachImages else {
-            showAttachmentFeedback("Choose a vision-capable model before attaching images.")
+            // Fall through to a normal paste: many apps (Excel, Word, web
+            // pages) put an image rendition next to the text people meant.
+            if pasteboard.string(forType: .string) == nil {
+                showAttachmentFeedback("Choose a vision-capable model before attaching images.")
+            }
+            return false
+        }
+
+        // Finder copies carry the file URL plus a TIFF of the file's icon;
+        // the file itself is what the person copied.
+        if let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL], addDroppedImages(urls) {
+            attachmentFeedback = nil
             return true
         }
 
-        let pasteboard = NSPasteboard.general
         if let data = pasteboard.data(forType: .png), !data.isEmpty {
             attachClipboardData(data, mimeType: "image/png", filename: "Pasted Image.png")
             return true
@@ -761,14 +798,6 @@ struct ChatInputBar: View {
 
         if let tiffData = pasteboard.data(forType: .tiff), !tiffData.isEmpty {
             attachClipboardData(tiffData, mimeType: "image/tiff", filename: "Pasted Image.tiff")
-            return true
-        }
-
-        if let urls = pasteboard.readObjects(
-            forClasses: [NSURL.self],
-            options: [.urlReadingFileURLsOnly: true]
-        ) as? [URL], addDroppedImages(urls) {
-            attachmentFeedback = nil
             return true
         }
 
@@ -803,10 +832,9 @@ struct ChatInputBar: View {
 
     private func focusComposer() {
         Task { @MainActor in
-            composerFocused = false
             await Task.yield()
             guard appState.activeAgentID == agent.id else { return }
-            composerFocused = true
+            composerFocusRequest &+= 1
         }
     }
 }
@@ -818,9 +846,11 @@ private struct ComposerNativeTextEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var measuredHeight: CGFloat
 
-    let isFocused: Bool
+    /// Incremented to request focus once. Focus is never re-asserted on
+    /// ordinary updates, so it cannot be pulled back from the terminal or
+    /// browser, or dropped mid-click, when unrelated composer state changes.
+    let focusRequest: Int
     let isEnabled: Bool
-    let onFocusChange: (Bool) -> Void
     let onPasteImage: () -> Bool
     let onDropImages: ([URL]) -> Bool
     let onDropTargeted: (Bool) -> Void
@@ -891,13 +921,12 @@ private struct ComposerNativeTextEditor: NSViewRepresentable {
         applyAppearance(to: textView)
         context.coordinator.measure(textView)
 
+        guard context.coordinator.appliedFocusRequest != focusRequest else { return }
+        context.coordinator.appliedFocusRequest = focusRequest
         Task { @MainActor [weak textView] in
-            guard let textView, let window = textView.window else { return }
-            if isFocused, window.firstResponder !== textView {
-                window.makeFirstResponder(textView)
-            } else if !isFocused, window.firstResponder === textView {
-                window.makeFirstResponder(nil)
-            }
+            guard let textView, let window = textView.window,
+                  window.firstResponder !== textView else { return }
+            window.makeFirstResponder(textView)
         }
     }
 
@@ -923,17 +952,11 @@ private struct ComposerNativeTextEditor: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerNativeTextEditor
+        var appliedFocusRequest: Int
 
         init(parent: ComposerNativeTextEditor) {
             self.parent = parent
-        }
-
-        func textDidBeginEditing(_ notification: Notification) {
-            parent.onFocusChange(true)
-        }
-
-        func textDidEndEditing(_ notification: Notification) {
-            parent.onFocusChange(false)
+            appliedFocusRequest = parent.focusRequest
         }
 
         func textDidChange(_ notification: Notification) {

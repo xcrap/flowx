@@ -774,17 +774,24 @@ struct CodexRolloutMetadataStore {
         return DirectoryFingerprint(modificationDate: modificationDate)
     }
 
+    // Entries are small, but the caches are shared by every project and each
+    // sync lists up to 250 live and 250 archived threads per project. Caps
+    // below that working set evict arbitrary entries on every pass and turn
+    // each miss into a rollout re-read (up to 128 KB head plus a tail scan).
+    private static let maximumCachedFiles = 4_096
+    private static let maximumCachedDirectoryListings = 256
+
     private mutating func trimCachesIfNeeded() {
-        while metadataByFile.count > 512, let key = metadataByFile.keys.first {
+        while metadataByFile.count > Self.maximumCachedFiles, let key = metadataByFile.keys.first {
             metadataByFile.removeValue(forKey: key)
         }
-        while usageByFile.count > 512, let key = usageByFile.keys.first {
+        while usageByFile.count > Self.maximumCachedFiles, let key = usageByFile.keys.first {
             usageByFile.removeValue(forKey: key)
         }
-        while fileByThreadID.count > 512, let key = fileByThreadID.keys.first {
+        while fileByThreadID.count > Self.maximumCachedFiles, let key = fileByThreadID.keys.first {
             fileByThreadID.removeValue(forKey: key)
         }
-        while directoryListings.count > 64, let key = directoryListings.keys.first {
+        while directoryListings.count > Self.maximumCachedDirectoryListings, let key = directoryListings.keys.first {
             directoryListings.removeValue(forKey: key)
         }
     }

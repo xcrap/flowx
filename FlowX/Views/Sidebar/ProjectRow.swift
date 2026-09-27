@@ -93,7 +93,7 @@ struct ProjectRow: View {
                     Label("Copy Path", systemImage: "doc.on.doc")
                 }
                 Divider()
-                Button(role: .destructive, action: { appState.removeProject(project.id) }) {
+                Button(role: .destructive, action: { appState.requestProjectRemoval(project.id) }) {
                     Label("Remove Project", systemImage: "trash")
                 }
             }

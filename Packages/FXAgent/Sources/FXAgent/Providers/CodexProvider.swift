@@ -289,6 +289,13 @@ private actor CodexSession {
     private var activeContinuation: AsyncThrowingStream<StreamEvent, Error>.Continuation?
     private var activeTurnID: String?
     private var pendingInterrupt = false
+    /// Increments whenever a turn becomes active so a stale interrupt
+    /// watchdog can never end a newer turn.
+    private var turnGeneration = 0
+    /// Turns released locally by the interrupt watchdog; a late
+    /// `turn/completed` for one of them must not end the next turn.
+    private var locallyReleasedTurnIDs: Set<String> = []
+    private static let interruptCompletionTimeout: Duration = .seconds(10)
     private var lastTurnStartRequestID: Int?
     private var didEmitTurnStarted = false
     private var streamedAgentMessageItemIDs: Set<String> = []
@@ -657,6 +664,7 @@ private actor CodexSession {
         }
 
         activeContinuation = continuation
+        turnGeneration &+= 1
         activeTurnID = nil
         pendingInterrupt = false
         didEmitTurnStarted = false
@@ -877,6 +885,33 @@ private actor CodexSession {
         } else {
             pendingInterrupt = true
         }
+
+        // New turns are refused while one is active. If Codex never confirms
+        // the interrupt with `turn/completed`, release the turn locally so the
+        // session does not refuse every later message until FlowX restarts.
+        let generation = turnGeneration
+        Task { [weak self] in
+            try? await Task.sleep(for: Self.interruptCompletionTimeout)
+            await self?.releaseUnconfirmedInterrupt(generation: generation)
+        }
+    }
+
+    private func releaseUnconfirmedInterrupt(generation: Int) {
+        guard generation == turnGeneration, let activeContinuation else { return }
+        if let activeTurnID {
+            if locallyReleasedTurnIDs.count >= 32 { locallyReleasedTurnIDs.removeAll() }
+            locallyReleasedTurnIDs.insert(activeTurnID)
+        }
+        activeContinuation.yield(.done(stopReason: "interrupted"))
+        activeContinuation.finish()
+        self.activeContinuation = nil
+        activeTurnID = nil
+        pendingInterrupt = false
+        lastTurnStartRequestID = nil
+        didEmitTurnStarted = false
+        pendingApprovals.removeAll()
+        streamedAgentMessageItemIDs.removeAll(keepingCapacity: true)
+        clearActiveAttachments()
     }
 
     private func ensureServerStarted() async throws {
@@ -889,6 +924,13 @@ private actor CodexSession {
             throw NSError(domain: "CodexProvider", code: 4, userInfo: [
                 NSLocalizedDescriptionKey: "Codex CLI not found. Install with: \(hint)",
             ])
+        }
+
+        // Discovery suspends this actor; a concurrent caller (e.g. thread
+        // listing and transcript read at launch) may have started the server
+        // meanwhile. Starting another would orphan the first app-server.
+        if process?.isRunning == true, writer != nil {
+            return
         }
 
         startServer(executableURL: codexURL)
@@ -1257,8 +1299,12 @@ private actor CodexSession {
         }
 
         if let activeContinuation {
+            // A killed or OOM'd server often leaves stderr empty. The turn must
+            // still fail visibly rather than look like a normal completion.
             if let stderrText, !stderrText.isEmpty {
                 activeContinuation.yield(.error("Codex app-server exited: \(stderrText)"))
+            } else {
+                activeContinuation.yield(.error("Codex app-server exited unexpectedly during this turn."))
             }
             activeContinuation.finish()
         }
@@ -1360,12 +1406,19 @@ private actor CodexSession {
 
         if let method = json["method"] as? String {
             let params = json["params"] as? [String: Any] ?? [:]
-            if let responseID = Self.approvalResponseID(from: json["id"]),
+            let responseID = Self.approvalResponseID(from: json["id"])
+            if let responseID,
                handleServerRequest(method: method, params: params, responseID: responseID) {
                 return
             }
 
             handleNotification(method: method, params: params)
+            // A JSON-RPC request always awaits a reply. Answering one FlowX
+            // does not implement (e.g. from a newer Codex) keeps the turn from
+            // stalling in "Working" forever.
+            if let responseID {
+                writeError(responseID, code: -32601, message: "FlowX does not support \(method).")
+            }
             return
         }
 
@@ -1665,6 +1718,10 @@ private actor CodexSession {
 
         case "turn/completed":
             let turn = params["turn"] as? [String: Any]
+            if let completedTurnID = turn?["id"] as? String {
+                if locallyReleasedTurnIDs.remove(completedTurnID) != nil { break }
+                if let activeTurnID, completedTurnID != activeTurnID { break }
+            }
             let stopReason = turn?["status"] as? String ?? "end_turn"
             let failed = stopReason == "failed"
             if failed {
@@ -2970,11 +3027,17 @@ private actor CodexSession {
     }
 
     private func writeMessage(_ message: [String: Any]) {
-        guard let writer else { return }
+        guard let writer,
+              let data = try? JSONSerialization.data(withJSONObject: message) else { return }
 
-        if let data = try? JSONSerialization.data(withJSONObject: message),
-           let string = String(data: data, encoding: .utf8) {
-            writer.write(Data((string + "\n").utf8))
+        // The throwing API reports EPIPE as a Swift error; the legacy
+        // `write(_:)` raises an uncatchable Objective-C exception when the
+        // app-server has already exited.
+        do {
+            try writer.write(contentsOf: data + Data([0x0A]))
+        } catch {
+            try? writer.close()
+            self.writer = nil
         }
     }
 

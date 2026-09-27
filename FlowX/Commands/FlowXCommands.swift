@@ -114,7 +114,7 @@ struct FlowXCommands: Commands {
             .disabled(activeAgent == nil || (activeAgent?.terminalPaneCount ?? 3) >= 3)
 
             Button("Clear All Terminals") {
-                for session in activeAgent?.visibleTerminalSessions ?? [] where session.isRunning {
+                for session in existingTerminalSessions where session.isRunning {
                     session.clearScreen()
                 }
             }
@@ -128,7 +128,7 @@ struct FlowXCommands: Commands {
             .disabled(runningTerminalSessions.isEmpty)
 
             Button("Restart Exited Terminals") {
-                for session in activeAgent?.visibleTerminalSessions ?? [] where !session.isRunning && session.lastExitCode != nil {
+                for session in existingTerminalSessions where !session.isRunning && session.lastExitCode != nil {
                     session.restart()
                 }
             }
@@ -207,7 +207,7 @@ struct FlowXCommands: Commands {
 
     private var hasSendableDraft: Bool {
         guard let activeAgent else { return false }
-        return !activeAgent.conversationState.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return activeAgent.conversationState.hasDraftText
             || !activeAgent.conversationState.pendingAttachments.isEmpty
     }
 
@@ -228,12 +228,19 @@ struct FlowXCommands: Commands {
         return model.supportsVision
     }
 
+    /// Menu evaluation must not allocate sessions the way
+    /// `visibleTerminalSessions` does; only panes already created matter here.
+    private var existingTerminalSessions: [TerminalSession] {
+        guard let activeAgent else { return [] }
+        return Array(activeAgent.terminalSessions.prefix(activeAgent.terminalPaneCount))
+    }
+
     private var runningTerminalSessions: [TerminalSession] {
-        activeAgent?.visibleTerminalSessions.filter(\.isRunning) ?? []
+        existingTerminalSessions.filter(\.isRunning)
     }
 
     private var exitedTerminalSessions: [TerminalSession] {
-        activeAgent?.visibleTerminalSessions.filter { !$0.isRunning && $0.lastExitCode != nil } ?? []
+        existingTerminalSessions.filter { !$0.isRunning && $0.lastExitCode != nil }
     }
 
     private var hasUsableProvider: Bool {

@@ -30,6 +30,10 @@ actor ClaudeNativeThreadStore {
     private var transcriptParseCount = 0
     private var summaryAccessCounter: UInt64 = 0
     private var transcriptAccessCounter: UInt64 = 0
+    /// Transcript each session was last read from, so selected-thread polling
+    /// can stat one file instead of re-reading and re-diffing the transcript.
+    private var lastReadFiles: [String: URL] = [:]
+    private static let maximumTrackedReadFiles = 256
 
     init(
         configRoot: URL? = nil,
@@ -198,6 +202,7 @@ actor ClaudeNativeThreadStore {
             transcriptAccessCounter &+= 1
             cached.lastAccess = transcriptAccessCounter
             transcriptCache[cacheKey] = cached
+            rememberReadFile(match.file, for: id)
             return ProviderNativeThread(summary: match.summary, messages: cached.messages)
         }
 
@@ -218,7 +223,30 @@ actor ClaudeNativeThreadStore {
         }
         let messages = Array(parsed.messages.suffix(Self.maximumMessages))
         cacheTranscript(messages, key: cacheKey, fingerprint: match.fingerprint)
+        rememberReadFile(match.file, for: id)
         return ProviderNativeThread(summary: match.summary, messages: messages)
+    }
+
+    private func rememberReadFile(_ file: URL, for id: String) {
+        if lastReadFiles[id] == nil, lastReadFiles.count >= Self.maximumTrackedReadFiles {
+            lastReadFiles.removeAll(keepingCapacity: true)
+        }
+        lastReadFiles[id] = file
+    }
+
+    /// Size and modification time of the transcript last read for `id`; nil
+    /// until it has been read once, which makes callers fall back to a
+    /// time-bounded refresh.
+    func revision(id: String) -> String? {
+        guard var file = lastReadFiles[id] else { return nil }
+        // URL caches resource values per instance; this one is reused.
+        file.removeAllCachedResourceValues()
+        guard let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+              let size = values.fileSize else {
+            return nil
+        }
+        let modified = values.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0
+        return "\(file.path):\(size):\(modified)"
     }
 
     func moveToTrash(

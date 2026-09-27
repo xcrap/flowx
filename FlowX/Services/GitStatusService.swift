@@ -7,6 +7,8 @@ private struct GitProcessResult: Sendable {
     var succeeded: Bool
     var output: String
     var wasTruncated: Bool
+    /// Cancelled or timed out: the result says nothing about the repository.
+    var wasInterrupted: Bool = false
 }
 
 private final class GitCommandExecution: @unchecked Sendable {
@@ -57,6 +59,9 @@ private final class GitCommandExecution: @unchecked Sendable {
         process.currentDirectoryURL = URL(fileURLWithPath: directory, isDirectory: true)
         var environment = ProcessInfo.processInfo.environment
         environment["GIT_TERMINAL_PROMPT"] = "0"
+        // Read-only polling must never take .git/index.lock, or concurrent
+        // agent/user commands fail with "index.lock: File exists".
+        environment["GIT_OPTIONAL_LOCKS"] = "0"
         environment["GCM_INTERACTIVE"] = "Never"
         environment["SSH_ASKPASS_REQUIRE"] = "never"
         environment["GIT_ASKPASS"] = "/usr/bin/false"
@@ -68,7 +73,7 @@ private final class GitCommandExecution: @unchecked Sendable {
         lock.lock()
         guard !cancelled else {
             lock.unlock()
-            return GitProcessResult(succeeded: false, output: "", wasTruncated: false)
+            return GitProcessResult(succeeded: false, output: "", wasTruncated: false, wasInterrupted: true)
         }
         self.process = process
         lock.unlock()
@@ -132,7 +137,8 @@ private final class GitCommandExecution: @unchecked Sendable {
         return GitProcessResult(
             succeeded: !didTimeOut && !wasCancelled && !wasTruncated && process.terminationStatus == 0,
             output: output,
-            wasTruncated: wasTruncated
+            wasTruncated: wasTruncated,
+            wasInterrupted: didTimeOut || wasCancelled
         )
     }
 
@@ -212,6 +218,7 @@ final class GitStatusService {
         var succeeded: Bool
         var output: String
         var wasTruncated: Bool = false
+        var wasInterrupted: Bool = false
     }
 
     struct FileStatus: Equatable, Identifiable, Sendable {
@@ -357,9 +364,21 @@ final class GitStatusService {
 
         var budget = ProjectDiffBudgetPolicy()
         let sortedFiles = files.sorted { $0.path.localizedCaseInsensitiveCompare($1.path) == .orderedAscending }
-        let untrackedPaths = sortedFiles
-            .filter { $0.isUntracked && mode != .staged }
-            .compactMap { validatedRelativePath($0.path) }
+        // Default status collapses a new folder to `dir/`, which
+        // `diff --no-index` cannot read. Expand folders to their files so
+        // agent-scaffolded code shows up.
+        var untrackedPaths: [String] = []
+        for path in sortedFiles
+            .filter({ $0.isUntracked && mode != .staged })
+            .compactMap({ validatedRelativePath($0.path) }) {
+            guard untrackedPaths.count < Self.maximumUntrackedDiffFiles else { break }
+            if path.hasSuffix("/") {
+                let remaining = Self.maximumUntrackedDiffFiles - untrackedPaths.count
+                untrackedPaths += await untrackedFiles(inDirectory: path, rootPath: rootPath, limit: remaining)
+            } else {
+                untrackedPaths.append(path)
+            }
+        }
 
         if sortedFiles.contains(where: { !($0.isUntracked && mode != .staged) }) {
             let args: [String]
@@ -526,6 +545,13 @@ final class GitStatusService {
             timeout: .seconds(15)
         )
         guard statusResult.succeeded, rootPaths[projectID] == rootPath, !Task.isCancelled else {
+            // A cancelled, timed-out or truncated status (e.g. switching
+            // projects mid-refresh) says nothing about the repository. Keep
+            // the last known info rather than flashing "not a git repo",
+            // which would also clear the commit draft and close the panel.
+            if statusResult.wasInterrupted || statusResult.wasTruncated || Task.isCancelled {
+                return
+            }
             if rootPaths[projectID] == rootPath, info[projectID] != gitInfo {
                 info[projectID] = gitInfo
                 onInfoChange?(projectID, gitInfo)
@@ -644,17 +670,42 @@ final class GitStatusService {
         return result
     }
 
+    private static let maximumUntrackedDiffFiles = 200
+
+    private func untrackedFiles(inDirectory directory: String, rootPath: String, limit: Int) async -> [String] {
+        guard limit > 0 else { return [] }
+        let result = await runGitForResult(
+            ["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "-z", "--", directory],
+            in: rootPath,
+            timeout: .seconds(10),
+            maximumOutputBytes: 1_024 * 1_024,
+            appendsTruncationNotice: false,
+            includesStandardError: false
+        )
+        let paths = result.output
+            .split(separator: "\0", omittingEmptySubsequences: true)
+            .lazy
+            .map(String.init)
+            .filter { !$0.hasSuffix("/") }
+            .compactMap { self.validatedRelativePath($0) }
+            .prefix(limit)
+        return Array(paths)
+    }
+
     private func untrackedDiff(
         path: String,
         in directory: String,
         maximumOutputBytes: Int
     ) async -> CommandResult {
+        // Stderr (e.g. an unreadable path) must not be appended to the
+        // previous file's diff as if it were content.
         await runGitForResult(
             ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-color", "--no-index", "--", "/dev/null", path],
             in: directory,
             timeout: .seconds(15),
             maximumOutputBytes: maximumOutputBytes,
-            appendsTruncationNotice: false
+            appendsTruncationNotice: false,
+            includesStandardError: false
         )
     }
 
@@ -779,7 +830,8 @@ final class GitStatusService {
         return CommandResult(
             succeeded: result.succeeded,
             output: result.output,
-            wasTruncated: result.wasTruncated
+            wasTruncated: result.wasTruncated,
+            wasInterrupted: result.wasInterrupted
         )
     }
 

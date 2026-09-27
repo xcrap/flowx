@@ -3,7 +3,10 @@ import Foundation
 @testable import FXCore
 
 @Test func ordinaryAssistantFastPathPreservesWhitespaceAndNewlineRules() {
-    for source in ["  Hello\n\nWorld  ", "a\r\nb", "a\rb", "a\u{2028}b", "\n\t", "🐬 Olá\nAçores"] {
+    for source in [
+        "  Hello\n\nWorld  ", "a\r\nb", "a\rb", "a\u{2028}b", "a\u{2029}b", "a\u{0085}b", "\n\t",
+        "🐬 Olá\nAçores", "Em dash — “quotes” … → • ©\nnext", "a\u{2028}", "\u{0085}",
+    ] {
         let expected = source.components(separatedBy: .newlines)
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)

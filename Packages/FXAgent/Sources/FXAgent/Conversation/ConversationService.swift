@@ -805,7 +805,11 @@ public final class ConversationService {
                 conversationState.clearUserInputRequests()
                 conversationState.finishStreaming(stopReason: "cancelled")
             } else if !didReceiveCompletion && !didReceiveError {
+                // The provider stream ended without a verdict; nothing can
+                // answer its approvals or questions any more.
                 streamBuffer.flush()
+                conversationState.clearToolApprovalRequests()
+                conversationState.clearUserInputRequests()
                 conversationState.finishStreaming()
             }
 

@@ -218,7 +218,8 @@ private struct FXPalette: Sendable {
                 fgTertiary:   t.s[4],  // 400
                 fgQuaternary: Color.black.opacity(0.24),
                 border:       t.s[3],  // 300
-                borderMedium: t.s[2],  // 200
+                // Must stay visible on bgSurface (200), e.g. dropdown and modal edges.
+                borderMedium: t.s[3],  // 300
                 borderSubtle: Color.black.opacity(0.05),
                 overlay:      Color.black.opacity(0.18),
                 overlayLight: Color.black.opacity(0.10),
