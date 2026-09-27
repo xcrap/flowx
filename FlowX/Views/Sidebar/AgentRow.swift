@@ -52,7 +52,7 @@ struct ThreadRow: View {
                 .help(sourceAndStatusHelp)
                 .accessibilityLabel(sourceAndStatusHelp)
 
-            FXTaskLabel(displayTitle, provider: agent.providerName, isSelected: isSelected)
+            FXTaskLabel(displayTitle, isSelected: isSelected)
                 .layoutPriority(1)
 
             Spacer(minLength: 0)
@@ -65,8 +65,8 @@ struct ThreadRow: View {
             }
         }
         .padding(.horizontal, FXSpacing.md)
-        .padding(.vertical, FXSpacing.xs)
-        .frame(minHeight: 32)
+        .padding(.vertical, FXSpacing.xxs)
+        .frame(minHeight: 28)
         .background(
             RoundedRectangle(cornerRadius: FXRadii.md)
                 .fill(
