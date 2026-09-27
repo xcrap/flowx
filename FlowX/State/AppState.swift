@@ -113,7 +113,7 @@ struct ThreadLifecycleConfirmation: Identifiable {
         case .deleteProviderTask:
             "Permanently delete “\(threadTitle)” from Codex? Codex also deletes any spawned descendants. This cannot be undone."
         case .moveProviderTaskToTrash:
-            "Move “\(threadTitle)” and its Claude session data to macOS Trash? Stop any Claude Code process using it first. Claude does not expose live task status, but the files can be recovered from Trash."
+            "Move “\(threadTitle)” and its Claude session data to macOS Trash? If the session files are already missing, FlowX will preserve its remaining cache and attachments in a recovery folder in Trash. Stop any Claude Code process using it first."
         }
     }
 }
@@ -1816,10 +1816,16 @@ final class AppState {
                 return
             }
             do {
-                try await provider.moveNativeThreadToTrash(
-                    id: identity.sessionID,
-                    workingDirectory: project.project.rootURL
-                )
+                var recoveredLocalCopy = false
+                do {
+                    try await provider.moveNativeThreadToTrash(
+                        id: identity.sessionID,
+                        workingDirectory: project.project.rootURL
+                    )
+                } catch NativeThreadTrashError.sessionMissing {
+                    try ConversationPersistence.recoverMissingNativeTaskToTrash(agent: agent, project: project)
+                    recoveredLocalCopy = true
+                }
                 guard projects.contains(where: { $0.id == project.id }),
                       project.agents.contains(where: { $0.id == agent.id }) else {
                     return
@@ -1829,7 +1835,9 @@ final class AppState {
                     from: project,
                     preservePresentationIdentity: false
                 )
-                project.threadLifecycleNotice = nil
+                project.threadLifecycleNotice = recoveredLocalCopy
+                    ? "The Claude session files were already missing. The remaining FlowX data was saved in a recovery folder in Trash."
+                    : nil
                 project.threadLifecycleNoticeIsError = false
                 refreshNativeThreads(for: project, discoveryMode: .indexed)
             } catch {

@@ -239,6 +239,7 @@ actor ClaudeNativeThreadStore {
         ]
         var matchedArtifactsByPath: [String: URL] = [:]
         var matchedTranscriptPaths: Set<String> = []
+        var foundSessionArtifact = false
 
         for projectDirectory in projectDirectories(
             configuredDirectory: configuredDirectory,
@@ -246,8 +247,16 @@ actor ClaudeNativeThreadStore {
         ) {
             try Task.checkCancellation()
             let file = projectDirectory.appendingPathComponent(id).appendingPathExtension("jsonl")
-            guard let values = try? file.resourceValues(forKeys: keys),
-                  values.isRegularFile == true,
+            // A missing transcript is distinct from a permissions/read error,
+            // invalid metadata, or an orphaned subagent directory. Only the
+            // fully absent case can fall back to recovering FlowX's cache.
+            let sessionDirectory = projectDirectory
+                .appendingPathComponent(id, isDirectory: true)
+                .standardizedFileURL
+            let directoryValues = try Self.existingResourceValues(for: sessionDirectory, keys: keys)
+            let values = try Self.existingResourceValues(for: file, keys: keys)
+            foundSessionArtifact = foundSessionArtifact || values != nil || directoryValues != nil
+            guard let values, values.isRegularFile == true,
                   let summary = try summary(
                     for: file,
                     values: values,
@@ -265,17 +274,14 @@ actor ClaudeNativeThreadStore {
             // session directory (`<session-id>/subagents/*.jsonl`). Once the
             // parent transcript has proven the exact workspace identity, that
             // UUID-named directory is session-owned and moves with it.
-            let sessionDirectory = projectDirectory
-                .appendingPathComponent(id, isDirectory: true)
-                .standardizedFileURL
-            if let directoryValues = try? sessionDirectory.resourceValues(forKeys: keys),
-               directoryValues.isDirectory == true {
+            if directoryValues?.isDirectory == true {
                 matchedArtifactsByPath[sessionDirectory.path] = sessionDirectory
             }
         }
 
         let matchedArtifacts = matchedArtifactsByPath.values.sorted { $0.path < $1.path }
         guard !matchedTranscriptPaths.isEmpty else {
+            if !foundSessionArtifact { throw NativeThreadTrashError.sessionMissing }
             throw Self.error("Claude Code session '\(id)' was not found for this workspace.")
         }
 
@@ -956,6 +962,17 @@ actor ClaudeNativeThreadStore {
     private nonisolated static func moveItemToTrash(_ url: URL) throws {
         var resultingURL: NSURL?
         try FileManager.default.trashItem(at: url, resultingItemURL: &resultingURL)
+    }
+
+    private static func existingResourceValues(
+        for url: URL,
+        keys: Set<URLResourceKey>
+    ) throws -> URLResourceValues? {
+        do {
+            return try url.resourceValues(forKeys: keys)
+        } catch CocoaError.fileReadNoSuchFile {
+            return nil
+        }
     }
 
     private nonisolated static func appendJSONLine(

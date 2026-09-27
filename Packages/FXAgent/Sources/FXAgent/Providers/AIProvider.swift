@@ -577,6 +577,16 @@ public protocol AIProviderNativeThreadDeleting: AIProvider {
     ) async throws
 }
 
+public enum NativeThreadTrashError: LocalizedError, Sendable, Equatable {
+    /// The exact session artifacts are absent, rather than unreadable or
+    /// rejected by workspace validation. Callers may recover their local copy.
+    case sessionMissing
+
+    public var errorDescription: String? {
+        "The provider session files are no longer present in this workspace."
+    }
+}
+
 /// Recoverable deletion for provider session stores that do not expose a
 /// native archive/delete API. Implementations must move the provider-owned
 /// artifact to macOS Trash and must never unlink it directly.

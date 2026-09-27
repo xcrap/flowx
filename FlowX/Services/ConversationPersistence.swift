@@ -395,6 +395,39 @@ enum ConversationPersistence {
         )
     }
 
+    @MainActor
+    static func recoverMissingNativeTaskToTrash(agent: AgentInfo, project: ProjectState) throws {
+        struct RecoveryMetadata: Encodable {
+            let project: Project
+            let agent: Agent
+            let binding: NativeThreadBinding?
+            let messages: [ConversationMessage]
+            let unsentPrompt: UnsentConversationPrompt?
+            let nativeImageSidecar: [NativeImageSidecarEntry]
+        }
+        // Do not save an unhydrated agent over its persisted cache. Keep both
+        // the existing files and whatever is currently loaded in memory.
+        writer.flush()
+        let metadata = RecoveryMetadata(
+            project: project.project,
+            agent: agent.agent,
+            binding: agent.nativeThreadBinding,
+            messages: agent.messages,
+            unsentPrompt: agent.conversationState.unsentPrompt,
+            nativeImageSidecar: agent.nativeImageSidecar
+        )
+        let file = conversationFileURL(agentID: agent.id, projectID: project.id)
+        try TaskRecoveryArchive.copyToTrash(
+            metadata: JSONEncoder().encode(metadata),
+            files: [
+                file, file.appendingPathExtension("backup"),
+                ConversationAssetStore.agentDirectoryURL(projectID: project.id, agentID: agent.id),
+            ],
+            stagingDirectory: baseDirectoryURL.deletingLastPathComponent()
+                .appendingPathComponent("TaskRecovery", isDirectory: true)
+        )
+    }
+
     static func remove(projectID: UUID) {
         writer.removeProject(
             projectID: projectID,
