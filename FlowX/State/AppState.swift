@@ -683,6 +683,9 @@ final class ProjectState: Identifiable {
     var commitComposerVisible = false
     var commitMessageDraft = ""
     var includeUntrackedInCommit = true
+    /// The composer's "Staged changes only" choice; nil follows the
+    /// comparison mode, so reviewing Staged commits exactly what is staged.
+    var commitStagedOnlyOverride: Bool?
     var isPerformingGitAction = false
     var gitActionMessage: String?
     var onChange: (() -> Void)?
@@ -708,6 +711,13 @@ final class ProjectState: Identifiable {
         if self.project.agentOrder.isEmpty {
             self.project.agentOrder = agents.map(\.id)
         }
+    }
+
+    /// Commit what is already staged (e.g. with `git add -p`) instead of
+    /// staging the whole project first.
+    var commitsStagedOnly: Bool {
+        guard gitInfo.stagedFileCount > 0 else { return false }
+        return commitStagedOnlyOverride ?? (inspectorComparisonMode == .staged)
     }
 
     func refreshFiles(limit: Int = 500) {
@@ -3407,13 +3417,15 @@ final class AppState {
         let success = await gitStatusService.commit(
             projectID: project.id,
             message: message,
-            includeUntracked: project.includeUntrackedInCommit
+            includeUntracked: project.includeUntrackedInCommit,
+            stagedOnly: project.commitsStagedOnly
         )
         project.isPerformingGitAction = false
 
         if success {
             project.commitMessageDraft = ""
             project.includeUntrackedInCommit = true
+            project.commitStagedOnlyOverride = nil
             withAnimation(FXAnimation.quick) {
                 project.commitComposerVisible = false
             }

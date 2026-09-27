@@ -1591,7 +1591,9 @@ struct DiffView: View {
     }
 
     private func openFile(_ path: String, in project: ProjectState) {
-        let url = project.project.rootURL.appendingPathComponent(path)
+        // Diff paths are relative to the repository root, which is not the
+        // project folder when the project was opened at a subfolder.
+        guard let url = appState.gitStatusService.workingTreeURL(projectID: project.id, path: path) else { return }
         let workspace = NSWorkspace.shared
         // Agents write these files. A plain `open(url)` would launch an
         // `.app`, `.command` or `.terminal` file instead of showing it, so only

@@ -214,6 +214,39 @@ final class GitStatusService {
         var files: [ParsedStatusLine] = []
     }
 
+    /// Where a project folder sits in its repository. Git prints status,
+    /// numstat and diff paths relative to the repository root, so every git
+    /// command runs from `topLevel` and every path resolves against it, even
+    /// when the project was opened at a subfolder.
+    private struct RepositoryLocation: Equatable, Sendable {
+        var topLevel: String
+        /// Project folder relative to `topLevel` with a trailing slash, or
+        /// empty when the project is the repository root.
+        var prefix: String
+
+        /// Scopes status, diff and add to the project folder. `literal`
+        /// keeps folder names containing `*`, `?` or `[` from matching as
+        /// globs.
+        var pathspecArguments: [String] {
+            prefix.isEmpty ? [] : ["--", ":(top,literal)\(prefix)"]
+        }
+
+        /// Parses `git rev-parse --show-toplevel --show-prefix`: the
+        /// top-level line, then the prefix line (empty at the root).
+        init?(revParseOutput output: String) {
+            let lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+            guard lines.count >= 2, lines[0].hasPrefix("/") else { return nil }
+            topLevel = String(lines[0])
+            prefix = String(lines[1])
+        }
+    }
+
+    private enum RepositoryLookup {
+        case found(RepositoryLocation)
+        case notRepository
+        case interrupted
+    }
+
     struct CommandResult: Sendable {
         var succeeded: Bool
         var output: String
@@ -262,7 +295,12 @@ final class GitStatusService {
         var contentRevision: UInt64 = 0
         var files: [FileStatus] = []
         var hasChanges: Bool { statusFileCount > 0 }
-        var canPush: Bool { isGitRepo && hasRemote && (aheadCount > 0 || (upstreamBranch.isEmpty && hasCommits)) }
+        /// Porcelain status reports a detached HEAD as `HEAD (no branch)`.
+        var isDetachedHead: Bool { branch.hasPrefix("HEAD (") }
+        var canPush: Bool {
+            isGitRepo && hasRemote && !isDetachedHead
+                && (aheadCount > 0 || (upstreamBranch.isEmpty && hasCommits))
+        }
     }
 
     private(set) var info: [UUID: GitInfo] = [:]
@@ -270,6 +308,9 @@ final class GitStatusService {
     var onInfoChange: ((UUID, GitInfo) -> Void)?
     private var pollingTasks: [UUID: Task<Void, Never>] = [:]
     private var rootPaths: [UUID: String] = [:]
+    /// Resolved once per root path; a folder that is not a repository yet is
+    /// looked up again on the next refresh.
+    private var repositories: [UUID: RepositoryLocation] = [:]
     private var remotePresence: [UUID: Bool] = [:]
     private var refreshingProjects: Set<UUID> = []
     private var pendingRefreshes: Set<UUID> = []
@@ -279,6 +320,7 @@ final class GitStatusService {
         let normalizedPath = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL.path
         if rootPaths[projectID] != normalizedPath {
             remotePresence[projectID] = nil
+            repositories[projectID] = nil
         }
         rootPaths[projectID] = normalizedPath
         guard pollingTasks[projectID] == nil else { return }
@@ -328,6 +370,7 @@ final class GitStatusService {
     func removeProject(projectID: UUID) {
         stopPolling(projectID: projectID)
         rootPaths[projectID] = nil
+        repositories[projectID] = nil
         remotePresence[projectID] = nil
         refreshingProjects.remove(projectID)
         info[projectID] = nil
@@ -345,22 +388,26 @@ final class GitStatusService {
     }
 
     func diffUnstaged(projectID: UUID, path: String) async -> String {
-        guard let rootPath = rootPaths[projectID], let path = validatedRelativePath(path) else { return "" }
-        return await runGit(["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-color", "--", path], in: rootPath)
+        guard let path = validatedRelativePath(path),
+              let repository = await repository(for: projectID) else { return "" }
+        return await runGit(["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-color", "--", path], in: repository.topLevel)
     }
 
     func diffStaged(projectID: UUID, path: String) async -> String {
-        guard let rootPath = rootPaths[projectID], let path = validatedRelativePath(path) else { return "" }
-        return await runGit(["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-color", "--cached", "--", path], in: rootPath)
+        guard let path = validatedRelativePath(path),
+              let repository = await repository(for: projectID) else { return "" }
+        return await runGit(["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-color", "--cached", "--", path], in: repository.topLevel)
     }
 
     func diffAgainstHead(projectID: UUID, path: String) async -> String {
-        guard let rootPath = rootPaths[projectID], let path = validatedRelativePath(path) else { return "" }
-        return await runGit(["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-color", "HEAD", "--", path], in: rootPath)
+        guard let path = validatedRelativePath(path),
+              let repository = await repository(for: projectID) else { return "" }
+        return await runGit(["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-color", "HEAD", "--", path], in: repository.topLevel)
     }
 
     func projectDiff(projectID: UUID, mode: InspectorComparisonMode, files: [FileStatus]) async -> String {
-        guard let rootPath = rootPaths[projectID] else { return "" }
+        guard let repository = await repository(for: projectID) else { return "" }
+        let repositoryRoot = repository.topLevel
 
         var budget = ProjectDiffBudgetPolicy()
         let sortedFiles = files.sorted { $0.path.localizedCaseInsensitiveCompare($1.path) == .orderedAscending }
@@ -374,7 +421,7 @@ final class GitStatusService {
             guard untrackedPaths.count < Self.maximumUntrackedDiffFiles else { break }
             if path.hasSuffix("/") {
                 let remaining = Self.maximumUntrackedDiffFiles - untrackedPaths.count
-                untrackedPaths += await untrackedFiles(inDirectory: path, rootPath: rootPath, limit: remaining)
+                untrackedPaths += await untrackedFiles(inDirectory: path, rootPath: repositoryRoot, limit: remaining)
             } else {
                 untrackedPaths.append(path)
             }
@@ -392,8 +439,8 @@ final class GitStatusService {
             }
 
             let trackedResult = await runGitForResult(
-                args,
-                in: rootPath,
+                args + repository.pathspecArguments,
+                in: repositoryRoot,
                 maximumOutputBytes: budget.remainingFragmentBytes,
                 appendsTruncationNotice: false,
                 includesStandardError: false
@@ -420,7 +467,7 @@ final class GitStatusService {
             }
             let result = await untrackedDiff(
                 path: path,
-                in: rootPath,
+                in: repositoryRoot,
                 maximumOutputBytes: budget.remainingFragmentBytes
             )
             let trimmed = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -437,9 +484,19 @@ final class GitStatusService {
         return budget.output
     }
 
+    /// Absolute location of a path from `GitInfo.files` or a diff header.
+    /// Git reports those relative to the repository root, not the project
+    /// folder, so resolving them against the project root breaks for
+    /// projects opened at a subfolder.
+    func workingTreeURL(projectID: UUID, path: String) -> URL? {
+        guard let topLevel = repositories[projectID]?.topLevel,
+              let path = validatedRelativePath(path) else { return nil }
+        return URL(fileURLWithPath: topLevel, isDirectory: true).appendingPathComponent(path)
+    }
+
     func fileContents(projectID: UUID, path: String) async -> String {
-        guard let rootPath = rootPaths[projectID],
-              let url = safeFileURL(path: path, rootPath: rootPath) else {
+        guard let repository = await repository(for: projectID),
+              let url = safeFileURL(path: path, rootPath: repository.topLevel) else {
             return ""
         }
 
@@ -468,34 +525,41 @@ final class GitStatusService {
     }
 
     func fileContentsAtHead(projectID: UUID, path: String) async -> String? {
-        guard let rootPath = rootPaths[projectID], let path = validatedRelativePath(path) else { return nil }
-        let result = await runGitForResult(["show", "HEAD:\(path)"], in: rootPath)
+        guard let path = validatedRelativePath(path),
+              let repository = await repository(for: projectID) else { return nil }
+        let result = await runGitForResult(["show", "HEAD:\(path)"], in: repository.topLevel)
         guard result.succeeded else { return nil }
         return result.output
     }
 
     func fileContentsFromIndex(projectID: UUID, path: String) async -> String? {
-        guard let rootPath = rootPaths[projectID], let path = validatedRelativePath(path) else { return nil }
-        let result = await runGitForResult(["show", ":\(path)"], in: rootPath)
+        guard let path = validatedRelativePath(path),
+              let repository = await repository(for: projectID) else { return nil }
+        let result = await runGitForResult(["show", ":\(path)"], in: repository.topLevel)
         guard result.succeeded else { return nil }
         return result.output
     }
 
-    func commit(projectID: UUID, message: String, includeUntracked: Bool) async -> Bool {
-        guard let rootPath = rootPaths[projectID] else { return false }
+    /// `stagedOnly` commits the index as the user built it (e.g. with
+    /// `git add -p`). Otherwise the project folder is staged first, scoped
+    /// to it so a subfolder project never stages the rest of the repository.
+    func commit(projectID: UUID, message: String, includeUntracked: Bool, stagedOnly: Bool) async -> Bool {
+        guard let repository = await repository(for: projectID) else { return false }
 
-        let addResult = await runGitForResult(
-            includeUntracked ? ["add", "-A"] : ["add", "-u"],
-            in: rootPath
-        )
-        guard addResult.succeeded else {
-            lastFailureMessage[projectID] = normalizedFailureMessage(addResult.output, fallback: "Unable to stage changes.")
-            pendingRefreshes.insert(projectID)
-            await requestRefresh(projectID: projectID)
-            return false
+        if !stagedOnly {
+            let addResult = await runGitForResult(
+                (includeUntracked ? ["add", "-A"] : ["add", "-u"]) + repository.pathspecArguments,
+                in: repository.topLevel
+            )
+            guard addResult.succeeded else {
+                lastFailureMessage[projectID] = normalizedFailureMessage(addResult.output, fallback: "Unable to stage changes.")
+                pendingRefreshes.insert(projectID)
+                await requestRefresh(projectID: projectID)
+                return false
+            }
         }
 
-        let commitResult = await runGitForResult(["commit", "-m", message], in: rootPath, timeout: .seconds(120))
+        let commitResult = await runGitForResult(["commit", "-m", message], in: repository.topLevel, timeout: .seconds(120))
         if !commitResult.succeeded {
             lastFailureMessage[projectID] = normalizedFailureMessage(commitResult.output, fallback: "Commit failed.")
         } else {
@@ -508,8 +572,14 @@ final class GitStatusService {
     }
 
     func push(projectID: UUID) async -> Bool {
-        guard let rootPath = rootPaths[projectID] else { return false }
-        let result = await runGitForResult(["push"], in: rootPath, timeout: .seconds(120))
+        guard let repository = await repository(for: projectID) else { return false }
+        let result: CommandResult
+        switch await pushPlan(in: repository.topLevel) {
+        case .run(let arguments):
+            result = await runGitForResult(arguments, in: repository.topLevel, timeout: .seconds(120))
+        case .fail(let message):
+            result = CommandResult(succeeded: false, output: message)
+        }
         if !result.succeeded {
             lastFailureMessage[projectID] = normalizedFailureMessage(result.output, fallback: "Push failed.")
         } else {
@@ -518,6 +588,85 @@ final class GitStatusService {
         pendingRefreshes.insert(projectID)
         await requestRefresh(projectID: projectID)
         return result.succeeded
+    }
+
+    private enum PushPlan {
+        case run([String])
+        case fail(String)
+    }
+
+    /// A bare `git push` fails with "has no upstream branch" unless
+    /// `push.autoSetupRemote` is set, so a branch without an upstream is
+    /// published explicitly and starts tracking the pushed branch.
+    private func pushPlan(in directory: String) async -> PushPlan {
+        let branchResult = await runGitForResult(
+            ["symbolic-ref", "--quiet", "--short", "HEAD"],
+            in: directory,
+            timeout: .seconds(10),
+            includesStandardError: false
+        )
+        let branch = branchResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard branchResult.succeeded, !branch.isEmpty else {
+            return .fail(branchResult.wasInterrupted ? "Push failed." : "Check out a branch before pushing.")
+        }
+
+        // The configured merge ref is what status reports as the upstream,
+        // and unlike `@{upstream}` it still resolves once the remote branch
+        // is gone.
+        let mergeRef = await runGit(["config", "--get", "branch.\(branch).merge"], in: directory, timeout: .seconds(10))
+        if !mergeRef.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .run(["push"])
+        }
+
+        let remote = await pushRemote(forBranch: branch, in: directory)
+        return .run(["push", "--set-upstream", remote, "HEAD"])
+    }
+
+    /// The branch's push remote, then `remote.pushDefault`, then the only
+    /// remote, then `origin`.
+    private func pushRemote(forBranch branch: String, in directory: String) async -> String {
+        for key in ["branch.\(branch).pushRemote", "remote.pushDefault"] {
+            let value = await runGit(["config", "--get", key], in: directory, timeout: .seconds(10))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                return value
+            }
+        }
+        let remotes = await runGit(["remote"], in: directory, timeout: .seconds(10))
+            .split(whereSeparator: \.isNewline)
+        return remotes.count == 1 ? String(remotes[0]) : "origin"
+    }
+
+    /// Resolves the project's repository once per root path and caches it.
+    private func lookUpRepository(projectID: UUID, rootPath: String) async -> RepositoryLookup {
+        if let location = repositories[projectID] {
+            return .found(location)
+        }
+        let result = await runGitForResult(
+            ["rev-parse", "--show-toplevel", "--show-prefix"],
+            in: rootPath,
+            timeout: .seconds(10),
+            includesStandardError: false
+        )
+        if result.wasInterrupted || Task.isCancelled {
+            return .interrupted
+        }
+        guard result.succeeded, let location = RepositoryLocation(revParseOutput: result.output) else {
+            return .notRepository
+        }
+        if rootPaths[projectID] == rootPath {
+            repositories[projectID] = location
+        }
+        return .found(location)
+    }
+
+    private func repository(for projectID: UUID) async -> RepositoryLocation? {
+        guard let rootPath = rootPaths[projectID],
+              case .found(let location) = await lookUpRepository(projectID: projectID, rootPath: rootPath),
+              rootPaths[projectID] == rootPath else {
+            return nil
+        }
+        return location
     }
 
     private func requestRefresh(projectID: UUID) async {
@@ -539,9 +688,25 @@ final class GitStatusService {
         guard let rootPath = rootPaths[projectID] else { return }
 
         var gitInfo = GitInfo()
+        let repository: RepositoryLocation
+        switch await lookUpRepository(projectID: projectID, rootPath: rootPath) {
+        case .found(let location):
+            repository = location
+        case .interrupted:
+            // Like an interrupted status below: keep the last known info.
+            return
+        case .notRepository:
+            if rootPaths[projectID] == rootPath, !Task.isCancelled, info[projectID] != gitInfo {
+                info[projectID] = gitInfo
+                onInfoChange?(projectID, gitInfo)
+            }
+            return
+        }
+        let repositoryRoot = repository.topLevel
+
         let statusResult = await runGitForResult(
-            ["status", "--porcelain=v1", "--branch", "-z"],
-            in: rootPath,
+            ["status", "--porcelain=v1", "--branch", "-z"] + repository.pathspecArguments,
+            in: repositoryRoot,
             timeout: .seconds(15)
         )
         guard statusResult.succeeded, rootPaths[projectID] == rootPath, !Task.isCancelled else {
@@ -552,9 +717,14 @@ final class GitStatusService {
             if statusResult.wasInterrupted || statusResult.wasTruncated || Task.isCancelled {
                 return
             }
-            if rootPaths[projectID] == rootPath, info[projectID] != gitInfo {
-                info[projectID] = gitInfo
-                onInfoChange?(projectID, gitInfo)
+            if rootPaths[projectID] == rootPath {
+                // The repository may have been removed or moved; look it up
+                // again on the next refresh.
+                repositories[projectID] = nil
+                if info[projectID] != gitInfo {
+                    info[projectID] = gitInfo
+                    onInfoChange?(projectID, gitInfo)
+                }
             }
             return
         }
@@ -570,7 +740,7 @@ final class GitStatusService {
         if let cachedRemote = remotePresence[projectID] {
             gitInfo.hasRemote = cachedRemote || !gitInfo.upstreamBranch.isEmpty
         } else {
-            let remoteOutput = await runGit(["remote"], in: rootPath, timeout: .seconds(10))
+            let remoteOutput = await runGit(["remote"], in: repositoryRoot, timeout: .seconds(10))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let hasRemote = !remoteOutput.isEmpty
             remotePresence[projectID] = hasRemote
@@ -584,18 +754,20 @@ final class GitStatusService {
             $0.stagedStatus != " " && $0.stagedStatus != "?"
         }
 
+        let unstagedArguments = ["diff", "--numstat", "-z"] + repository.pathspecArguments
+        let stagedArguments = ["diff", "--cached", "--numstat", "-z"] + repository.pathspecArguments
         let unstagedOutput: String
         let stagedOutput: String
         if needsUnstagedStats && needsStagedStats {
-            async let unstaged = runGit(["diff", "--numstat", "-z"], in: rootPath, timeout: .seconds(15))
-            async let staged = runGit(["diff", "--cached", "--numstat", "-z"], in: rootPath, timeout: .seconds(15))
+            async let unstaged = runGit(unstagedArguments, in: repositoryRoot, timeout: .seconds(15))
+            async let staged = runGit(stagedArguments, in: repositoryRoot, timeout: .seconds(15))
             (unstagedOutput, stagedOutput) = await (unstaged, staged)
         } else if needsUnstagedStats {
-            unstagedOutput = await runGit(["diff", "--numstat", "-z"], in: rootPath, timeout: .seconds(15))
+            unstagedOutput = await runGit(unstagedArguments, in: repositoryRoot, timeout: .seconds(15))
             stagedOutput = ""
         } else if needsStagedStats {
             unstagedOutput = ""
-            stagedOutput = await runGit(["diff", "--cached", "--numstat", "-z"], in: rootPath, timeout: .seconds(15))
+            stagedOutput = await runGit(stagedArguments, in: repositoryRoot, timeout: .seconds(15))
         } else {
             unstagedOutput = ""
             stagedOutput = ""
@@ -630,7 +802,7 @@ final class GitStatusService {
                     statusOutput: statusResult.output,
                     unstagedOutput: unstagedOutput,
                     stagedOutput: stagedOutput,
-                    rootPath: rootPath,
+                    rootPath: repositoryRoot,
                     paths: paths
                 )
             }
