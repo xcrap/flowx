@@ -9,6 +9,12 @@ struct GitCommitComposer: View {
     var body: some View {
         @Bindable var project = project
         let hasUntrackedFiles = project.gitInfo.files.contains(where: \.isUntracked)
+        // Only a choice when something is staged and something else is not.
+        let offersStagedOnly = project.gitInfo.stagedFileCount > 0 && project.gitInfo.unstagedFileCount > 0
+        let stagedOnly = Binding(
+            get: { project.commitsStagedOnly },
+            set: { project.commitStagedOnlyOverride = $0 }
+        )
         let canCommit = !project.isPerformingGitAction && !project.commitMessageDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         return VStack(alignment: .leading, spacing: FXSpacing.sm) {
@@ -43,7 +49,16 @@ struct GitCommitComposer: View {
             }
 
             HStack(spacing: FXSpacing.md) {
-                if hasUntrackedFiles {
+                if offersStagedOnly {
+                    Toggle(isOn: stagedOnly) {
+                        Text("Staged changes only")
+                            .font(FXTypography.caption)
+                            .foregroundStyle(FXColors.fgSecondary)
+                    }
+                    .toggleStyle(.checkbox)
+                }
+
+                if hasUntrackedFiles && !project.commitsStagedOnly {
                     Toggle(isOn: $project.includeUntrackedInCommit) {
                         Text("Include untracked files")
                             .font(FXTypography.caption)
