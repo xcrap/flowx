@@ -7,6 +7,8 @@ actor ClaudeNativeThreadStore {
 
     static let defaultMaximumThreadResults = 500
     private static let maximumSummaryBytes = 1 * 1_024 * 1_024
+    private static let maximumSummaryTailBytes = 8 * 1_024 * 1_024
+    private static let maximumSummaryTailRecords = 64
     static let defaultMaximumTranscriptBytes = 32 * 1_024 * 1_024
     static let defaultMaximumSummaryCacheEntries = 2_000
     static let defaultMaximumTranscriptCacheEntries = 4
@@ -34,6 +36,17 @@ actor ClaudeNativeThreadStore {
     /// can stat one file instead of re-reading and re-diffing the transcript.
     private var lastReadFiles: [String: URL] = [:]
     private static let maximumTrackedReadFiles = 256
+    /// The Claude app's per-session metadata (`local_*.json`), which records
+    /// `isArchived` for the Claude Code session it wraps (`cliSessionId`).
+    /// Read-only: archive state belongs to the Claude app.
+    private let desktopSessionsRoot: URL?
+    private var desktopArchiveCache: (fingerprint: String, archivedSessionIDs: Set<String>)?
+
+    static var defaultDesktopSessionsRoot: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("Claude", isDirectory: true)
+            .appendingPathComponent("claude-code-sessions", isDirectory: true)
+    }
 
     init(
         configRoot: URL? = nil,
@@ -42,9 +55,11 @@ actor ClaudeNativeThreadStore {
         maximumSummaryCacheEntries: Int = ClaudeNativeThreadStore.defaultMaximumSummaryCacheEntries,
         maximumTranscriptCacheEntries: Int = ClaudeNativeThreadStore.defaultMaximumTranscriptCacheEntries,
         maximumTranscriptCacheBytes: Int = ClaudeNativeThreadStore.defaultMaximumTranscriptCacheBytes,
+        desktopSessionsRoot: URL? = nil,
         trashHandler: @escaping TrashHandler = ClaudeNativeThreadStore.moveItemToTrash
     ) {
         configuredRoot = configRoot
+        self.desktopSessionsRoot = desktopSessionsRoot
         self.maximumTranscriptBytes = max(1, maximumTranscriptBytes)
         self.maximumThreadResults = max(1, maximumThreadResults)
         self.maximumSummaryCacheEntries = max(1, maximumSummaryCacheEntries)
@@ -87,11 +102,16 @@ actor ClaudeNativeThreadStore {
         var messages: [ConversationMessage] = []
     }
 
+    /// Lists this workspace's sessions. Sessions archived in the Claude app
+    /// are listed only when `archived` is true, so the sidebar matches the
+    /// Claude app and archived ones appear under Archived Tasks.
     func list(
         workingDirectory: URL,
-        limit: Int
+        limit: Int,
+        archived: Bool = false
     ) throws -> [ProviderNativeThreadSummary] {
         try Task.checkCancellation()
+        let archivedSessionIDs = desktopArchivedSessionIDs()
         let configuredDirectory = try Self.standardizedDirectory(workingDirectory)
         let canonicalDirectory = configuredDirectory.resolvingSymlinksInPath().standardizedFileURL
         let projectDirectories = projectDirectories(
@@ -146,6 +166,7 @@ actor ClaudeNativeThreadStore {
                 values: values,
                 canonicalDirectory: canonicalDirectory
             ) else { continue }
+            guard archivedSessionIDs.contains(summary.id) == archived else { continue }
             if summaries[summary.id] == nil { summaries[summary.id] = summary }
             if summaries.count >= boundedLimit { break }
         }
@@ -232,6 +253,62 @@ actor ClaudeNativeThreadStore {
             lastReadFiles.removeAll(keepingCapacity: true)
         }
         lastReadFiles[id] = file
+    }
+
+    /// Fingerprint of the Claude app's session metadata, so archive changes
+    /// made there trigger a sidebar refresh. Nil when the app has none.
+    func desktopArchiveRevision() -> String? {
+        desktopMetadataFiles().map(\.fingerprint)
+    }
+
+    private func desktopArchivedSessionIDs() -> Set<String> {
+        guard let metadata = desktopMetadataFiles() else { return [] }
+        if let cache = desktopArchiveCache, cache.fingerprint == metadata.fingerprint {
+            return cache.archivedSessionIDs
+        }
+        var archived: Set<String> = []
+        for file in metadata.files {
+            guard let data = try? Data(contentsOf: file, options: .mappedIfSafe),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["isArchived"] as? Bool == true,
+                  let sessionID = object["cliSessionId"] as? String,
+                  Self.isSafeSessionID(sessionID) else {
+                continue
+            }
+            archived.insert(sessionID)
+        }
+        desktopArchiveCache = (metadata.fingerprint, archived)
+        return archived
+    }
+
+    /// `<root>/<account>/<organization>/local_*.json`, with a fingerprint of
+    /// their paths, sizes and modification times.
+    private func desktopMetadataFiles() -> (files: [URL], fingerprint: String)? {
+        guard let root = desktopSessionsRoot else { return nil }
+        let manager = FileManager.default
+        let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
+        func children(of directory: URL) -> [URL] {
+            (try? manager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: keys,
+                options: [.skipsHiddenFiles]
+            )) ?? []
+        }
+        var files: [URL] = []
+        var fingerprint = ""
+        for account in children(of: root) where (try? account.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+            for organization in children(of: account) where (try? organization.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                for file in children(of: organization)
+                where file.lastPathComponent.hasPrefix("local_") && file.pathExtension == "json" {
+                    guard let values = try? file.resourceValues(forKeys: Set(keys)) else { continue }
+                    files.append(file)
+                    fingerprint += "\(file.lastPathComponent):\(values.fileSize ?? 0):"
+                        + "\(values.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0);"
+                }
+            }
+        }
+        guard !files.isEmpty else { return nil }
+        return (files, fingerprint)
     }
 
     /// Size and modification time of the transcript last read for `id`; nil
@@ -837,11 +914,16 @@ actor ClaudeNativeThreadStore {
         guard size > maximumSummaryBytes else { return try Data(contentsOf: url, options: [.mappedIfSafe]) }
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
-        let half = maximumSummaryBytes / 2
-        let head = try handle.read(upToCount: half) ?? Data()
-        try handle.seek(toOffset: UInt64(max(0, size - half)))
-        var tail = try handle.readToEnd() ?? Data()
-        if let newline = tail.firstIndex(of: 0x0A) { tail.removeSubrange(tail.startIndex...newline) }
+        let head = try handle.read(upToCount: maximumSummaryBytes / 2) ?? Data()
+        // Screenshots and large tool results make single records megabytes
+        // long, so a fixed byte window at the end can land inside one record
+        // and yield nothing parseable; the session then vanished from the
+        // list. Collect whole records from the end instead.
+        let tail = try readTailData(
+            from: url,
+            maximumBytes: maximumSummaryTailBytes,
+            maximumRecords: maximumSummaryTailRecords
+        )
         return head + Data([0x0A]) + tail
     }
 

@@ -2512,7 +2512,7 @@ final class AppState {
         var archiveChanged = false
         for provider in providerRegistry.allProviders {
             guard runtimeHealth[provider.id]?.isUsable != false,
-                  let archiving = provider as? any AIProviderNativeThreadArchiving else { continue }
+                  let archiving = provider as? any AIProviderNativeThreadArchiveListing else { continue }
             if let revision = await archiving.nativeThreadArchiveRevision() {
                 if nativeArchiveRevisions[provider.id] != revision { archiveChanged = true }
                 nativeArchiveRevisions[provider.id] = revision
@@ -2737,7 +2737,7 @@ final class AppState {
                 errors.append("\(provider.displayName): \(error.localizedDescription)")
             }
 
-            if let archivingProvider = provider as? any AIProviderNativeThreadArchiving {
+            if let archivingProvider = provider as? any AIProviderNativeThreadArchiveListing {
                 do {
                     let summaries = try await archivingProvider.listArchivedNativeThreads(
                         workingDirectory: projectRootURL,

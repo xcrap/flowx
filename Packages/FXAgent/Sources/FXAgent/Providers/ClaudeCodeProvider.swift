@@ -644,7 +644,7 @@ final class ClaudeStreamParser: @unchecked Sendable {
     }
 }
 
-public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIProviderNativeThreadRenaming, AIProviderNativeThreadTrashManaging, AIProviderRuntimeDefaultsProviding, Sendable {
+public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIProviderNativeThreadArchiveListing, AIProviderNativeThreadRenaming, AIProviderNativeThreadTrashManaging, AIProviderRuntimeDefaultsProviding, Sendable {
     public let id = "claude"
     public let displayName = "Claude Code"
     public var availableModels: [AIModel] { modelCatalog.models }
@@ -667,7 +667,12 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
 
     public init(discovery: RuntimeDiscovery, configRoot: URL? = nil) {
         self.discovery = discovery
-        nativeStore = ClaudeNativeThreadStore(configRoot: configRoot)
+        // A custom config root is a sandbox (tests); only the real one pairs
+        // with the Claude app's archive state.
+        nativeStore = ClaudeNativeThreadStore(
+            configRoot: configRoot,
+            desktopSessionsRoot: configRoot == nil ? ClaudeNativeThreadStore.defaultDesktopSessionsRoot : nil
+        )
         runtimeDefaults = ClaudeRuntimeDefaults(configRoot: configRoot)
     }
 
@@ -770,6 +775,18 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
         workingDirectory: URL?
     ) async throws -> ProviderNativeThread {
         try await nativeStore.read(id: id, workingDirectory: workingDirectory)
+    }
+
+    /// Archive state is owned by the Claude app; FlowX mirrors it read-only.
+    public func nativeThreadArchiveRevision() async -> String? {
+        await nativeStore.desktopArchiveRevision()
+    }
+
+    public func listArchivedNativeThreads(
+        workingDirectory: URL,
+        limit: Int
+    ) async throws -> [ProviderNativeThreadSummary] {
+        try await nativeStore.list(workingDirectory: workingDirectory, limit: limit, archived: true)
     }
 
     public func nativeThreadRevision(id: String, createdAt: Date) async -> String? {

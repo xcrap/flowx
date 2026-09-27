@@ -293,15 +293,29 @@ private struct ArchivedTaskSettingsRow: View {
                 )
             )
         }
-        items.append(
-            FXDropdownItem(
-                id: "restore",
-                title: "Restore Task",
-                subtitle: "Return this task to \(project.project.name)",
-                isEnabled: isEnabled,
-                action: restore
+        if canRestore {
+            items.append(
+                FXDropdownItem(
+                    id: "restore",
+                    title: "Restore Task",
+                    subtitle: "Return this task to \(project.project.name)",
+                    isEnabled: isEnabled,
+                    action: restore
+                )
             )
-        )
+        } else {
+            // Archive state is owned by the provider's own app (Claude's is
+            // mirrored read-only), so restoring happens there.
+            items.append(
+                FXDropdownItem(
+                    id: "restore-in-provider",
+                    title: "Restore in \(providerName)",
+                    subtitle: "Unarchive it in the \(providerName) app; FlowX follows",
+                    isEnabled: false,
+                    action: {}
+                )
+            )
+        }
 
         var sections = [FXDropdownSection(id: "archived-task", items: items)]
         if canDeletePermanently {
@@ -326,6 +340,11 @@ private struct ArchivedTaskSettingsRow: View {
 
     private var isActionInProgress: Bool {
         appState.isArchivedThreadActionInProgress(binding.identity)
+    }
+
+    private var canRestore: Bool {
+        appState.providerRegistry.provider(for: binding.identity.providerID)
+            is any AIProviderNativeThreadArchiving
     }
 
     private var canDeletePermanently: Bool {
