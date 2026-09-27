@@ -3730,10 +3730,14 @@ final class AppState {
         guard !agent.conversationState.isPreparingAttachments else { return nil }
         guard let project = project(for: agent.id) else { return nil }
         guard runtimeHealth[agent.providerID]?.isUsable == true else {
-            let isChecking = runtimeHealth[agent.providerID] == .checking
-            agent.conversationState.error = isChecking
-                ? "\(agent.providerName) is still starting. Try again in a moment."
-                : "\(agent.providerName) is unavailable. Install or refresh its runtime in Settings."
+            agent.conversationState.error = switch runtimeHealth[agent.providerID] {
+            case .checking?:
+                "\(agent.providerName) is still starting. Try again in a moment."
+            case .quarantined?:
+                "\(agent.providerName) is quarantined by macOS. See Settings › Runtime for how to allow it."
+            default:
+                "\(agent.providerName) is unavailable. Install or refresh its runtime in Settings."
+            }
             return nil
         }
         if let binding = agent.nativeThreadBinding,

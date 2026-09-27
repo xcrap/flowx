@@ -22,8 +22,8 @@ extension BinarySpec {
         searchPaths: [
             // Reuse the signed runtime already used by the desktop agent so
             // FlowX sees the same native tasks. RuntimeDiscovery resolves every
-            // fallback and rejects quarantined targets without altering their
-            // Gatekeeper metadata.
+            // fallback and rejects quarantined targets that are not notarized,
+            // without altering their Gatekeeper metadata.
             "\(NSHomeDirectory())/Applications/ChatGPT.app/Contents/Resources/codex",
             "/Applications/ChatGPT.app/Contents/Resources/codex",
             "\(NSHomeDirectory())/Applications/Codex.app/Contents/Resources/codex",

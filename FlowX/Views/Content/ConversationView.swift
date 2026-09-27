@@ -640,7 +640,7 @@ struct ConversationView: View {
 
     private var isRecoverableError: Bool {
         guard let error = agent.conversationState.error?.lowercased() else { return false }
-        let nonRecoverable = ["not found", "install with", "configure it in settings", "failed to start"]
+        let nonRecoverable = ["not found", "install with", "configure it in settings", "failed to start", "quarantined"]
         return !nonRecoverable.contains(where: { error.contains($0) })
     }
 

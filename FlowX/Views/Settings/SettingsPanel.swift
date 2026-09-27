@@ -335,12 +335,16 @@ struct SettingsPanel: View {
 
     private func providerRow(title: String, binaryID: String, modelCount: Int) -> some View {
         let health = appState.runtimeHealth[binaryID]
-        let isAvailable = health?.isUsable == true
+        let statusColor: Color = switch health {
+        case .available?: FXColors.success
+        case .quarantined?: FXColors.warning
+        default: FXColors.error
+        }
 
         return VStack(alignment: .leading, spacing: FXSpacing.xs) {
             HStack(spacing: FXSpacing.sm) {
                 Circle()
-                    .fill(isAvailable ? FXColors.success : FXColors.error)
+                    .fill(statusColor)
                     .frame(width: 8, height: 8)
                 Text(title)
                     .font(FXTypography.body)
@@ -357,6 +361,13 @@ struct SettingsPanel: View {
                 Text(path)
                     .font(FXTypography.monoSmall)
                     .foregroundStyle(FXColors.fgTertiary)
+                    .textSelection(.enabled)
+            }
+            if let guidance = health?.guidance {
+                Text(guidance)
+                    .font(FXTypography.caption)
+                    .foregroundStyle(FXColors.fgSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
         }
