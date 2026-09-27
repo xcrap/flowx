@@ -1,4 +1,4 @@
-.PHONY: dev build test check benchmark-chat benchmark-diff clean generate
+.PHONY: dev build test check benchmark-chat benchmark-diff benchmark-git clean generate
 
 generate:
 	xcodegen generate
@@ -67,6 +67,11 @@ test:
 
 benchmark-chat:
 	cd Packages/FXCore && FLOWX_BENCHMARK_CHAT=1 swift test -c release --scratch-path ../../build/benchmarks/FXCore --filter benchmarkTranscriptPreparation --quiet
+	cd Packages/FXAgent && FLOWX_BENCHMARK_CHAT=1 swift test -c release --scratch-path ../../build/benchmarks/FXAgent --filter "benchmarkCodexNativeTurnPagination|benchmarkStreamEndHandoff" --quiet
+	cd Packages/FXDesign && FLOWX_BENCHMARK_CHAT=1 swift test -c release --scratch-path ../../build/benchmarks/FXDesign --filter "benchmarkStreamingTextUpdates|benchmarkComposerKeystrokes" --quiet
+
+benchmark-git:
+	cd Packages/FXCore && FLOWX_BENCHMARK_GIT=1 swift test -c release --scratch-path ../../build/benchmarks/FXCore --filter benchmarkGitStatusPoll --quiet
 
 benchmark-diff:
 	cd Packages/FXDesign && FLOWX_BENCHMARK_DIFF=1 swift test -c release --scratch-path ../../build/benchmarks/FXDesign --filter codeListOnlyBuildsVisibleRowsAndCanReachTheEnd --quiet

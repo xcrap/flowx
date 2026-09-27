@@ -16,6 +16,13 @@ public final class ConversationState {
     public var runtimePhase: ProviderSessionPhase = .idle
     public var streamingText: String = ""
     public var streamingRevision: Int = 0
+    /// Identity of the reply currently streaming. A finished reply keeps it in
+    /// `streamingHandoff`, so its view survives the hand-off unchanged.
+    public private(set) var streamingSegment: Int = 0
+    /// The last reply `finishStreaming` moved into `messages`. The transcript
+    /// renders messages asynchronously, so the tail keeps showing this text
+    /// until the render for `messageRevision` is installed.
+    public private(set) var streamingHandoff: StreamingHandoff?
     public private(set) var completedToolUseIDs: Set<String> = []
     public var inputText: String = ""
     public var unsentPrompt: UnsentConversationPrompt?
@@ -224,6 +231,12 @@ public final class ConversationState {
     public func finishStreaming(stopReason: String? = nil) {
         if !streamingText.isEmpty {
             appendMessage(ConversationMessage(role: .assistant, content: [.text(streamingText)]))
+            streamingHandoff = StreamingHandoff(
+                text: streamingText,
+                segment: streamingSegment,
+                messageRevision: messageRevision
+            )
+            streamingSegment &+= 1
         }
         streamingText = ""
         streamingRevision &+= 1
@@ -241,6 +254,16 @@ public final class ConversationState {
             lastStopReason = stopReason
         }
         lastRuntimeEventAt = Date()
+    }
+
+    /// The finished reply to keep on screen while the transcript has only
+    /// rendered messages up to `renderedMessageRevision`.
+    public func pendingStreamingHandoff(renderedMessageRevision: Int) -> StreamingHandoff? {
+        guard let streamingHandoff,
+              renderedMessageRevision < streamingHandoff.messageRevision else {
+            return nil
+        }
+        return streamingHandoff
     }
 
     public func setError(_ errorMessage: String) {
@@ -390,6 +413,7 @@ public final class ConversationState {
     public func resetConversation() {
         messages.removeAll()
         messageRevision &+= 1
+        streamingHandoff = nil
         completedToolUseIDs.removeAll(keepingCapacity: false)
         runtimePhase = .idle
         streamingText = ""
@@ -524,6 +548,13 @@ public final class ConversationState {
         }
         completedToolUseIDs = retained
     }
+}
+
+/// A reply that finished streaming, and the message revision that holds it.
+public struct StreamingHandoff: Equatable, Sendable {
+    public let text: String
+    public let segment: Int
+    public let messageRevision: Int
 }
 
 private extension String {

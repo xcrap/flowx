@@ -863,24 +863,36 @@ private struct ComposerNativeTextEditor: NSViewRepresentable {
         textView.onPasteImage = onPasteImage
         textView.onDropImages = onDropImages
         textView.onDropTargeted = onDropTargeted
+        textView.onWidthChange = { [weak coordinator = context.coordinator, weak textView] in
+            guard let coordinator, let textView else { return }
+            coordinator.measure(textView)
+        }
         textView.registerForDraggedTypes([.fileURL])
-        applyAppearance(to: textView)
+        FXNativeTextStyle.applyBody(to: textView)
+        context.coordinator.appliedAppearance = FXTheme.signature
 
         scrollView.documentView = textView
         context.coordinator.measure(textView)
         return scrollView
     }
 
+    /// Runs on every SwiftUI update, including each keystroke's binding
+    /// write. Restyling sets the font over all of the text and measuring
+    /// lays it out, so both happen only when their inputs change; typing is
+    /// measured in `textDidChange` and resizing in `onWidthChange`.
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? ComposerNSTextView else { return }
         context.coordinator.parent = self
 
+        var needsStyle = false
         if textView.string != text {
             let selection = textView.selectedRange()
             textView.string = text
             let location = min(selection.location, (text as NSString).length)
             let length = min(selection.length, (text as NSString).length - location)
             textView.setSelectedRange(NSRange(location: location, length: length))
+            // Replacing the text programmatically sends no textDidChange.
+            needsStyle = true
         }
 
         textView.isEditable = isEnabled
@@ -888,8 +900,13 @@ private struct ComposerNativeTextEditor: NSViewRepresentable {
         textView.onPasteImage = onPasteImage
         textView.onDropImages = onDropImages
         textView.onDropTargeted = onDropTargeted
-        applyAppearance(to: textView)
-        context.coordinator.measure(textView)
+
+        let appearance = FXTheme.signature
+        if needsStyle || context.coordinator.appliedAppearance != appearance {
+            FXNativeTextStyle.applyBody(to: textView)
+            context.coordinator.appliedAppearance = appearance
+            context.coordinator.measure(textView)
+        }
 
         Task { @MainActor [weak textView] in
             guard let textView, let window = textView.window else { return }
@@ -901,28 +918,10 @@ private struct ComposerNativeTextEditor: NSViewRepresentable {
         }
     }
 
-    private func applyAppearance(to textView: NSTextView) {
-        let baseFont = NSFont.systemFont(ofSize: FXTypography.bodyPointSize)
-        let roundedDescriptor = baseFont.fontDescriptor.withDesign(.rounded)
-            ?? baseFont.fontDescriptor
-        textView.font = NSFont(
-            descriptor: roundedDescriptor,
-            size: FXTypography.bodyPointSize
-        ) ?? baseFont
-        textView.textColor = NSColor(FXColors.fg)
-        textView.insertionPointColor = NSColor(FXColors.accent)
-        textView.selectedTextAttributes = [
-            .backgroundColor: NSColor(FXColors.accent).withAlphaComponent(0.28)
-        ]
-        textView.typingAttributes = [
-            .font: textView.font ?? baseFont,
-            .foregroundColor: NSColor(FXColors.fg)
-        ]
-    }
-
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerNativeTextEditor
+        var appliedAppearance: FXThemeSignature?
 
         init(parent: ComposerNativeTextEditor) {
             self.parent = parent
@@ -945,13 +944,7 @@ private struct ComposerNativeTextEditor: NSViewRepresentable {
         }
 
         func measure(_ textView: NSTextView) {
-            guard let layoutManager = textView.layoutManager,
-                  let textContainer = textView.textContainer else { return }
-            layoutManager.ensureLayout(for: textContainer)
-            let contentHeight = ceil(
-                layoutManager.usedRect(for: textContainer).height
-                    + textView.textContainerInset.height * 2
-            )
+            guard let contentHeight = FXNativeTextStyle.contentHeight(of: textView) else { return }
             let nextHeight = min(120, max(28, contentHeight))
             guard abs(parent.measuredHeight - nextHeight) > 0.5 else { return }
 
@@ -968,6 +961,16 @@ private final class ComposerNSTextView: NSTextView {
     var onPasteImage: (() -> Bool)?
     var onDropImages: (([URL]) -> Bool)?
     var onDropTargeted: ((Bool) -> Void)?
+    /// Called after a width change rewraps the text.
+    var onWidthChange: (() -> Void)?
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = abs(newSize.width - frame.width) > 0.5
+        super.setFrameSize(newSize)
+        if widthChanged {
+            onWidthChange?()
+        }
+    }
 
     override func paste(_ sender: Any?) {
         if containsSupportedImage(NSPasteboard.general),

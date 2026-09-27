@@ -3554,7 +3554,7 @@ final class AppState {
             return
         }
 
-        guard project.gitInfo != gitInfo else { return }
+        guard project.gitInfo.revision != gitInfo.revision else { return }
 
         project.gitInfo = gitInfo
         if !gitInfo.hasChanges {

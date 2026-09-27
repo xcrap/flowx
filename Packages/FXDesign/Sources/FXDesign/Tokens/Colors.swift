@@ -289,6 +289,24 @@ public enum FXTheme {
     fileprivate static var currentPalette: FXPalette {
         .cached(tone: baseTone, dark: isDarkAppearance)
     }
+
+    /// Everything the current tokens resolve from. Views that copy token
+    /// values into AppKit (fonts, colors) reapply them only when it changes.
+    public static var signature: FXThemeSignature {
+        FXThemeSignature(
+            baseTone: baseTone,
+            accent: accentColorOption,
+            textSize: textSizePreset,
+            isDark: isDarkAppearance
+        )
+    }
+}
+
+public struct FXThemeSignature: Hashable {
+    public let baseTone: FXBaseTone
+    public let accent: FXAccentColorOption
+    public let textSize: FXTextSizePreset
+    public let isDark: Bool
 }
 
 // MARK: - Public Semantic Tokens
