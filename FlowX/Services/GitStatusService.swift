@@ -199,21 +199,6 @@ final class GitStatusService {
     private static let fileReadExecutor = BoundedTaskExecutor(maxConcurrentTasks: 2)
     private static let revisionExecutor = BoundedTaskExecutor(maxConcurrentTasks: 1)
 
-    private struct ParsedStatusLine {
-        let path: String
-        let stagedStatus: String
-        let unstagedStatus: String
-    }
-
-    private struct ParsedStatusSnapshot {
-        var branch: String = ""
-        var upstreamBranch: String = ""
-        var hasCommits: Bool = true
-        var aheadCount: Int = 0
-        var behindCount: Int = 0
-        var files: [ParsedStatusLine] = []
-    }
-
     /// Where a project folder sits in its repository. Git prints status,
     /// numstat and diff paths relative to the repository root, so every git
     /// command runs from `topLevel` and every path resolves against it, even
@@ -254,54 +239,8 @@ final class GitStatusService {
         var wasInterrupted: Bool = false
     }
 
-    struct FileStatus: Equatable, Identifiable, Sendable {
-        var id: String { path }
-        var path: String
-        var stagedStatus: String
-        var unstagedStatus: String
-        var stagedAdditions: Int
-        var stagedDeletions: Int
-        var unstagedAdditions: Int
-        var unstagedDeletions: Int
-
-        var status: String {
-            let combined = "\(stagedStatus)\(unstagedStatus)"
-            let trimmed = combined.trimmingCharacters(in: .whitespaces)
-            return trimmed.isEmpty ? "?" : trimmed
-        }
-
-        var additions: Int { stagedAdditions + unstagedAdditions }
-        var deletions: Int { stagedDeletions + unstagedDeletions }
-        var isStaged: Bool { hasStagedChanges }
-        var isUntracked: Bool { stagedStatus == "?" && unstagedStatus == "?" }
-        var hasStagedChanges: Bool { stagedStatus != " " && stagedStatus != "?" }
-        var hasUnstagedChanges: Bool { isUntracked || (unstagedStatus != " " && unstagedStatus != "?") }
-    }
-
-    struct GitInfo: Equatable, Sendable {
-        var isGitRepo: Bool = false
-        var branch: String = ""
-        var upstreamBranch: String = ""
-        var hasRemote: Bool = false
-        var hasCommits: Bool = false
-        var aheadCount: Int = 0
-        var behindCount: Int = 0
-        var additions: Int = 0
-        var deletions: Int = 0
-        var filesChanged: Int = 0
-        var stagedFileCount: Int = 0
-        var unstagedFileCount: Int = 0
-        var statusFileCount: Int = 0
-        var contentRevision: UInt64 = 0
-        var files: [FileStatus] = []
-        var hasChanges: Bool { statusFileCount > 0 }
-        /// Porcelain status reports a detached HEAD as `HEAD (no branch)`.
-        var isDetachedHead: Bool { branch.hasPrefix("HEAD (") }
-        var canPush: Bool {
-            isGitRepo && hasRemote && !isDetachedHead
-                && (aheadCount > 0 || (upstreamBranch.isEmpty && hasCommits))
-        }
-    }
+    typealias FileStatus = GitFileStatus
+    typealias GitInfo = GitRepositoryInfo
 
     private(set) var info: [UUID: GitInfo] = [:]
     private(set) var lastFailureMessage: [UUID: String] = [:]
@@ -687,7 +626,6 @@ final class GitStatusService {
     private func refreshOnce(projectID: UUID) async {
         guard let rootPath = rootPaths[projectID] else { return }
 
-        var gitInfo = GitInfo()
         let repository: RepositoryLocation
         switch await lookUpRepository(projectID: projectID, rootPath: rootPath) {
         case .found(let location):
@@ -696,7 +634,9 @@ final class GitStatusService {
             // Like an interrupted status below: keep the last known info.
             return
         case .notRepository:
-            if rootPaths[projectID] == rootPath, !Task.isCancelled, info[projectID] != gitInfo {
+            let gitInfo = GitInfo()
+            if rootPaths[projectID] == rootPath, !Task.isCancelled,
+               info[projectID]?.revision != gitInfo.revision {
                 info[projectID] = gitInfo
                 onInfoChange?(projectID, gitInfo)
             }
@@ -721,125 +661,105 @@ final class GitStatusService {
                 // The repository may have been removed or moved; look it up
                 // again on the next refresh.
                 repositories[projectID] = nil
-                if info[projectID] != gitInfo {
+                let gitInfo = GitInfo()
+                if info[projectID]?.revision != gitInfo.revision {
                     info[projectID] = gitInfo
                     onInfoChange?(projectID, gitInfo)
                 }
             }
             return
         }
-        gitInfo.isGitRepo = true
 
-        let parsedStatus = parseStatusOutput(statusResult.output)
-        gitInfo.branch = parsedStatus.branch
-        gitInfo.upstreamBranch = parsedStatus.upstreamBranch
-        gitInfo.hasCommits = parsedStatus.hasCommits
-        gitInfo.aheadCount = parsedStatus.aheadCount
-        gitInfo.behindCount = parsedStatus.behindCount
+        // Parsing, building and fingerprinting the snapshot scale with the
+        // number of changed files; keep them off the main actor.
+        let statusOutput = statusResult.output
+        let parsedStatus: GitStatusParser.Status
+        do {
+            parsedStatus = try await Self.revisionExecutor.run(priority: .utility) {
+                GitStatusParser.parseStatus(statusOutput)
+            }
+        } catch {
+            return
+        }
+        guard rootPaths[projectID] == rootPath, !Task.isCancelled else { return }
 
+        let hasRemote: Bool
         if let cachedRemote = remotePresence[projectID] {
-            gitInfo.hasRemote = cachedRemote || !gitInfo.upstreamBranch.isEmpty
+            hasRemote = cachedRemote || !parsedStatus.upstreamBranch.isEmpty
         } else {
             let remoteOutput = await runGit(["remote"], in: repositoryRoot, timeout: .seconds(10))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let hasRemote = !remoteOutput.isEmpty
-            remotePresence[projectID] = hasRemote
-            gitInfo.hasRemote = hasRemote || !gitInfo.upstreamBranch.isEmpty
-        }
-
-        let needsUnstagedStats = parsedStatus.files.contains {
-            $0.unstagedStatus != " " && $0.unstagedStatus != "?"
-        }
-        let needsStagedStats = parsedStatus.files.contains {
-            $0.stagedStatus != " " && $0.stagedStatus != "?"
+            remotePresence[projectID] = !remoteOutput.isEmpty
+            hasRemote = !remoteOutput.isEmpty || !parsedStatus.upstreamBranch.isEmpty
         }
 
         let unstagedArguments = ["diff", "--numstat", "-z"] + repository.pathspecArguments
         let stagedArguments = ["diff", "--cached", "--numstat", "-z"] + repository.pathspecArguments
         let unstagedOutput: String
         let stagedOutput: String
-        if needsUnstagedStats && needsStagedStats {
+        switch (parsedStatus.needsUnstagedStats, parsedStatus.needsStagedStats) {
+        case (true, true):
             async let unstaged = runGit(unstagedArguments, in: repositoryRoot, timeout: .seconds(15))
             async let staged = runGit(stagedArguments, in: repositoryRoot, timeout: .seconds(15))
             (unstagedOutput, stagedOutput) = await (unstaged, staged)
-        } else if needsUnstagedStats {
+        case (true, false):
             unstagedOutput = await runGit(unstagedArguments, in: repositoryRoot, timeout: .seconds(15))
             stagedOutput = ""
-        } else if needsStagedStats {
+        case (false, true):
             unstagedOutput = ""
             stagedOutput = await runGit(stagedArguments, in: repositoryRoot, timeout: .seconds(15))
-        } else {
+        case (false, false):
             unstagedOutput = ""
             stagedOutput = ""
         }
 
-        let unstagedNumstatMap = parseNumstat(unstagedOutput)
-        let stagedNumstatMap = parseNumstat(stagedOutput)
-        gitInfo.files = parsedStatus.files.map { line in
-            let unstagedCounts = unstagedNumstatMap[line.path] ?? (0, 0)
-            let stagedCounts = stagedNumstatMap[line.path] ?? (0, 0)
-            return FileStatus(
-                path: line.path,
-                stagedStatus: line.stagedStatus,
-                unstagedStatus: line.unstagedStatus,
-                stagedAdditions: stagedCounts.0,
-                stagedDeletions: stagedCounts.1,
-                unstagedAdditions: unstagedCounts.0,
-                unstagedDeletions: unstagedCounts.1
-            )
-        }
-        gitInfo.stagedFileCount = gitInfo.files.filter(\.hasStagedChanges).count
-        gitInfo.unstagedFileCount = gitInfo.files.filter(\.hasUnstagedChanges).count
-        gitInfo.statusFileCount = gitInfo.files.count
-        gitInfo.filesChanged = gitInfo.files.count
-        gitInfo.additions = gitInfo.files.reduce(into: 0) { $0 += $1.additions }
-        gitInfo.deletions = gitInfo.files.reduce(into: 0) { $0 += $1.deletions }
-
-        let paths = gitInfo.files.map(\.path)
+        let gitInfo: GitInfo
         do {
-            gitInfo.contentRevision = try await Self.revisionExecutor.run(priority: .utility) {
-                try Self.contentRevision(
-                    statusOutput: statusResult.output,
+            gitInfo = try await Self.revisionExecutor.run(priority: .utility) {
+                try Self.makeGitInfo(
+                    status: parsedStatus,
+                    statusOutput: statusOutput,
                     unstagedOutput: unstagedOutput,
                     stagedOutput: stagedOutput,
                     rootPath: repositoryRoot,
-                    paths: paths
+                    hasRemote: hasRemote
                 )
             }
         } catch {
             return
         }
 
-        guard rootPaths[projectID] == rootPath, !Task.isCancelled, info[projectID] != gitInfo else { return }
+        // Equal revisions mean equal snapshots; skip the deep `files` compare.
+        guard rootPaths[projectID] == rootPath,
+              !Task.isCancelled,
+              info[projectID]?.revision != gitInfo.revision else { return }
         info[projectID] = gitInfo
         onInfoChange?(projectID, gitInfo)
     }
 
-    private func parseNumstat(_ output: String) -> [String: (Int, Int)] {
-        var result: [String: (Int, Int)] = [:]
-        let records = output.split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
-        var index = 0
-
-        while index < records.count {
-            let parts = records[index].split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
-            guard parts.count == 3 else {
-                index += 1
-                continue
-            }
-
-            let additions = Int(parts[0]) ?? 0
-            let deletions = Int(parts[1]) ?? 0
-            if !parts[2].isEmpty {
-                result[String(parts[2])] = (additions, deletions)
-                index += 1
-            } else if index + 2 < records.count {
-                result[records[index + 2]] = (additions, deletions)
-                index += 3
-            } else {
-                index += 1
-            }
-        }
-        return result
+    nonisolated private static func makeGitInfo(
+        status: GitStatusParser.Status,
+        statusOutput: String,
+        unstagedOutput: String,
+        stagedOutput: String,
+        rootPath: String,
+        hasRemote: Bool
+    ) throws -> GitInfo {
+        let contentRevision = try contentRevision(
+            statusOutput: statusOutput,
+            unstagedOutput: unstagedOutput,
+            stagedOutput: stagedOutput,
+            rootPath: rootPath,
+            paths: status.files.map(\.path)
+        )
+        try Task.checkCancellation()
+        return GitStatusParser.makeInfo(
+            status: status,
+            unstagedNumstat: GitStatusParser.parseNumstat(unstagedOutput),
+            stagedNumstat: GitStatusParser.parseNumstat(stagedOutput),
+            hasRemote: hasRemote,
+            contentRevision: contentRevision
+        )
     }
 
     private static let maximumUntrackedDiffFiles = 200
@@ -879,76 +799,6 @@ final class GitStatusService {
             appendsTruncationNotice: false,
             includesStandardError: false
         )
-    }
-
-    private func parseStatusOutput(_ output: String) -> ParsedStatusSnapshot {
-        var snapshot = ParsedStatusSnapshot()
-        let records = output.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
-        var index = 0
-
-        while index < records.count {
-            let rawLine = records[index]
-            if rawLine.hasPrefix("## ") {
-                parseBranchHeader(String(rawLine.dropFirst(3)), into: &snapshot)
-                index += 1
-                continue
-            }
-
-            guard rawLine.count >= 3 else {
-                index += 1
-                continue
-            }
-            let stagedStatus = String(rawLine.prefix(1))
-            let unstagedStatus = String(rawLine.dropFirst(1).prefix(1))
-            snapshot.files.append(
-                ParsedStatusLine(
-                    path: String(rawLine.dropFirst(3)),
-                    stagedStatus: stagedStatus,
-                    unstagedStatus: unstagedStatus
-                )
-            )
-
-            if stagedStatus == "R" || stagedStatus == "C" || unstagedStatus == "R" || unstagedStatus == "C" {
-                index += 2
-            } else {
-                index += 1
-            }
-        }
-        return snapshot
-    }
-
-    private func parseBranchHeader(_ header: String, into snapshot: inout ParsedStatusSnapshot) {
-        let trimmed = header.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("No commits yet on ") {
-            snapshot.branch = String(trimmed.dropFirst("No commits yet on ".count))
-            snapshot.hasCommits = false
-            return
-        }
-        if trimmed.hasPrefix("Initial commit on ") {
-            snapshot.branch = String(trimmed.dropFirst("Initial commit on ".count))
-            snapshot.hasCommits = false
-            return
-        }
-
-        snapshot.hasCommits = true
-        let statusComponents = trimmed.components(separatedBy: " [")
-        let branchComponent = statusComponents[0]
-        if let upstreamRange = branchComponent.range(of: "...") {
-            snapshot.branch = String(branchComponent[..<upstreamRange.lowerBound])
-            snapshot.upstreamBranch = String(branchComponent[upstreamRange.upperBound...])
-        } else {
-            snapshot.branch = branchComponent
-        }
-
-        guard statusComponents.count > 1 else { return }
-        let summary = statusComponents[1].trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-        for part in summary.components(separatedBy: ", ") {
-            if part.hasPrefix("ahead "), let count = Int(part.dropFirst("ahead ".count)) {
-                snapshot.aheadCount = count
-            } else if part.hasPrefix("behind "), let count = Int(part.dropFirst("behind ".count)) {
-                snapshot.behindCount = count
-            }
-        }
     }
 
     private func validatedRelativePath(_ path: String) -> String? {

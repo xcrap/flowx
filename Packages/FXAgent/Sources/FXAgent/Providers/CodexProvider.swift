@@ -580,31 +580,118 @@ private actor CodexSession {
         id: String,
         thread: [String: Any]
     ) async throws -> [ConversationMessage] {
-        let maximumTurns = 128
-        let pageSize = 16
-        var pages = CodexNativeTurnPageAccumulator(maximumTurns: maximumTurns)
-        var cursor: String?
-        var messages: [ConversationMessage] = []
-
-        repeat {
+        try await Self.paginatedNativeMessages(thread: thread) { cursor, limit in
             var params: [String: Any] = [
                 "threadId": id,
-                "limit": min(pageSize, maximumTurns - pages.newestFirstTurns.count),
+                "limit": limit,
                 "sortDirection": "desc",
                 "itemsView": "full",
             ]
             if let cursor { params["cursor"] = cursor }
-            let payload = try await requestJSON(method: "thread/turns/list", params: params)
+            let payload = try await self.requestJSON(method: "thread/turns/list", params: params)
             let result = payload["result"] as? [String: Any] ?? [:]
-            let page = result["data"] as? [[String: Any]] ?? []
-            cursor = pages.append(page: page, nextCursor: result["nextCursor"] as? String)
+            return (result["data"] as? [[String: Any]] ?? [], result["nextCursor"] as? String)
+        }.messages
+    }
 
+    /// Reads newest-first turn pages until the transcript holds enough
+    /// messages. `convertedTurns` counts turns passed through `nativeMessages`.
+    ///
+    /// Conversion depends on the whole page set (one image budget spent
+    /// oldest-first, position-based fallback IDs), so it runs once over the
+    /// final turns. Pages stop on the same condition as converting after every
+    /// page: a per-item count bounds the message total, and only prompts made
+    /// solely of images (whose count depends on that budget) can require an
+    /// exact conversion near the limit.
+    fileprivate static func paginatedNativeMessages(
+        thread: [String: Any],
+        isolation: isolated (any Actor)? = #isolation,
+        fetchPage: (_ cursor: String?, _ limit: Int) async throws -> (page: [[String: Any]], nextCursor: String?)
+    ) async throws -> (messages: [ConversationMessage], convertedTurns: Int) {
+        let maximumTurns = 128
+        let pageSize = 16
+        let messageLimit = 250
+        var pages = CodexNativeTurnPageAccumulator(maximumTurns: maximumTurns)
+        var cursor: String?
+        var bounds = NativeMessageCountBounds()
+        var convertedTurns = 0
+
+        func convert() -> [ConversationMessage] {
             var boundedThread = thread
             boundedThread["turns"] = pages.chronologicalTurns
-            messages = Self.nativeMessages(from: boundedThread, deferLocalImages: true)
-        } while cursor != nil && messages.count < 250
+            convertedTurns += pages.newestFirstTurns.count
+            return Self.nativeMessages(from: boundedThread, deferLocalImages: true)
+        }
 
-        return messages
+        while true {
+            let page = try await fetchPage(cursor, min(pageSize, maximumTurns - pages.newestFirstTurns.count))
+            let previousCount = pages.newestFirstTurns.count
+            cursor = pages.append(page: page.page, nextCursor: page.nextCursor)
+            for turn in pages.newestFirstTurns[previousCount...] {
+                bounds.add(turn)
+            }
+
+            guard cursor != nil, bounds.certain < messageLimit else { break }
+            if bounds.certain + bounds.imageDependent >= messageLimit {
+                let messages = convert()
+                if messages.count >= messageLimit { return (messages, convertedTurns) }
+            }
+        }
+
+        return (convert(), convertedTurns)
+    }
+
+    /// Bounds the number of messages `nativeMessages` yields for a set of
+    /// turns without converting them. Keep in step with `nativeMessages`.
+    private struct NativeMessageCountBounds {
+        /// Messages every conversion produces, regardless of page set.
+        private(set) var certain = 0
+        /// Image-only prompts: each yields one message only if an image
+        /// decodes within the transcript image budget.
+        private(set) var imageDependent = 0
+
+        mutating func add(_ turn: [String: Any]) {
+            for item in turn["items"] as? [[String: Any]] ?? [] {
+                let type = item["type"] as? String ?? "unknown"
+                switch type {
+                case "userMessage":
+                    var hasText = false
+                    var hasImage = false
+                    for content in item["content"] as? [[String: Any]] ?? [] {
+                        switch content["type"] as? String {
+                        case "text":
+                            if let text = content["text"] as? String, !text.isEmpty {
+                                hasText = true
+                            }
+                        case "image":
+                            hasImage = hasImage || content["url"] as? String != nil
+                        case "localImage":
+                            hasImage = hasImage || content["path"] as? String != nil
+                        default:
+                            break
+                        }
+                        if hasText { break }
+                    }
+                    if hasText {
+                        certain += 1
+                    } else if hasImage {
+                        imageDependent += 1
+                    }
+                case "agentMessage":
+                    if let text = item["text"] as? String, !text.isEmpty {
+                        certain += 1
+                    }
+                case "reasoning", "plan", "contextCompaction", "hookPrompt",
+                     "subAgentActivity", "enteredReviewMode", "exitedReviewMode":
+                    continue
+                default:
+                    guard CodexSession.toolItemTypes.contains(type) || CodexSession.looksLikeToolItem(item) else {
+                        continue
+                    }
+                    certain += CodexSession.toolOutputIsCompleted(item) ? 1 : 2
+                }
+            }
+        }
     }
 
     private func readLegacyNativeThread(
@@ -2155,6 +2242,26 @@ private actor CodexSession {
         }
     }
 
+    /// `toolOutput(from: item) == "Completed"` without trimming or serializing
+    /// the output. Foundation trims whitespace per Unicode scalar.
+    private static func toolOutputIsCompleted(_ item: [String: Any]) -> Bool {
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        for key in ["aggregatedOutput", "output", "result", "error", "changes"] {
+            guard let value = item[key] else { continue }
+            // Other values render as JSON or a description, never "Completed".
+            guard let string = value as? String else { return false }
+            let scalars = string.unicodeScalars
+            guard let first = scalars.firstIndex(where: { !whitespace.contains($0) }),
+                  let last = scalars.lastIndex(where: { !whitespace.contains($0) }) else {
+                continue
+            }
+            // A value canonically equal to ASCII "Completed" has at most 9 scalars.
+            let trimmed = scalars[first...last]
+            return trimmed.prefix(10).count <= 9 && String(trimmed) == "Completed"
+        }
+        return true
+    }
+
     private static func toolOutput(from item: [String: Any]) -> String {
         for key in ["aggregatedOutput", "output", "result", "error", "changes"] {
             if let output = stringValue(for: item[key]) {
@@ -3392,8 +3499,18 @@ public final class CodexProvider: AIProviderThreadControls, AIProviderSessionMan
         }
     }
 
-    static func mapNativeMessagesForTesting(_ thread: [String: Any]) -> [ConversationMessage] {
-        CodexSession.nativeMessages(from: thread)
+    static func mapNativeMessagesForTesting(
+        _ thread: [String: Any],
+        deferLocalImages: Bool = false
+    ) -> [ConversationMessage] {
+        CodexSession.nativeMessages(from: thread, deferLocalImages: deferLocalImages)
+    }
+
+    static func paginatedNativeMessagesForTesting(
+        thread: [String: Any],
+        fetchPage: (_ cursor: String?, _ limit: Int) async throws -> (page: [[String: Any]], nextCursor: String?)
+    ) async throws -> (messages: [ConversationMessage], convertedTurns: Int) {
+        try await CodexSession.paginatedNativeMessages(thread: thread, fetchPage: fetchPage)
     }
 
     static func userInputRequestForTesting(_ params: [String: Any]) -> ProviderUserInputRequest? {

@@ -28,6 +28,7 @@ struct MessageBubble: View {
     private let presentedTextByIndex: [Int: String]
     private let attachmentFilenames: [String]
     private let directives: [TranscriptDirective]
+    private let copyableText: String
 
     @State private var isHoveringUserMessage = false
     @State private var didCopyUserMessage = false
@@ -42,6 +43,7 @@ struct MessageBubble: View {
         presentedTextByIndex = presentation.textByIndex
         attachmentFilenames = presentation.attachmentFilenames
         directives = presentation.directives
+        copyableText = Self.copyableText(for: message.content, presentedTextByIndex: presentation.textByIndex)
     }
 
     init(streamingText: String) {
@@ -54,6 +56,7 @@ struct MessageBubble: View {
         presentedTextByIndex = presentation.textByIndex
         attachmentFilenames = []
         directives = presentation.directives
+        copyableText = Self.copyableText(for: content, presentedTextByIndex: presentation.textByIndex)
     }
 
     private var isUser: Bool { role == .user }
@@ -571,8 +574,12 @@ struct MessageBubble: View {
         return tail.isEmpty ? path : tail.joined(separator: "/")
     }
 
-    private var copyableText: String {
-        content.enumerated().compactMap { index, item -> String? in
+    /// Built once per bubble; `body` reads it for the copy button and menu.
+    private static func copyableText(
+        for content: [MessageContent],
+        presentedTextByIndex: [Int: String]
+    ) -> String {
+        let parts = content.enumerated().compactMap { index, item -> String? in
             switch item {
             case .text(let text):
                 presentedTextByIndex[index] ?? text
@@ -586,7 +593,7 @@ struct MessageBubble: View {
                 nil
             }
         }
-        .joined(separator: "\n\n")
+        return parts.count == 1 ? parts[0] : parts.joined(separator: "\n\n")
     }
 
     private func copyMessage() {
@@ -977,7 +984,9 @@ private struct MessageTextView: View {
 
     var body: some View {
         Group {
-            if isStreaming || renderedKey != renderKey || blocks.isEmpty {
+            if isStreaming {
+                FXStreamingText(text)
+            } else if renderedKey != renderKey || blocks.isEmpty {
                 Text(text)
                     .font(FXTypography.body)
                     .foregroundStyle(FXColors.fg)

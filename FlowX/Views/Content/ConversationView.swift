@@ -117,6 +117,8 @@ struct ConversationView: View {
     @State private var usesLazyTranscript: Bool?
     @State private var isRenderingTranscript = false
     @State private var isTranscriptVisible = false
+    /// The `messageRevision` the installed rows were rendered from.
+    @State private var renderedMessageRevision = Int.min
 
     private var renderedItems: [ConversationDisplayItem] { renderSnapshot.items }
 
@@ -139,6 +141,7 @@ struct ConversationView: View {
         if let cachedItems = Self.renderCache.items(for: key) {
             _renderSnapshot = State(initialValue: Self.renderCache.snapshot(for: agent.id)
                 ?? ConversationRenderSnapshot(items: cachedItems))
+            _renderedMessageRevision = State(initialValue: key.revision)
             _transcriptPrepared = State(initialValue: true)
             _usesLazyTranscript = State(initialValue: cachedItems.count > Self.lazyTranscriptThreshold)
         }
@@ -208,8 +211,10 @@ struct ConversationView: View {
 
     private func renderTranscript(for key: MessageRenderKey) async {
         if let cachedItems = Self.renderCache.items(for: key) {
-            installRenderedItems(Self.renderCache.snapshot(for: agent.id)
-                ?? ConversationRenderSnapshot(items: cachedItems))
+            installRenderedItems(
+                Self.renderCache.snapshot(for: agent.id) ?? ConversationRenderSnapshot(items: cachedItems),
+                messageRevision: key.revision
+            )
             return
         }
 
@@ -233,10 +238,10 @@ struct ConversationView: View {
         }
         guard let snapshot = try? await render.value else { return }
         Self.renderCache.insert(snapshot, for: key, messageCount: messages.count)
-        installRenderedItems(snapshot)
+        installRenderedItems(snapshot, messageRevision: key.revision)
     }
 
-    private func installRenderedItems(_ snapshot: ConversationRenderSnapshot) {
+    private func installRenderedItems(_ snapshot: ConversationRenderSnapshot, messageRevision: Int) {
         let wantsLazy = snapshot.items.count > Self.lazyTranscriptThreshold
         if usesLazyTranscript == nil {
             usesLazyTranscript = wantsLazy
@@ -244,6 +249,7 @@ struct ConversationView: View {
             usesLazyTranscript = true
         }
         renderSnapshot = snapshot
+        renderedMessageRevision = messageRevision
         presentationRevision &+= 1
         if !transcriptPrepared {
             transcriptPrepared = true
@@ -300,7 +306,7 @@ struct ConversationView: View {
                 .padding(.bottom, displayItemSpacing(for: item))
         }
 
-        ConversationStreamingTail(agent: agent)
+        ConversationStreamingTail(agent: agent, renderedMessageRevision: renderedMessageRevision)
 
         if let error = agent.conversationState.error {
             errorCard(error)
@@ -1161,15 +1167,32 @@ struct ConversationView: View {
 
 /// Only this leaf observes text deltas. Completed rows, approval controls and
 /// the composer no longer rebuild for every stream publication.
+///
+/// A finished reply stays here until the transcript render that contains it
+/// is installed, under the identity it streamed with, so it neither blinks
+/// out nor lays out again at the hand-off.
 private struct ConversationStreamingTail: View {
+    private struct Segment: Identifiable {
+        let id: Int
+        let text: String
+    }
+
     let agent: AgentInfo
+    let renderedMessageRevision: Int
 
     var body: some View {
-        if !agent.conversationState.streamingText.isEmpty {
-            MessageBubble(streamingText: agent.conversationState.streamingText)
-                .id("streaming-message")
+        let state = agent.conversationState
+        let segments = [
+            state.pendingStreamingHandoff(renderedMessageRevision: renderedMessageRevision)
+                .map { Segment(id: $0.segment, text: $0.text) },
+            state.streamingText.isEmpty ? nil : Segment(id: state.streamingSegment, text: state.streamingText),
+        ].compactMap { $0 }
+
+        ForEach(segments) { segment in
+            MessageBubble(streamingText: segment.text)
                 .padding(.bottom, FXSpacing.xl)
-        } else if agent.isTranscriptRunning {
+        }
+        if segments.isEmpty, agent.isTranscriptRunning {
             streamingIndicator
                 .id("streaming-indicator")
                 .padding(.bottom, FXSpacing.xl)
