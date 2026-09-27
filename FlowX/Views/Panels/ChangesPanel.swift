@@ -155,7 +155,7 @@ struct ChangesPanel: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.md)
-                    .strokeBorder(isSelected ? FXColors.borderMedium : .clear, lineWidth: 0.5)
+                    .strokeBorder(isSelected ? FXColors.borderMedium : .clear, lineWidth: FXBorderWidth.hairline)
             )
         }
         .buttonStyle(.plain)

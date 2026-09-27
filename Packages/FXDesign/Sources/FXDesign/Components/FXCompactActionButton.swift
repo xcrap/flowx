@@ -38,7 +38,7 @@ public struct FXCompactActionButton: View {
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.sm))
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.sm)
-                    .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                    .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
             )
             .contentShape(Rectangle())
         }

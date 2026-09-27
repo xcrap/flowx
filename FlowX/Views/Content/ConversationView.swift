@@ -701,7 +701,7 @@ struct ConversationView: View {
                                     .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
                                     .overlay(
                                         RoundedRectangle(cornerRadius: FXRadii.md)
-                                            .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                                            .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
                                     )
 
                                 HStack(spacing: FXSpacing.sm) {
@@ -803,7 +803,7 @@ struct ConversationView: View {
                             .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
                             .overlay(
                                 RoundedRectangle(cornerRadius: FXRadii.md)
-                                    .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                                    .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
                             )
                         }
 
@@ -820,11 +820,11 @@ struct ConversationView: View {
                         }
                     }
                     .padding(FXSpacing.lg)
-                    .background(FXColors.warning.opacity(0.08))
+                    .background(FXColors.warningMuted)
                     .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
                     .overlay(
                         RoundedRectangle(cornerRadius: FXRadii.xl)
-                            .strokeBorder(FXColors.warning.opacity(0.18), lineWidth: 0.5)
+                            .strokeBorder(FXColors.warning.opacity(0.18), lineWidth: FXBorderWidth.hairline)
                     )
                 }
             }
@@ -1004,7 +1004,7 @@ struct ConversationView: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.xl)
-                .strokeBorder(tint.opacity(0.18), lineWidth: 0.5)
+                .strokeBorder(tint.opacity(0.18), lineWidth: FXBorderWidth.hairline)
         )
     }
 
@@ -1130,7 +1130,7 @@ private struct ConversationStreamingTail: View {
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.xl)
-                    .strokeBorder(FXColors.border, lineWidth: 0.5)
+                    .strokeBorder(FXColors.border, lineWidth: FXBorderWidth.hairline)
             )
 
             Spacer(minLength: 80)

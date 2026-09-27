@@ -83,7 +83,7 @@ struct ArchivedTasksSettingsPage: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.md)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
         )
     }
 
@@ -99,7 +99,7 @@ struct ArchivedTasksSettingsPage: View {
 
             Text(result.bindings.count == 1 ? "1 task" : "\(result.bindings.count) tasks")
                 .font(FXTypography.caption)
-                .foregroundStyle(FXColors.fgQuaternary)
+                .foregroundStyle(FXColors.fgTertiary)
                 .accessibilityLabel("\(result.bindings.count) archived tasks")
         }
         .padding(.horizontal, FXSpacing.xs)
@@ -210,6 +210,8 @@ private struct ArchivedTaskSettingsRow: View {
     @State private var isHovered = false
 
     var body: some View {
+        let sections = actionSections
+
         HStack(spacing: FXSpacing.sm) {
             FXActivityDot(color: providerColor)
                 .help("\(providerName) archived task")
@@ -228,7 +230,7 @@ private struct ArchivedTaskSettingsRow: View {
 
                     Text("·")
                         .font(FXTypography.caption)
-                        .foregroundStyle(FXColors.fgQuaternary)
+                        .foregroundStyle(FXColors.fgTertiary)
 
                     Text(binding.updatedAt.formatted(date: .abbreviated, time: .omitted))
                         .font(FXTypography.caption)
@@ -246,9 +248,9 @@ private struct ArchivedTaskSettingsRow: View {
                     .accessibilityLabel("Updating archived task")
             } else {
                 FXDropdown(
-                    sections: actionSections,
+                    sections: sections,
                     enabled: !project.isSyncingNativeThreads,
-                    panelWidth: 220,
+                    panelWidth: FXLayout.menuWidth,
                     placement: .automatic,
                     alignment: .trailing
                 ) { isExpanded in
@@ -269,30 +271,16 @@ private struct ArchivedTaskSettingsRow: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
         .overlay {
             RoundedRectangle(cornerRadius: FXRadii.md)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
         }
         .onHover { isHovered = $0 }
-        .contextMenu {
-            if canRename {
-                Button("Rename Task…", action: rename)
-                    .disabled(project.isSyncingNativeThreads || isActionInProgress)
-                Divider()
-            }
-
-            Button("Restore Task", action: restore)
-                .disabled(project.isSyncingNativeThreads || isActionInProgress)
-
-            if canDeletePermanently {
-                Divider()
-                Button("Delete Permanently", role: .destructive, action: deletePermanently)
-                    .disabled(project.isSyncingNativeThreads || isActionInProgress)
-            }
-        }
+        .fxContextMenu(sections: sections)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(providerName) archived task, \(binding.title)")
     }
 
     private var actionSections: [FXDropdownSection] {
+        let isEnabled = !project.isSyncingNativeThreads && !isActionInProgress
         var items: [FXDropdownItem] = []
         if canRename {
             items.append(
@@ -300,7 +288,7 @@ private struct ArchivedTaskSettingsRow: View {
                     id: "rename",
                     title: "Rename Task…",
                     subtitle: "Update this task in \(providerName) and FlowX",
-                    isEnabled: !project.isSyncingNativeThreads && !isActionInProgress,
+                    isEnabled: isEnabled,
                     action: rename
                 )
             )
@@ -310,25 +298,30 @@ private struct ArchivedTaskSettingsRow: View {
                 id: "restore",
                 title: "Restore Task",
                 subtitle: "Return this task to \(project.project.name)",
-                isEnabled: !project.isSyncingNativeThreads && !isActionInProgress,
+                isEnabled: isEnabled,
                 action: restore
             )
         )
 
+        var sections = [FXDropdownSection(id: "archived-task", items: items)]
         if canDeletePermanently {
-            items.append(
-                FXDropdownItem(
-                    id: "delete-permanently",
-                    title: "Delete Permanently",
-                    subtitle: "Cannot be undone; includes spawned tasks",
-                    isEnabled: !project.isSyncingNativeThreads && !isActionInProgress,
-                    tone: .destructive,
-                    action: deletePermanently
+            sections.append(
+                FXDropdownSection(
+                    id: "archived-task-delete",
+                    items: [
+                        FXDropdownItem(
+                            id: "delete-permanently",
+                            title: "Delete Permanently",
+                            subtitle: "Cannot be undone; includes spawned tasks",
+                            isEnabled: isEnabled,
+                            tone: .destructive,
+                            action: deletePermanently
+                        ),
+                    ]
                 )
             )
         }
-
-        return [FXDropdownSection(id: "archived-task", items: items)]
+        return sections
     }
 
     private var isActionInProgress: Bool {

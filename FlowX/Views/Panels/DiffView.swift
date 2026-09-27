@@ -354,7 +354,7 @@ struct DiffView: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.sm))
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.sm)
-                .strokeBorder(FXColors.border, lineWidth: 0.5)
+                .strokeBorder(FXColors.border, lineWidth: FXBorderWidth.hairline)
         )
         .padding(FXSpacing.md)
         .allowsHitTesting(false)
@@ -587,7 +587,7 @@ struct DiffView: View {
             splitAnnotationRow(
                 text: row.oldText,
                 foreground: FXColors.info,
-                background: FXColors.info.opacity(0.08),
+                background: FXColors.infoMuted,
                 viewportWidth: viewportWidth
             )
         case .content:
@@ -624,7 +624,7 @@ struct DiffView: View {
             }) {
                 Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
                     .font(FXTypography.icon(.small))
-                    .foregroundStyle(FXColors.fgQuaternary)
+                    .foregroundStyle(FXColors.fgTertiary)
                     .frame(width: diffSectionAccessoryWidth, height: diffSectionAccessoryWidth)
                     .contentShape(Rectangle())
             }
@@ -658,16 +658,30 @@ struct DiffView: View {
         .overlay(alignment: .bottom) {
             FXDivider()
         }
-        .contextMenu {
-            Button(isCollapsed ? "Expand Diff" : "Collapse Diff") {
+        .fxContextMenu(sections: sectionMenuSections(section, isCollapsed: isCollapsed, project: project))
+    }
+
+    private func sectionMenuSections(
+        _ section: DiffSection,
+        isCollapsed: Bool,
+        project: ProjectState
+    ) -> [FXDropdownSection] {
+        var items = [
+            FXDropdownItem(
+                id: "toggle-diff",
+                title: isCollapsed ? "Expand Diff" : "Collapse Diff"
+            ) {
                 toggleSection(section)
-            }
-            if let path = section.path {
-                Button("Open in Editor") {
+            },
+        ]
+        if let path = section.path {
+            items.append(
+                FXDropdownItem(id: "open-in-editor", title: "Open in Editor") {
                     openFile(path, in: project)
                 }
-            }
+            )
         }
+        return [FXDropdownSection(id: "diff-section", items: items)]
     }
 
     private func sectionPathLabel(_ section: DiffSection, isSelected: Bool) -> some View {
@@ -1467,7 +1481,7 @@ struct DiffView: View {
         case .meta:
             FXColors.bgSurface.opacity(0.35)
         case .hunk:
-            FXColors.info.opacity(0.08)
+            FXColors.infoMuted
         case .context:
             .clear
         case .addition:
@@ -1480,7 +1494,7 @@ struct DiffView: View {
     private func splitTextColor(for side: SplitDiffSideKind) -> Color {
         switch side {
         case .empty:
-            FXColors.fgQuaternary.opacity(0.35)
+            .clear
         case .context:
             FXColors.fgSecondary
         case .addition:
@@ -1506,7 +1520,7 @@ struct DiffView: View {
     private func lineNumberColor(for emphasis: LineNumberEmphasis) -> Color {
         switch emphasis {
         case .neutral:
-            FXColors.fgQuaternary
+            FXColors.fgTertiary
         case .addition:
             FXColors.diffAddedFg
         case .deletion:

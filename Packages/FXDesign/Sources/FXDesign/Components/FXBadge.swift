@@ -63,6 +63,14 @@ public struct FXBadge: View {
     }
 
     private var bgColor: Color {
-        dotColor.opacity(0.12)
+        switch tone {
+        case .neutral: FXColors.bgSelected
+        case .accent: FXColors.accentMuted
+        case .accentSecondary: FXColors.accentSecondaryMuted
+        case .success: FXColors.successMuted
+        case .warning: FXColors.warningMuted
+        case .error: FXColors.errorMuted
+        case .info: FXColors.infoMuted
+        }
     }
 }

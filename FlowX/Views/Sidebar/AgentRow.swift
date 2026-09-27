@@ -19,7 +19,9 @@ struct ThreadRow: View {
     }
 
     var body: some View {
-        rowContent
+        let menuSections = lifecycleMenuSections
+
+        rowContent(menuSections: menuSections)
         .contentShape(Rectangle())
         .onTapGesture(perform: selectThread)
         .focusable()
@@ -34,38 +36,7 @@ struct ThreadRow: View {
             return .handled
         }
         .onHover { isHovered = $0 }
-        .contextMenu {
-            if canRename {
-                Button {
-                    appState.requestThreadRename(for: agent)
-                } label: {
-                    Label("Rename Task…", systemImage: "pencil")
-                }
-                .disabled(!renameActionEnabled)
-            }
-
-            if let sessionID = agent.conversationState.sessionID, !sessionID.isEmpty {
-                Button(action: { copyThreadID(sessionID) }) {
-                    Label("Copy Provider Thread ID", systemImage: "doc.on.doc")
-                }
-            }
-
-            if canRename || agent.conversationState.sessionID?.isEmpty == false {
-                Divider()
-            }
-
-            if !lifecycleActions.isEmpty {
-                ForEach(lifecycleActions, id: \.self) { action in
-                    Button(
-                        action.title,
-                        role: action.isDestructive ? .destructive : nil
-                    ) {
-                        appState.requestThreadLifecycleAction(action, for: agent)
-                    }
-                    .disabled(!lifecycleActionEnabled)
-                }
-            }
-        }
+        .fxContextMenu(sections: menuSections)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("\(agent.providerName) thread, \(displayTitle)")
         .accessibilityHint("Open this thread in \(project.project.name)")
@@ -74,7 +45,7 @@ struct ThreadRow: View {
         }
     }
 
-    private var rowContent: some View {
+    private func rowContent(menuSections: [FXDropdownSection]) -> some View {
         HStack(spacing: FXSpacing.sm) {
             FXActivityDot(color: providerColor, state: activityDotState)
                 .help(sourceAndStatusHelp)
@@ -86,7 +57,7 @@ struct ThreadRow: View {
             Spacer(minLength: 0)
 
             if hasLifecycleMenu {
-                lifecycleMenu
+                lifecycleMenu(sections: menuSections)
                     .opacity(showsLifecycleMenu ? 1 : 0)
                     .allowsHitTesting(showsLifecycleMenu)
                     .accessibilityHidden(!showsLifecycleMenu)
@@ -106,11 +77,11 @@ struct ThreadRow: View {
         .contentShape(Rectangle())
     }
 
-    private var lifecycleMenu: some View {
+    private func lifecycleMenu(sections: [FXDropdownSection]) -> some View {
         FXDropdown(
-            sections: lifecycleMenuSections,
+            sections: sections,
             enabled: !isLifecycleActionInProgress,
-            panelWidth: 220,
+            panelWidth: FXLayout.menuWidth,
             placement: .automatic,
             alignment: .trailing
         ) { isExpanded in

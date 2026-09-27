@@ -16,7 +16,7 @@ public struct FXCard<Content: View>: View {
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.lg))
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.lg)
-                    .strokeBorder(FXColors.border, lineWidth: 0.5)
+                    .strokeBorder(FXColors.border, lineWidth: FXBorderWidth.hairline)
             )
     }
 }

@@ -131,48 +131,6 @@ public struct FXDropdown<Label: View>: View {
         max(panelWidth ?? 0, labelSize.width, 160)
     }
 
-    private var dropdownPanel: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
-                    if let title = section.title, !title.isEmpty {
-                        Text(title)
-                            .font(FXTypography.caption)
-                            .foregroundStyle(FXColors.fgTertiary)
-                            .textCase(.uppercase)
-                            .tracking(0.5)
-                            .padding(.horizontal, FXSpacing.md)
-                            .padding(.top, index == 0 ? FXSpacing.sm : FXSpacing.md)
-                            .padding(.bottom, FXSpacing.xs)
-                    }
-
-                    ForEach(section.items) { item in
-                        FXDropdownRow(item: item) {
-                            item.action()
-                            dismissDropdown()
-                        }
-                    }
-
-                    if index < sections.count - 1 {
-                        FXDivider()
-                            .padding(.horizontal, FXSpacing.md)
-                            .padding(.vertical, FXSpacing.sm)
-                    }
-                }
-            }
-            .padding(.vertical, FXSpacing.xs)
-        }
-        .scrollIndicators(.hidden)
-        .frame(maxHeight: maxPanelHeight)
-        .background(FXColors.bgSurface)
-        .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
-        .overlay(
-            RoundedRectangle(cornerRadius: FXRadii.xl)
-                .strokeBorder(FXColors.borderMedium, lineWidth: 0.5)
-        )
-        .shadow(color: FXColors.overlay.opacity(0.35), radius: 18, x: 0, y: 10)
-    }
-
     private func toggleExpanded() {
         guard enabled else { return }
         if isExpanded {
@@ -193,7 +151,10 @@ public struct FXDropdown<Label: View>: View {
             maxHeight: maxPanelHeight,
             placement: placement,
             alignment: alignment,
-            content: AnyView(dropdownPanel.frame(width: resolvedPanelWidth, alignment: .leading))
+            content: AnyView(
+                FXDropdownMenu(sections: sections, maxHeight: maxPanelHeight, onSelect: dismissDropdown)
+                    .frame(width: resolvedPanelWidth, alignment: .leading)
+            )
         ) {
             isExpanded = false
         }
@@ -202,6 +163,56 @@ public struct FXDropdown<Label: View>: View {
     private func dismissDropdown() {
         presenter.dismiss()
         isExpanded = false
+    }
+}
+
+/// The flat menu surface shared by `FXDropdown` and `.fxContextMenu`.
+struct FXDropdownMenu: View {
+    let sections: [FXDropdownSection]
+    let maxHeight: CGFloat
+    /// Called after the chosen item's action runs, to close the menu.
+    let onSelect: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
+                    if let title = section.title, !title.isEmpty {
+                        Text(title)
+                            .font(FXTypography.caption)
+                            .foregroundStyle(FXColors.fgTertiary)
+                            .textCase(.uppercase)
+                            .tracking(0.5)
+                            .padding(.horizontal, FXSpacing.md)
+                            .padding(.top, index == 0 ? FXSpacing.sm : FXSpacing.md)
+                            .padding(.bottom, FXSpacing.xs)
+                    }
+
+                    ForEach(section.items) { item in
+                        FXDropdownRow(item: item) {
+                            item.action()
+                            onSelect()
+                        }
+                    }
+
+                    if index < sections.count - 1 {
+                        FXDivider()
+                            .padding(.horizontal, FXSpacing.md)
+                            .padding(.vertical, FXSpacing.sm)
+                    }
+                }
+            }
+            .padding(.vertical, FXSpacing.xs)
+        }
+        .scrollIndicators(.hidden)
+        .frame(maxHeight: maxHeight)
+        .background(FXColors.bgSurface)
+        .clipShape(RoundedRectangle(cornerRadius: FXRadii.xl))
+        .overlay(
+            RoundedRectangle(cornerRadius: FXRadii.xl)
+                .strokeBorder(FXColors.borderMedium, lineWidth: FXBorderWidth.hairline)
+        )
+        .fxShadow(FXShadow.popover)
     }
 }
 
@@ -274,14 +285,16 @@ private struct FXDropdownAnchorView: NSViewRepresentable {
 }
 
 @MainActor
-private final class FXDropdownPresenter {
+final class FXDropdownPresenter {
     private weak var parentWindow: NSWindow?
     private weak var anchorView: NSView?
     private var panel: FXDropdownPanel?
+    private var dismissesOnScroll = false
     private var eventMonitors: [Any] = []
     private var observers: [NSObjectProtocol] = []
     private var onDismiss: (() -> Void)?
 
+    /// Opens the panel beside `anchorView`, the way `FXDropdown` does.
     func present(
         anchorView: NSView,
         width: CGFloat,
@@ -295,8 +308,39 @@ private final class FXDropdownPresenter {
 
         guard let window = anchorView.window else { return }
 
-        self.parentWindow = window
         self.anchorView = anchorView
+        show(content: content, width: width, maxHeight: maxHeight, in: window, onDismiss: onDismiss) { panelSize in
+            self.position(for: panelSize, placement: placement, alignment: alignment)
+        }
+    }
+
+    /// Opens the panel with its top-leading corner at `screenPoint`, flipping
+    /// left or up to stay on screen, the way AppKit places context menus.
+    /// Nothing anchors the panel afterwards, so scrolling elsewhere closes it.
+    func present(
+        at screenPoint: NSPoint,
+        in window: NSWindow,
+        width: CGFloat,
+        maxHeight: CGFloat,
+        content: AnyView
+    ) {
+        close(notify: false)
+
+        dismissesOnScroll = true
+        show(content: content, width: width, maxHeight: maxHeight, in: window, onDismiss: {}) { panelSize in
+            self.position(for: panelSize, at: screenPoint, in: window)
+        }
+    }
+
+    private func show(
+        content: AnyView,
+        width: CGFloat,
+        maxHeight: CGFloat,
+        in window: NSWindow,
+        onDismiss: @escaping () -> Void,
+        origin: (NSSize) -> NSPoint
+    ) {
+        self.parentWindow = window
         self.onDismiss = onDismiss
 
         let panel = FXDropdownPanel()
@@ -315,7 +359,7 @@ private final class FXDropdownPresenter {
         )
 
         panel.setContentSize(panelSize)
-        panel.setFrameOrigin(position(for: panelSize, placement: placement, alignment: alignment))
+        panel.setFrameOrigin(origin(panelSize))
 
         window.addChildWindow(panel, ordered: .above)
         panel.orderFront(nil)
@@ -341,6 +385,7 @@ private final class FXDropdownPresenter {
         panel = nil
         anchorView = nil
         parentWindow = nil
+        dismissesOnScroll = false
 
         let dismissal = onDismiss
         onDismiss = nil
@@ -400,7 +445,7 @@ private final class FXDropdownPresenter {
 
     private func installEventMonitors() {
         let mouseMask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        let localMask: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]
+        let localMask: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
 
         if let localMonitor = NSEvent.addLocalMonitorForEvents(
             matching: localMask,
@@ -418,8 +463,9 @@ private final class FXDropdownPresenter {
                     event.type == .leftMouseDown ||
                     event.type == .rightMouseDown ||
                     event.type == .otherMouseDown
+                let isDetachingScroll = event.type == .scrollWheel && self.dismissesOnScroll
 
-                if isMouseDown, !self.containsMouseLocation(NSEvent.mouseLocation) {
+                if isMouseDown || isDetachingScroll, !self.containsMouseLocation(NSEvent.mouseLocation) {
                     MainActor.assumeIsolated {
                         self.close(notify: true)
                     }
@@ -511,6 +557,21 @@ private final class FXDropdownPresenter {
         }
 
         return NSPoint(x: x, y: y)
+    }
+
+    private func position(for panelSize: NSSize, at screenPoint: NSPoint, in window: NSWindow) -> NSPoint {
+        let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let margin: CGFloat = 8
+
+        let fitsRight = screenPoint.x + panelSize.width <= visibleFrame.maxX - margin
+        let x = fitsRight ? screenPoint.x : screenPoint.x - panelSize.width
+        let fitsBelow = screenPoint.y - panelSize.height >= visibleFrame.minY + margin
+        let y = fitsBelow ? screenPoint.y - panelSize.height : screenPoint.y
+
+        return NSPoint(
+            x: min(max(x, visibleFrame.minX + margin), visibleFrame.maxX - panelSize.width - margin),
+            y: min(max(y, visibleFrame.minY + margin), visibleFrame.maxY - panelSize.height - margin)
+        )
     }
 }
 

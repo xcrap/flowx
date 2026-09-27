@@ -204,7 +204,7 @@ struct ChatInputBar: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.xl)
-                    .strokeBorder(isDropTargeted ? FXColors.accent : FXColors.border, lineWidth: isDropTargeted ? 1.5 : 0.5)
+                    .strokeBorder(isDropTargeted ? FXColors.accent : FXColors.border, lineWidth: isDropTargeted ? FXBorderWidth.strong : FXBorderWidth.hairline)
             )
             .overlay(alignment: .topTrailing) {
                 if isDropTargeted {
@@ -1058,11 +1058,14 @@ private struct PendingAttachmentChip: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
         .overlay(
             RoundedRectangle(cornerRadius: FXRadii.md)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
         )
-        .contextMenu {
-            Button("Remove", action: onRemove)
-        }
+        .fxContextMenu(sections: [
+            FXDropdownSection(
+                id: "pending-attachment",
+                items: [FXDropdownItem(id: "remove", title: "Remove", action: onRemove)]
+            ),
+        ])
         .help(
             "\(attachment.filename) · "
                 + ByteCountFormatter.string(

@@ -474,7 +474,7 @@ struct BrowserPanel: View {
         }
         .padding(.horizontal, FXSpacing.md)
         .padding(.vertical, FXSpacing.sm)
-        .background(FXColors.warning.opacity(0.08))
+        .background(FXColors.warningMuted)
         .accessibilityElement(children: .contain)
     }
 

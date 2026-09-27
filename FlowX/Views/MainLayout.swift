@@ -19,8 +19,6 @@ struct MainLayout: View {
     @State private var rightPanelResizePreview: CGFloat?
 
     private let rightPanelHandleWidth: CGFloat = 5
-    private let titleBarHeight: CGFloat = 44
-    private let settingsPanelWidth: CGFloat = 420
 
     var body: some View {
         GeometryReader { geometry in
@@ -33,7 +31,7 @@ struct MainLayout: View {
                     HStack(spacing: 0) {
                         if appState.sidebarVisible {
                             SidebarView()
-                                .frame(width: 260)
+                                .frame(width: FXLayout.sidebarWidth)
                             FXDivider(.vertical)
                         }
 
@@ -56,7 +54,7 @@ struct MainLayout: View {
                         .zIndex(4)
 
                     settingsOverlay(totalSize: geometry.size)
-                        .padding(.top, titleBarHeight)
+                        .padding(.top, FXLayout.titleBarHeight)
                         .zIndex(5)
                 }
 
@@ -103,10 +101,10 @@ struct MainLayout: View {
         HStack(spacing: 0) {
             FXDivider(.vertical)
             SettingsPanel()
-                .frame(width: settingsPanelWidth, height: max(0, totalSize.height - titleBarHeight))
+                .frame(width: FXLayout.settingsPanelWidth, height: max(0, totalSize.height - FXLayout.titleBarHeight))
         }
         .background(FXColors.panelBg)
-        .shadow(color: FXColors.overlay.opacity(0.24), radius: 18, x: -4, y: 0)
+        .fxShadow(FXShadow.trailingPanel)
     }
 
     private func rightPanelResizeHandle(totalWidth: CGFloat) -> some View {
@@ -147,7 +145,7 @@ struct MainLayout: View {
     }
 
     private func rightPanelWidthBounds(in totalWidth: CGFloat) -> ClosedRange<CGFloat> {
-        let reservedSidebarWidth: CGFloat = appState.sidebarVisible ? 260 : 0
+        let reservedSidebarWidth: CGFloat = appState.sidebarVisible ? FXLayout.sidebarWidth : 0
         let minimumContentWidth = FXLayout.minimumConversationWidth
             + (appState.activeAgent?.workspace.splitOpen == true
                 ? FXLayout.minimumBrowserPreviewWidth + FXLayout.splitPanelResizeHandleWidth
@@ -283,7 +281,7 @@ struct MainLayout: View {
             }
             .padding(.trailing, FXSpacing.md)
         }
-        .frame(height: 44)
+        .frame(height: FXLayout.titleBarHeight)
         .background(FXColors.bgElevated)
         .overlay(alignment: .bottom) { FXDivider() }
     }
@@ -420,7 +418,7 @@ private struct ThreadRenameView: View {
                         RoundedRectangle(cornerRadius: FXRadii.md)
                             .strokeBorder(
                                 nameFocused ? FXColors.accent : FXColors.borderMedium,
-                                lineWidth: nameFocused ? 1 : 0.5
+                                lineWidth: nameFocused ? FXBorderWidth.regular : FXBorderWidth.hairline
                             )
                     }
                     .focused($nameFocused)
@@ -443,14 +441,14 @@ private struct ThreadRenameView: View {
                 }
             }
             .padding(FXSpacing.xl)
-            .frame(width: 440)
+            .frame(width: FXLayout.dialogWidth)
             .background(FXColors.bgElevated)
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.xxl))
             .overlay {
                 RoundedRectangle(cornerRadius: FXRadii.xxl)
-                    .strokeBorder(FXColors.borderMedium, lineWidth: 0.5)
+                    .strokeBorder(FXColors.borderMedium, lineWidth: FXBorderWidth.hairline)
             }
-            .shadow(color: FXColors.overlay, radius: 24, y: 14)
+            .fxShadow(FXShadow.dialog)
         }
         .onExitCommand {
             appState.cancelThreadRename()
@@ -516,14 +514,14 @@ private struct ThreadLifecycleConfirmationView: View {
                 }
             }
             .padding(FXSpacing.xl)
-            .frame(width: 440)
+            .frame(width: FXLayout.dialogWidth)
             .background(FXColors.bgElevated)
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.xxl))
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.xxl)
-                    .strokeBorder(FXColors.borderMedium, lineWidth: 0.5)
+                    .strokeBorder(FXColors.borderMedium, lineWidth: FXBorderWidth.hairline)
             )
-            .shadow(color: FXColors.overlay, radius: 24, y: 14)
+            .fxShadow(FXShadow.dialog)
         }
         .onExitCommand {
             appState.cancelThreadLifecycleConfirmation()
@@ -583,14 +581,14 @@ private struct CommandPaletteView: View {
                 FXDivider()
                 actionList
             }
-            .frame(width: 560)
+            .frame(width: FXLayout.commandPaletteWidth)
             .background(FXColors.bgElevated)
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.xxl))
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.xxl)
-                    .strokeBorder(FXColors.borderMedium, lineWidth: 0.5)
+                    .strokeBorder(FXColors.borderMedium, lineWidth: FXBorderWidth.hairline)
             )
-            .shadow(color: FXColors.overlay, radius: 28, y: 16)
+            .fxShadow(FXShadow.palette)
             .padding(.top, 84)
         }
         .onAppear {

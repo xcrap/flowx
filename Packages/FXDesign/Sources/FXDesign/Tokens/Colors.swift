@@ -56,6 +56,15 @@ public enum FXAccentColorOption: String, CaseIterable, Codable {
         case .rose:    h(0xEE609E)
         }
     }
+
+    /// Emerald and orange are too light for white labels (2.67:1 and 2.84:1),
+    /// so solid fills in those accents carry the base tone's darkest ink instead.
+    public var prefersDarkForeground: Bool {
+        switch self {
+        case .violet, .blue, .rose: false
+        case .emerald, .orange: true
+        }
+    }
 }
 
 public enum FXTextSizePreset: String, CaseIterable, Codable {
@@ -83,26 +92,43 @@ public enum FXTextSizePreset: String, CaseIterable, Codable {
 // MARK: - Tone Scales (Tailwind-derived, 50→950)
 
 /// 11-step scale from lightest (50) to darkest (950).
-/// Dark mode reads top-down (950→400), light mode reads bottom-up (50→600).
+/// Dark mode reads top-down (950→300), light mode reads bottom-up (50→600).
 private struct ToneScale {
-    let s: [Color] // 11 shades: [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950]
+    let hex: [Int] // 11 shades: [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950]
+    let s: [Color]
+
+    init(s hex: [Int]) {
+        self.hex = hex
+        self.s = hex.map(h)
+    }
+
+    /// A step between two stops, for tokens that must clear a contrast floor
+    /// the nearest stop just misses. `amount` 0 is `from`, 1 is `to`.
+    func mix(_ from: Int, _ to: Int, _ amount: Double) -> Color {
+        let a = hex[from], b = hex[to]
+        func channel(_ shift: Int) -> Int {
+            let lhs = Double((a >> shift) & 0xFF), rhs = Double((b >> shift) & 0xFF)
+            return Int((lhs + (rhs - lhs) * amount).rounded())
+        }
+        return h((channel(16) << 16) | (channel(8) << 8) | channel(0))
+    }
 
     // Slate — desaturated cool gray, barely perceptible cool undertone
     static let slate = ToneScale(s: [
-        h(0xF9F9FA), h(0xF3F3F4), h(0xE4E5E7), h(0xD1D3D6), h(0x989BA1),
-        h(0x6F7279), h(0x50545B), h(0x3C4047), h(0x24272C), h(0x16181D), h(0x0A0B0E),
+        0xF9F9FA, 0xF3F3F4, 0xE4E5E7, 0xD1D3D6, 0x989BA1,
+        0x6F7279, 0x50545B, 0x3C4047, 0x24272C, 0x16181D, 0x0A0B0E,
     ])
     static let zinc = ToneScale(s: [
-        h(0xFAFAFA), h(0xF4F4F5), h(0xE4E4E7), h(0xD4D4D8), h(0x9F9FA9),
-        h(0x71717B), h(0x52525C), h(0x3F3F46), h(0x27272A), h(0x18181B), h(0x09090B),
+        0xFAFAFA, 0xF4F4F5, 0xE4E4E7, 0xD4D4D8, 0x9F9FA9,
+        0x71717B, 0x52525C, 0x3F3F46, 0x27272A, 0x18181B, 0x09090B,
     ])
     static let neutral = ToneScale(s: [
-        h(0xFAFAFA), h(0xF5F5F5), h(0xE5E5E5), h(0xD4D4D4), h(0xA1A1A1),
-        h(0x737373), h(0x525252), h(0x404040), h(0x262626), h(0x171717), h(0x0A0A0A),
+        0xFAFAFA, 0xF5F5F5, 0xE5E5E5, 0xD4D4D4, 0xA1A1A1,
+        0x737373, 0x525252, 0x404040, 0x262626, 0x171717, 0x0A0A0A,
     ])
     static let stone = ToneScale(s: [
-        h(0xFAFAF9), h(0xF5F5F4), h(0xE7E5E4), h(0xD6D3D1), h(0xA6A09B),
-        h(0x79716B), h(0x57534D), h(0x44403B), h(0x292524), h(0x1C1917), h(0x0C0A09),
+        0xFAFAF9, 0xF5F5F4, 0xE7E5E4, 0xD6D3D1, 0xA6A09B,
+        0x79716B, 0x57534D, 0x44403B, 0x292524, 0x1C1917, 0x0C0A09,
     ])
 
     static func forTone(_ tone: FXBaseTone) -> ToneScale {
@@ -140,11 +166,19 @@ private struct FXPalette: Sendable {
     let overlayLight: Color
     // Contextual
     let terminalBg: Color
+    // Accents (mode-adapted; the primary accent is user-chosen and fixed)
+    let accentSecondary: Color
+    let accentSecondaryMuted: Color
+    let onAccentDark: Color
     // Semantic (mode-adapted)
     let success: Color
     let warning: Color
     let error: Color
     let info: Color
+    let successMuted: Color
+    let warningMuted: Color
+    let errorMuted: Color
+    let infoMuted: Color
     // Diff (proper semantic pairs, not opacity hacks)
     let diffAddedBg: Color
     let diffRemovedBg: Color
@@ -172,8 +206,21 @@ private struct FXPalette: Sendable {
     static func generate(tone: FXBaseTone, dark: Bool) -> FXPalette {
         let t = ToneScale.forTone(tone)
 
+        // Semantic hues — brighter on dark backgrounds, deeper on light ones.
+        let success = dark ? h(0x34D399) : h(0x059669)
+        let warning = dark ? h(0xFBBF24) : h(0xD97706)
+        let error = dark ? h(0xF87171) : h(0xDC2626)
+        let info = dark ? h(0x60A5FA) : h(0x2563EB)
+        // Teal secondary accent; the light value is teal-700 so it stays
+        // readable as text (#4ECDC4 is 1.76:1 on a light surface).
+        let accentSecondary = dark ? h(0x4ECDC4) : h(0x0F766E)
+        // Tinted backgrounds under same-hue text or icons. Dark surfaces
+        // absorb more of the tint, so they get a little more alpha.
+        let statusTint = dark ? 0.14 : 0.10
+        let accentTint = dark ? 0.16 : 0.12
+
         if dark {
-            // Dark: 900=bg, 800=elevated, 700=surface, 400=fgSecondary, 50=fg
+            // Dark: 900=bg, 800=elevated, 700=surface, 50=fg, 300=fgSecondary, 400=fgTertiary
             return FXPalette(
                 bg:           t.s[9],  // 900
                 bgElevated:   t.s[8],  // 800
@@ -182,8 +229,8 @@ private struct FXPalette: Sendable {
                 bgSelected:   Color.white.opacity(0.08),
                 bgPressed:    Color.white.opacity(0.06),
                 fg:           t.s[0],  // 50
-                fgSecondary:  t.s[4],  // 400
-                fgTertiary:   t.s[5],  // 500
+                fgSecondary:  t.s[3],  // 300
+                fgTertiary:   t.s[4],  // 400
                 fgQuaternary: Color.white.opacity(0.24),
                 border:       t.s[6].opacity(0.6),  // 600
                 borderMedium: t.s[6],  // 600
@@ -191,11 +238,17 @@ private struct FXPalette: Sendable {
                 overlay:      Color.black.opacity(0.5),
                 overlayLight: Color.black.opacity(0.3),
                 terminalBg:   t.s[9].opacity(0.85), // 900 slightly transparent
-                // Semantic — brighter on dark backgrounds
-                success:      h(0x34D399),
-                warning:      h(0xFBBF24),
-                error:        h(0xF87171),
-                info:         h(0x60A5FA),
+                accentSecondary:      accentSecondary,
+                accentSecondaryMuted: accentSecondary.opacity(accentTint),
+                onAccentDark:         t.s[10], // 950
+                success:      success,
+                warning:      warning,
+                error:        error,
+                info:         info,
+                successMuted: success.opacity(statusTint),
+                warningMuted: warning.opacity(statusTint),
+                errorMuted:   error.opacity(statusTint),
+                infoMuted:    info.opacity(statusTint),
                 // Diff — muted dark backgrounds (GitHub/Codex style)
                 diffAddedBg:   h(0x213A2B),
                 diffRemovedBg: h(0x4A221D),
@@ -205,7 +258,7 @@ private struct FXPalette: Sendable {
                 windowBackground: NSColor(t.s[8])
             )
         } else {
-            // Light: 50=bg, 100=elevated, 200=surface, 500=fgSecondary, 900=fg
+            // Light: 50=bg, 100=elevated, 200=surface, 900=fg, 600=fgSecondary, ~500=fgTertiary
             return FXPalette(
                 bg:           t.s[0],  // 50
                 bgElevated:   t.s[1],  // 100
@@ -214,8 +267,9 @@ private struct FXPalette: Sendable {
                 bgSelected:   Color.black.opacity(0.08),
                 bgPressed:    Color.black.opacity(0.06),
                 fg:           t.s[9],  // 900
-                fgSecondary:  t.s[5],  // 500
-                fgTertiary:   t.s[4],  // 400
+                fgSecondary:  t.s[6],  // 600
+                // 500 alone lands at ~4.35:1 on elevated; a touch of 600 clears AA.
+                fgTertiary:   t.mix(5, 6, 0.15),
                 fgQuaternary: Color.black.opacity(0.24),
                 border:       t.s[3],  // 300
                 borderMedium: t.s[2],  // 200
@@ -223,11 +277,17 @@ private struct FXPalette: Sendable {
                 overlay:      Color.black.opacity(0.18),
                 overlayLight: Color.black.opacity(0.10),
                 terminalBg:   t.s[1],  // 100
-                // Semantic — deeper on light backgrounds
-                success:      h(0x059669),
-                warning:      h(0xD97706),
-                error:        h(0xDC2626),
-                info:         h(0x2563EB),
+                accentSecondary:      accentSecondary,
+                accentSecondaryMuted: accentSecondary.opacity(accentTint),
+                onAccentDark:         t.s[10], // 950
+                success:      success,
+                warning:      warning,
+                error:        error,
+                info:         info,
+                successMuted: success.opacity(statusTint),
+                warningMuted: warning.opacity(statusTint),
+                errorMuted:   error.opacity(statusTint),
+                infoMuted:    info.opacity(statusTint),
                 // Diff — pastel light backgrounds (GitHub style)
                 diffAddedBg:   h(0xDCFCE7),
                 diffRemovedBg: h(0xFEE2E2),
@@ -303,26 +363,39 @@ public enum FXColors {
     public static var bgSelected: Color { FXTheme.currentPalette.bgSelected }
     public static var bgPressed: Color { FXTheme.currentPalette.bgPressed }
 
-    // Foregrounds
+    // Foregrounds — each step keeps AA (4.5:1) text contrast on `bg` and
+    // `bgElevated`; `fgTertiary` still clears 3:1 on `bgSurface`.
     public static var fg: Color { FXTheme.currentPalette.fg }
     public static var fgSecondary: Color { FXTheme.currentPalette.fgSecondary }
     public static var fgTertiary: Color { FXTheme.currentPalette.fgTertiary }
+    /// Disabled states and purely decorative glyphs only (~2:1). Never use it
+    /// for text or for the only icon inside a control; use `fgTertiary`.
     public static var fgQuaternary: Color { FXTheme.currentPalette.fgQuaternary }
 
     // Accents
     public static var accent: Color { FXTheme.accentColor }
     public static var accentHover: Color { FXTheme.accentHoverColor }
-    /// Foreground used on a solid accent fill. Kept here so controls never
-    /// hardcode a system white and can evolve with the accent palette.
-    public static var onAccent: Color { Color.white }
-    public static var accentSecondary: Color { h(0x4ECDC4) }
+    /// Foreground used on a solid accent fill: white, or the base tone's
+    /// darkest ink for accents too light to carry white text.
+    public static var onAccent: Color {
+        FXTheme.accentColorOption.prefersDarkForeground ? FXTheme.currentPalette.onAccentDark : Color.white
+    }
+    public static var accentSecondary: Color { FXTheme.currentPalette.accentSecondary }
     public static var accentMuted: Color { FXTheme.accentMutedColor }
+    public static var accentSecondaryMuted: Color { FXTheme.currentPalette.accentSecondaryMuted }
 
     // Semantic (mode-adapted)
     public static var success: Color { FXTheme.currentPalette.success }
     public static var warning: Color { FXTheme.currentPalette.warning }
     public static var error: Color { FXTheme.currentPalette.error }
     public static var info: Color { FXTheme.currentPalette.info }
+
+    // Semantic tints for banners, badges, and highlighted rows. Use these
+    // instead of `warning.opacity(…)` and friends.
+    public static var successMuted: Color { FXTheme.currentPalette.successMuted }
+    public static var warningMuted: Color { FXTheme.currentPalette.warningMuted }
+    public static var errorMuted: Color { FXTheme.currentPalette.errorMuted }
+    public static var infoMuted: Color { FXTheme.currentPalette.infoMuted }
 
     // Diff (proper semantic tokens)
     public static var diffAddedBg: Color { FXTheme.currentPalette.diffAddedBg }

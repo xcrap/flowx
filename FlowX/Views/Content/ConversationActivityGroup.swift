@@ -105,7 +105,7 @@ struct ConversationActivityGroup: View {
                     if summary.toolCallCount > 0 {
                         Text("·")
                             .font(FXTypography.caption)
-                            .foregroundStyle(FXColors.fgQuaternary)
+                            .foregroundStyle(FXColors.fgTertiary)
 
                         Text(actionSummary)
                             .font(FXTypography.caption)
@@ -596,7 +596,7 @@ private struct ActivityCommentaryRow: View {
                     .clipShape(RoundedRectangle(cornerRadius: FXRadii.md))
                     .overlay(
                         RoundedRectangle(cornerRadius: FXRadii.md)
-                            .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                            .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
                     )
                 } else {
                     Text(displayedText)
@@ -720,7 +720,7 @@ private struct ActivityToolRow: View {
                     if let toolDetail {
                         Text("·")
                             .font(FXTypography.caption)
-                            .foregroundStyle(FXColors.fgQuaternary)
+                            .foregroundStyle(FXColors.fgTertiary)
 
                         Text(toolDetail)
                             .font(FXTypography.caption)
@@ -944,7 +944,7 @@ private struct ActivityCodePreview: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.sm))
         .overlay {
             RoundedRectangle(cornerRadius: FXRadii.sm)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
         }
     }
 }
@@ -1192,7 +1192,7 @@ private struct ActivityEditDiffView: View {
         .clipShape(RoundedRectangle(cornerRadius: FXRadii.sm))
         .overlay {
             RoundedRectangle(cornerRadius: FXRadii.sm)
-                .strokeBorder(FXColors.borderSubtle, lineWidth: 0.5)
+                .strokeBorder(FXColors.borderSubtle, lineWidth: FXBorderWidth.hairline)
         }
     }
 
@@ -1231,7 +1231,7 @@ private struct ActivityEditDiffView: View {
     private func lineNumber(_ value: Int?) -> some View {
         Text(value.map(String.init) ?? "")
             .font(FXTypography.monoSmall)
-            .foregroundStyle(FXColors.fgQuaternary)
+            .foregroundStyle(FXColors.fgTertiary)
             .frame(width: 42, alignment: .trailing)
             .padding(.horizontal, FXSpacing.xs)
             .padding(.vertical, 1)
@@ -1258,7 +1258,7 @@ private struct ActivityEditDiffView: View {
         case .deletion:
             FXColors.diffRemovedBg
         case .hunk:
-            FXColors.info.opacity(0.08)
+            FXColors.infoMuted
         case .context:
             .clear
         }

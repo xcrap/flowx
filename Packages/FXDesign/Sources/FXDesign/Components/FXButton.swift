@@ -39,10 +39,11 @@ public struct FXButton: View {
             .padding(.vertical, FXSpacing.xs)
             .foregroundStyle(foregroundColor)
             .background(backgroundColor)
+            .background(hoverTint)
             .clipShape(RoundedRectangle(cornerRadius: FXRadii.sm))
             .overlay(
                 RoundedRectangle(cornerRadius: FXRadii.sm)
-                    .strokeBorder(borderColor, lineWidth: 0.5)
+                    .strokeBorder(borderColor, lineWidth: FXBorderWidth.hairline)
             )
             .scaleEffect(!reduceMotion && isPressed ? 0.97 : 1.0)
             .opacity(isEnabled ? 1 : 0.52)
@@ -84,8 +85,14 @@ public struct FXButton: View {
         case .primary: isHovered ? FXColors.accentHover : FXColors.accent
         case .secondary: isHovered ? FXColors.bgHover : FXColors.bgSurface
         case .ghost: isHovered ? FXColors.bgHover : .clear
-        case .danger: isHovered ? FXColors.error.opacity(0.15) : FXColors.error.opacity(0.1)
+        case .danger: FXColors.errorMuted
         }
+    }
+
+    /// The danger tint deepens on hover by layering the muted token twice,
+    /// instead of a second hand-tuned opacity.
+    private var hoverTint: Color {
+        style == .danger && isHovered ? FXColors.errorMuted : .clear
     }
 
     private var borderColor: Color {
