@@ -857,9 +857,8 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
             }
         }
 
-        guard let executable = await discovery.resolvedPath(for: "claude") else {
-            let hint = await discovery.spec(for: "claude")?.installHint ?? "npm install -g @anthropic-ai/claude-code"
-            throw Self.error("Claude Code CLI not found. Install with: \(hint)")
+        guard let launch = await discovery.resolvedLaunch(for: "claude") else {
+            throw Self.error(await discovery.unavailableMessage(for: "claude"))
         }
         if let resumedSessionID {
             try await ensureSessionIsNotActiveElsewhere(resumedSessionID)
@@ -874,7 +873,7 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
         let outputState = ClaudeOutputState()
         let parser = ClaudeStreamParser(controller: controller)
 
-        process.executableURL = executable
+        process.executableURL = launch.executableURL
         process.arguments = Self.buildArguments(
             model: model,
             effort: effort,
@@ -887,7 +886,7 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
-        process.environment = Self.runtimeEnvironment
+        process.environment = launch.environment
         if let workingDirectory {
             let resolved = workingDirectory.standardizedFileURL
             var isDirectory = ObjCBool(false)
@@ -1052,17 +1051,6 @@ public final class ClaudeCodeProvider: AIProvider, AIProviderNativeThreads, AIPr
         var output = help.standardOutput
         output.append(help.standardError)
         return ClaudeSessionActivitySnapshot.helpAdvertisesJSONListing(output)
-    }
-
-    private static var runtimeEnvironment: [String: String] {
-        var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = [
-            "\(NSHomeDirectory())/.local/bin",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            environment["PATH"] ?? "/usr/bin:/bin",
-        ].joined(separator: ":")
-        return environment
     }
 
     private static func nonEmpty(_ value: String?) -> String? {

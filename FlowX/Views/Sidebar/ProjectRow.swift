@@ -230,13 +230,17 @@ struct ProjectRow: View {
                 id: "new-thread-provider",
                 title: "Start with provider",
                 items: providers.map { provider in
-                    let runtimeAvailable = appState.runtimeHealth[provider.id]?.isUsable == true
+                    let health = appState.runtimeHealth[provider.id]
+                    let runtimeAvailable = health?.isUsable == true
+                    let subtitle = switch health {
+                    case .available?: "Provider-native conversation"
+                    case .quarantined?: "Runtime quarantined by macOS · see Settings"
+                    default: "Runtime unavailable · install or refresh in Settings"
+                    }
                     return FXDropdownItem(
                         id: provider.id,
                         title: provider.displayName,
-                        subtitle: runtimeAvailable
-                            ? "Provider-native conversation"
-                            : "Runtime unavailable · install or refresh in Settings",
+                        subtitle: subtitle,
                         isEnabled: runtimeAvailable && !provider.availableModels.isEmpty
                     ) {
                         createThread(providerID: provider.id)

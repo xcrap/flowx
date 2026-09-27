@@ -884,14 +884,14 @@ private actor CodexSession {
             return
         }
 
-        guard let codexURL = await discovery.resolvedPath(for: "codex") else {
-            let hint = await discovery.spec(for: "codex")?.installHint ?? "npm install -g @openai/codex"
+        guard let launch = await discovery.resolvedLaunch(for: "codex") else {
+            let message = await discovery.unavailableMessage(for: "codex")
             throw NSError(domain: "CodexProvider", code: 4, userInfo: [
-                NSLocalizedDescriptionKey: "Codex CLI not found. Install with: \(hint)",
+                NSLocalizedDescriptionKey: message,
             ])
         }
 
-        startServer(executableURL: codexURL)
+        startServer(launch)
 
         for _ in 0..<100 {
             try await Task.sleep(for: .milliseconds(50))
@@ -1089,28 +1089,19 @@ private actor CodexSession {
         return nextID
     }
 
-    private func startServer(executableURL: URL) {
+    private func startServer(_ launch: RuntimeLaunch) {
         let process = Process()
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         let stderrCapture = CodexStderrCapture()
 
-        process.executableURL = executableURL
+        process.executableURL = launch.executableURL
         process.arguments = ["app-server"]
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
-
-        var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "\(NSHomeDirectory())/.local/bin",
-            environment["PATH"] ?? "",
-        ]
-        .joined(separator: ":")
-        process.environment = environment
+        process.environment = launch.environment
 
         if let workingDirectory {
             process.currentDirectoryURL = workingDirectory
@@ -1123,7 +1114,7 @@ private actor CodexSession {
         writer = stdinPipe.fileHandleForWriting
         self.stderrPipe = stderrPipe
         self.stderrCapture = stderrCapture
-        serverExecutableURL = executableURL
+        serverExecutableURL = launch.executableURL
         self.process = process
 
         let outputStream = AsyncStream<Data> { streamContinuation in
